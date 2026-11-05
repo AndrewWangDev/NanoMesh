@@ -1,0 +1,29 @@
+name: "💡 Feature or Architecture Proposal"
+description: "Suggest an idea or architectural improvement for NanoMesh"
+title: "[RFC / Feat]: "
+labels: ["enhancement", "proposal"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Proposals for new inference adapters, scheduling algorithms, and topological optimizations are welcome!
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Problem or Motivation"
+      description: "Is your proposal related to a performance bottleneck, missing model tier, or workflow limitation?"
+      placeholder: "e.g., The linear pipeline cannot currently execute fan-out parallel branches..."
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: "Proposed Solution & Design"
+      description: "Describe the architectural changes, data structures, or protocol updates you envision."
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Alternatives Considered"
+      description: "Any alternative solutions or workarounds you've explored."
