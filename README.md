@@ -373,6 +373,26 @@ npm install
 npm run deploy
 ```
 
+
+### 11. Licensing, Model Attribution & Compliance
+
+#### 11.1 Open-Source License
+NanoMesh is distributed under the terms of the **MIT License**. For full terms and conditions, refer to the [LICENSE](./LICENSE) file.
+
+#### 11.2 Third-Party AI Models & Non-Distribution Notice
+NanoMesh is an orchestration engine and protocol gateway. **NanoMesh does not bundle, host, or vend proprietary model weight binaries.** All inference workloads interact with publicly released open-weights models according to their respective upstream licenses, for example:
+- **SmolLM2-135M / 360M**: Apache License 2.0 (Hugging Face)
+- **Llama 3.1-8B-Instruct**: Llama 3.1 Community License Agreement (Meta Platforms, Inc.)
+
+For detailed attribution and license references, please review the [NOTICE](./NOTICE) file.
+
+#### 11.3 Cryptographic Implementations & Standards
+The WebAuthn / Passkey authentication subsystem (ECDSA P-256 with Web Crypto) and CBOR binary decoder (RFC 8949) are original implementations authored directly from W3C WebAuthn Level 3 and IETF RFC 8949 specifications.
+
+#### 11.4 Privacy by Design & Export Regulations
+- **Client-Side Privacy**: In-browser WebGPU execution processes prompts and vision tensors strictly within the user's local browser memory sandbox, guaranteeing zero telemetry egress and full compliance with GDPR and CCPA data minimization principles.
+- **Export Classification**: Open-source cryptographic source code conforms to EAR99 / EAR 740.13(e) (License Exception TSU).
+
 ---
 
 <a id="简体中文"></a>
@@ -735,6 +755,28 @@ npm install
 # 部署至 Cloudflare Workers
 npm run deploy
 ```
+
+---
+
+
+### 11. 开源协议、模型归属与合规声明
+
+#### 11.1 开源许可证
+NanoMesh 核心代码基于 **MIT 许可证** 开放源代码。完整授权条款请参见 [LICENSE](./LICENSE)。
+
+#### 11.2 第三方模型许可与无权重分发声明
+NanoMesh 定位为自适应推理调度引擎与协议网关，**本项目不打包、不分发、不倒卖任何商业或专有模型权重文件（Weights）**。运行时各算力节点与公开开放权重的模型进行动态交互，严格遵循各上游模型开源许可协议，例如：
+- **SmolLM2-135M / 360M**：Apache License 2.0（Hugging Face）
+- **Llama 3.1-8B-Instruct**：Llama 3.1 Community License Agreement（Meta Platforms, Inc.）
+
+完整模型知识产权与归属列表请参阅 [NOTICE](./NOTICE) 文档。
+
+#### 11.3 密码学实现与标准遵循
+系统内置的 WebAuthn / Passkey 身份认证（基于 Web Crypto 的 ECDSA P-256 校验）与 CBOR 二进制解码器（RFC 8949）均为依据 W3C WebAuthn Level 3 与 IETF RFC 8949 国际公开标准自主编写实现。
+
+#### 11.4 隐私安全与合规保障
+- **端侧数据隐私（GDPR / CCPA）**：端侧 WebGPU 节点执行完全驻留于客户端本地浏览器内存沙箱，原始输入与张量不经过服务端，天然符合数据最小化（Data Minimization）隐私保护原则。
+- **出口合规**：本项目公开源代码符合美国出口管制条例 EAR99 / EAR 740.13(e)（License Exception TSU 公开可用加密软件豁免）。
 
 ---
 

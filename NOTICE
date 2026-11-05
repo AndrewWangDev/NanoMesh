@@ -1,0 +1,46 @@
+NanoMesh
+Copyright (c) 2026 Andrew Wang Dev and NanoMesh Contributors.
+
+This product includes software developed as part of the NanoMesh Project
+(https://github.com/AndrewWangDev/nanomesh).
+
+========================================================================
+Open Source License & Third-Party AI Model Attribution Notice
+========================================================================
+
+1. Open-Source Engine License
+   NanoMesh is distributed under the MIT License. A copy of the license is
+   included in the LICENSE file.
+
+2. Third-Party AI Model Licensing & Non-Distribution Notice
+   NanoMesh operates as an adaptive runtime orchestration engine and protocol
+   gateway. NanoMesh DOES NOT bundle, host, mirror, or vend proprietary AI model
+   weights or dataset artifacts within this repository.
+
+   Runtime inference nodes interact with open-weights models dynamically
+   retrieved or accessed via upstream model registries according to their
+   respective upstream licenses, for example:
+
+   - SmolLM2 (SmolLM2-135M / SmolLM2-360M)
+     Developed by Hugging Face.
+     Licensed under the Apache License, Version 2.0.
+     https://huggingface.co/HuggingFaceTB/SmolLM2-135M
+
+   - Llama 3.1 (Meta-Llama-3.1-8B-Instruct)
+     Developed by Meta Platforms, Inc.
+     Licensed under the Llama 3.1 Community License Agreement.
+     Copyright (c) Meta Platforms, Inc. All Rights Reserved.
+     https://llama.meta.com/llama3/license/
+
+3. Cryptographic Implementation & Standard Compliance
+   The WebAuthn / Passkey authentication subsystem (ECDSA P-256 over Web Crypto)
+   and the CBOR payload decoding engine (RFC 8949) are original implementations
+   authored directly from W3C WebAuthn Level 3 and IETF RFC 8949 specifications.
+
+4. Export Administration & Privacy Compliance
+   - Export Regulations: NanoMesh provides publicly available encryption and
+     orchestration source code conforming to License Exception TSU / EAR 740.13(e)
+     of the United States Export Administration Regulations (EAR99).
+   - Data Minimization (GDPR / CCPA): The client-side WebGPU execution tier
+     processes model tensors strictly within the user's local browser memory
+     sandbox without telemetry egress or centralized logging.
