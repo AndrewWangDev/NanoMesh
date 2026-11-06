@@ -432,7 +432,7 @@
             </div>
           </div>
         </div>
-        <div class="chat-disclaimer" id="chat-disclaimer" data-i18n="chat.disclaimer" data-i18n-html="true">AI may make mistakes. By using, you agree to our <a href="/terms.html" target="_blank">Terms of Service</a> and <a href="/privacy.html" target="_blank">Privacy Policy</a>.</a> 与 <a href="/privacy.html" target="_blank">隐私政策</a>。</div>
+        <div class="chat-disclaimer" id="chat-disclaimer" data-i18n="chat.disclaimer" data-i18n-html="true">AI may make mistakes. By using, you agree to our <a href="/terms.html" target="_blank">Terms of Service</a> and <a href="/privacy.html" target="_blank">Privacy Policy</a>.</div>
       </div>
     </section>
   </div>
@@ -538,16 +538,17 @@
                 <label class="form-label" data-i18n="settings.account.oldPassword">Old Password</label>
                 <div class="input-group" style="margin-bottom: 0;">
                   <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
-                  <input type="password" id="settings-old-password" class="input-field" data-i18n="settings.account.oldPassword" placeholder="旧密码">
-                Old Password
+                  <input type="password" id="settings-old-password" class="input-field" data-i18n-placeholder="settings.account.oldPassword" placeholder="Old Password">
                 </div>
               </div>
               <div class="form-group" style="margin-bottom: 1rem;">
                 <label class="form-label" data-i18n="settings.account.newPassword">New Password</label>
                 <div class="input-group" style="margin-bottom: 0;">
                   <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
-                  <input type="password" id="settings-new-password" class="input-field" data-i18n="settings.account.newPasswordHint" placeholder="8-64位，需包含字母和数字" style="padding-right: 4.5rem; width: 100%; box-sizing: border-box;">
-                  8-64 chars, letters & numbers</svg>
+                  <input type="password" id="settings-new-password" class="input-field" data-i18n-placeholder="settings.account.newPasswordHint" placeholder="8-64 chars, letters & numbers" style="padding-right: 4.5rem; width: 100%; box-sizing: border-box;">
+                  <div class="input-actions" style="position: absolute; right: 0.5rem; top: 50%; transform: translateY(-50%); display: flex; gap: 0.25rem;">
+                    <button type="button" class="action-icon-btn" id="generate-pwd-btn" title="Generate Password">
+                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.92-10.28l5.67-5.67"/></svg>
                     </button>
                     <button type="button" class="action-icon-btn" id="toggle-new-pwd-btn" title="Show Password">
                       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
@@ -559,8 +560,10 @@
                 <label class="form-label" data-i18n="settings.account.confirmNewPassword">Confirm New Password</label>
                 <div class="input-group" style="margin-bottom: 0;">
                   <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
-                  <input type="password" id="settings-confirm-password" class="input-field" data-i18n="settings.account.confirmNewPassword" placeholder="确认新密码" style="padding-right: 2.5rem; width: 100%; box-sizing: border-box;">
-                  Confirm New Password</path><circle cx="12" cy="12" r="3"></circle></svg>
+                  <input type="password" id="settings-confirm-password" class="input-field" data-i18n-placeholder="settings.account.confirmNewPassword" placeholder="Confirm New Password" style="padding-right: 2.5rem; width: 100%; box-sizing: border-box;">
+                  <div class="input-actions" style="position: absolute; right: 0.5rem; top: 50%; transform: translateY(-50%); display: flex; gap: 0.25rem;">
+                    <button type="button" class="action-icon-btn" id="toggle-confirm-pwd-btn" title="Show Password">
+                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
                     </button>
                   </div>
                 </div>
