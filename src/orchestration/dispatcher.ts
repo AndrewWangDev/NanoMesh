@@ -243,6 +243,7 @@ export async function executeDAGStream(
 
       async function refundReservedCredit() {
         if (options.hasPreDeducted) {
+          options.hasPreDeducted = false;
           try {
             await env.DB.prepare(
               "UPDATE users SET credits = credits + 1 WHERE user_id = ?"
@@ -829,10 +830,8 @@ export async function executeDAGStream(
         });
 
       } catch (err: any) {
-        // If task failed before generating outputs and credit was pre-deducted, refund it to prevent unfair loss
-        if (totalCost === 0) {
-          await refundReservedCredit();
-        }
+        // Unconditionally release pre-deducted reservation if DAG fails to deliver end-to-end (All-or-Nothing delivery)
+        await refundReservedCredit();
         sendEvent('dag_error', {
           error: err.message || 'Execution error'
         });
