@@ -22,7 +22,19 @@ export async function getSession(request: Request, env: Env): Promise<SessionPay
   if (!token) return null;
 
   const payload = await verifyJWT(token, env.JWT_SECRET);
-  return payload as SessionPayload | null;
+  if (!payload || !payload.userId) return null;
+
+  // Verify token_version and active status against database (supports immediate session revocation and blocks deleted accounts)
+  const user = await env.DB.prepare("SELECT token_version, email FROM users WHERE user_id = ?").bind(payload.userId).first<{token_version: number | null; email: string}>();
+  if (!user || (user.email && user.email.startsWith("deleted_"))) return null;
+
+  const currentVersion = user.token_version ?? 1;
+  const tokenVersion = payload.tokenVersion ?? 1;
+  if (tokenVersion < currentVersion) {
+    return null;
+  }
+
+  return payload as SessionPayload;
 }
 
 export async function requireAuth(request: Request, env: Env): Promise<SessionPayload | Response> {

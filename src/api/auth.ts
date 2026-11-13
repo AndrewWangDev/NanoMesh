@@ -27,8 +27,49 @@ function setCookieHeaders(token: string | null): Headers {
 }
 
 function generateReferralCode(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(3));
-  return 'NM-' + Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase().substring(0, 6);
+  const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+  const bytes = crypto.getRandomValues(new Uint8Array(6));
+  let code = "NM-";
+  for (let i = 0; i < 6; i++) {
+    code += alphabet[bytes[i] % 32];
+  }
+  return code;
+}
+
+async function generateUniqueReferralCode(db: D1Database): Promise<string> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const code = generateReferralCode();
+    const existing = await db.prepare("SELECT user_id FROM users WHERE referral_code = ?").bind(code).first();
+    if (!existing) return code;
+  }
+  return generateReferralCode();
+}
+
+function generateSecureVerificationCode(): string {
+  const max = 900000;
+  const limit = Math.floor(0xffffffff / max) * max;
+  const array = new Uint32Array(1);
+  do {
+    crypto.getRandomValues(array);
+  } while (array[0] >= limit);
+  return (100000 + (array[0] % max)).toString();
+}
+
+async function generateOAuthUsername(db: D1Database, rawName?: string, rawEmail?: string): Promise<string> {
+  let base = (rawName || rawEmail?.split('@')[0] || 'user')
+    .replace(/[^a-zA-Z0-9]/g, '')
+    .toLowerCase()
+    .substring(0, 12);
+  if (base.length < 3) base = 'user';
+
+  for (let i = 0; i < 5; i++) {
+    const randBytes = crypto.getRandomValues(new Uint8Array(2));
+    const suffix = Array.from(randBytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    const candidate = `${base}_${suffix}`.substring(0, 20);
+    const exists = await db.prepare("SELECT user_id FROM users WHERE username = ?").bind(candidate).first();
+    if (!exists) return candidate;
+  }
+  return `user_${crypto.randomUUID().substring(0, 8)}`;
 }
 
 export async function handleRegister(req: Request, env: Env) {
@@ -54,9 +95,22 @@ export async function handleRegister(req: Request, env: Env) {
     return Response.json({ error: "error.invalidPasswordFormat" }, { status: 400 });
   }
 
-  // Check code
-  const codeRecord = await env.DB.prepare("SELECT * FROM verification_codes WHERE email = ? AND code = ? AND expires_at > datetime('now')").bind(email || '', code || '').first();
-  if (!codeRecord) {
+  // Check code with anti-brute force tracking
+  const activeCode = await env.DB.prepare(
+    "SELECT id, code, attempts FROM verification_codes WHERE email = ? AND expires_at > datetime('now') ORDER BY id DESC LIMIT 1"
+  ).bind(email || '').first<{ id: number; code: string; attempts: number }>();
+
+  if (!activeCode) {
+    return Response.json({ error: "error.invalidCode" }, { status: 400 });
+  }
+
+  if (activeCode.attempts >= 5) {
+    await env.DB.prepare("DELETE FROM verification_codes WHERE id = ?").bind(activeCode.id).run();
+    return Response.json({ error: "error.codeLockedTooManyAttempts" }, { status: 400 });
+  }
+
+  if (activeCode.code !== code) {
+    await env.DB.prepare("UPDATE verification_codes SET attempts = attempts + 1 WHERE id = ?").bind(activeCode.id).run();
     return Response.json({ error: "error.invalidCode" }, { status: 400 });
   }
 
@@ -89,7 +143,7 @@ export async function handleRegister(req: Request, env: Env) {
 
   const hash = bcrypt.hashSync(password, 10);
   const userId = crypto.randomUUID();
-  const newReferralCode = generateReferralCode();
+  const newReferralCode = await generateUniqueReferralCode(env.DB);
   const initialCredits = referrerId ? 150 : 100;
 
   await env.DB.prepare(`
@@ -120,9 +174,9 @@ export async function handleRegister(req: Request, env: Env) {
     `).bind(crypto.randomUUID(), referrerId, referrerCredits?.credits || 0, username, (userId || '')).run();
   }
 
-  await env.DB.prepare("DELETE FROM verification_codes WHERE id = ?").bind(codeRecord.id).run();
+  await env.DB.prepare("DELETE FROM verification_codes WHERE id = ?").bind(activeCode.id).run();
 
-  const token = await signJWT({ userId }, env.JWT_SECRET, SESSION_TTL_SECONDS);
+  const token = await signJWT({ userId, tokenVersion: 1 }, env.JWT_SECRET, SESSION_TTL_SECONDS);
   
   return new Response(JSON.stringify({ user_id: (userId || ''), username, email, credits: initialCredits }), {
     headers: setCookieHeaders(token)
@@ -140,7 +194,7 @@ export async function handleLogin(req: Request, env: Env) {
     return Response.json({ error: "Invalid captcha" }, { status: 400 });
   }
 
-  const user = await env.DB.prepare("SELECT * FROM users WHERE LOWER(email) = ?").bind(email || '').first<User & { password_hash: string | null }>();
+  const user = await env.DB.prepare("SELECT * FROM users WHERE LOWER(email) = ?").bind(email || '').first<User & { password_hash: string | null; token_version: number | null }>();
   if (!user) return Response.json({ error: "Invalid credentials" }, { status: 401 });
   
   if (!user.password_hash) {
@@ -150,7 +204,7 @@ export async function handleLogin(req: Request, env: Env) {
   const valid = bcrypt.compareSync(password, user.password_hash);
   if (!valid) return Response.json({ error: "Invalid credentials" }, { status: 401 });
 
-  const token = await signJWT({ userId: user.user_id }, env.JWT_SECRET, SESSION_TTL_SECONDS);
+  const token = await signJWT({ userId: user.user_id, tokenVersion: user.token_version || 1 }, env.JWT_SECRET, SESSION_TTL_SECONDS);
   
   return new Response(JSON.stringify({ 
     user_id: user.user_id, 
@@ -190,7 +244,7 @@ export async function handleSendCode(req: Request, env: Env) {
     return Response.json({ error: "error.wait60s" }, { status: 429 });
   }
 
-  const code = Math.floor(100000 + Math.random() * 900000).toString();
+  const code = generateSecureVerificationCode();
 
   await env.DB.prepare(`
     INSERT INTO verification_codes (email, code, expires_at) 
@@ -339,12 +393,13 @@ async function handleOAuthCallback(req: Request, env: Env, provider: 'github' | 
         await env.DB.prepare("INSERT OR IGNORE INTO user_oauth_bindings (user_id, provider, provider_id) VALUES (?, ?, ?)").bind(userId || '', provider, String(profile.id || '')).run();
       } else {
         userId = crypto.randomUUID();
-        const oauthReferralCode = generateReferralCode();
+        const oauthReferralCode = await generateUniqueReferralCode(env.DB);
+        const safeUsername = await generateOAuthUsername(env.DB, profile.username || profile.name, profile.email);
         // Insert new user
         await env.DB.prepare(`
           INSERT INTO users (user_id, username, email, avatar_url, credits, referral_code)
           VALUES (?, ?, ?, ?, 100, ?)
-        `).bind(userId || '', profile.username || profile.name || ('user_' + Math.random().toString(36).slice(2, 8)), (profile.email || "").toLowerCase(), avatarToSet, oauthReferralCode).run();
+        `).bind(userId || '', safeUsername, (profile.email || "").toLowerCase(), avatarToSet, oauthReferralCode).run();
         // Write signup bonus ledger
         await env.DB.prepare(`
           INSERT INTO credit_ledger (ledger_id, user_id, category, amount, balance, title, detail)
@@ -356,7 +411,8 @@ async function handleOAuthCallback(req: Request, env: Env, provider: 'github' | 
     }
   }
 
-    const token = await signJWT({ userId }, env.JWT_SECRET, SESSION_TTL_SECONDS);
+    const dbUser = await env.DB.prepare("SELECT token_version FROM users WHERE user_id = ?").bind(userId).first<{token_version: number | null}>();
+    const token = await signJWT({ userId, tokenVersion: dbUser?.token_version || 1 }, env.JWT_SECRET, SESSION_TTL_SECONDS);
     // Cannot use Response.redirect() — it returns an immutable response.
     // Must manually construct response with Location + Set-Cookie.
     return new Response(null, {
