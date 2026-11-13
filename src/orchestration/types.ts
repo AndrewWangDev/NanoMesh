@@ -82,7 +82,7 @@ export interface ModelMetadata {
   prior_score: number;
   scenario_anchors: string[];
   anchor_embeddings?: number[][] | null;
-  inference_target?: 'cloud' | 'browser';
+  inference_target?: 'cloud' | 'browser' | 'heavy';
   browser_runtime?: 'webgpu' | 'wasm';
   download_size_bytes?: number;
 }

@@ -4317,6 +4317,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         stepBadge.className = 'assistant-step-badge completed';
         stepBadge.innerHTML = `<span class="step-check">✓</span> <span>${escapeHtml(roleName)} ${isEn ? 'Done' : '完成'}</span> <span class="step-time">${timeStr}</span>`;
       }
+    } else if (event === 'node_failover') {
+      const isEn = getLocale() === 'en';
+      const nodeCard = document.getElementById('dag-node-' + data.role_id);
+      if (nodeCard) {
+        const modelEl = nodeCard.querySelector('.dag-node-model') || nodeCard.querySelector('.node-model');
+        if (modelEl) modelEl.textContent = data.fallback_model;
+      }
+      if (typeof showToast === 'function') {
+        showToast(isEn ? (data.reason_en || 'Failover to standby node') : (data.reason_zh || '故障转移至备选节点'), 'warning');
+      }
     } else if (event === 'security_blocked') {
       if (streamingRafMap.has(assistantId)) {
         cancelAnimationFrame(streamingRafMap.get(assistantId));
