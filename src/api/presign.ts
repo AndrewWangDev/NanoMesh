@@ -150,8 +150,7 @@ export async function handleChatUpload(request: Request, env: Env): Promise<Resp
   const contentType = file.type || 'application/octet-stream';
 
   try {
-    const fileBuf = await file.arrayBuffer();
-    await env.R2.put(r2Key, fileBuf, {
+    await env.R2.put(r2Key, file.stream(), {
       httpMetadata: {
         contentType: contentType
       },
