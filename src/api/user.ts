@@ -1,5 +1,6 @@
 import { Env } from "../types";
 import { getSession } from "../auth/middleware";
+import { signJWT } from "../auth/jwt";
 import * as bcrypt from "bcryptjs";
 
 export async function handleUpdateProfile(req: Request, env: Env) {
@@ -38,7 +39,7 @@ export async function handleUpdatePassword(req: Request, env: Env) {
   }
 
   // Get user
-  const user = await env.DB.prepare("SELECT password_hash FROM users WHERE user_id = ?").bind(session.userId).first<{password_hash: string | null}>();
+  const user = await env.DB.prepare("SELECT password_hash, token_version FROM users WHERE user_id = ?").bind(session.userId).first<{password_hash: string | null; token_version: number | null}>();
   if (!user) return Response.json({ error: "error.userNotFound" }, { status: 404 });
 
   if (user.password_hash) {
@@ -50,9 +51,16 @@ export async function handleUpdatePassword(req: Request, env: Env) {
   }
 
   const newHash = bcrypt.hashSync(newPassword, 10);
-  await env.DB.prepare("UPDATE users SET password_hash = ? WHERE user_id = ?").bind(newHash, session.userId).run();
+  const nextTokenVersion = (user.token_version ?? 1) + 1;
+  await env.DB.prepare("UPDATE users SET password_hash = ?, token_version = ? WHERE user_id = ?").bind(newHash, nextTokenVersion, session.userId).run();
 
-  return Response.json({ success: true });
+  const newToken = await signJWT({ userId: session.userId, tokenVersion: nextTokenVersion }, env.JWT_SECRET, 30 * 24 * 3600);
+  const response = Response.json({ success: true });
+  response.headers.set(
+    'Set-Cookie',
+    `session=${newToken}; HttpOnly; Path=/; Max-Age=${30 * 24 * 3600}; SameSite=Lax; Secure`
+  );
+  return response;
 }
 
 export async function handleUpdateAvatar(req: Request, env: Env) {
@@ -139,10 +147,11 @@ export async function handleDeleteAccount(req: Request, env: Env) {
     SET email = 'deleted_' || user_id, 
         oauth_id = NULL, 
         oauth_provider = NULL, 
-        username = 'Deleted User', 
+        username = 'del_' || substr(user_id, 1, 12), 
         password_hash = NULL, 
         avatar_url = NULL, 
-        credits = 0 
+        credits = 0,
+        token_version = token_version + 1
     WHERE user_id = ?
   `).bind(session.userId).run();
 

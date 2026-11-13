@@ -414,7 +414,7 @@ export async function handlePasskeyLoginVerify(request: Request, env: Env): Prom
     .run();
 
   // 6. Issue JWT session token
-  const token = await signJWT({ userId: user.user_id }, env.JWT_SECRET, SESSION_TTL_SECONDS);
+  const token = await signJWT({ userId: user.user_id, tokenVersion: user.token_version || 1 }, env.JWT_SECRET, SESSION_TTL_SECONDS);
 
   const headers = new Headers({ "Content-Type": "application/json" });
   headers.append("Set-Cookie", `session=${token}; HttpOnly; Path=/; Max-Age=${SESSION_TTL_SECONDS}; SameSite=Lax; Secure`);

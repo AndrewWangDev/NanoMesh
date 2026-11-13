@@ -32,10 +32,12 @@ export interface User {
   avatar_url: string | null;
   credits: number;
   frozen_credits: number;
+  token_version?: number;
 }
 
 export interface SessionPayload {
   userId: string;
+  tokenVersion?: number;
   iat?: number;
   exp?: number;
 }
