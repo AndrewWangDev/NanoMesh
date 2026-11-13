@@ -26,10 +26,20 @@ function isSafeExternalUrl(urlStr: string): boolean {
   try {
     const parsed = new URL(urlStr);
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
-    const host = parsed.hostname.toLowerCase();
-    if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0.0.0.0') return false;
+
+    // Clean IPv6 host brackets (e.g. "[::1]" -> "::1")
+    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+
+    // Loopback, all-interfaces, and unroutable addresses (IPv4 & IPv6)
+    if (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host === '::1' || host === '::') return false;
     if (host.endsWith('.local') || host.endsWith('.internal')) return false;
 
+    // IPv6 Private & Link-Local Ranges:
+    // - fc00::/7 (Unique Local Address, covers fc00:: to fdff::)
+    // - fe80::/10 (Link-Local)
+    if (host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe80:')) return false;
+
+    // IPv4 Private & Link-Local Ranges:
     const ip = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
     if (ip) {
       const [o1, o2] = [parseInt(ip[1], 10), parseInt(ip[2], 10)];

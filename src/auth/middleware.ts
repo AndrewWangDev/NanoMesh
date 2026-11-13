@@ -25,7 +25,18 @@ export async function getSession(request: Request, env: Env): Promise<SessionPay
   if (!payload || !payload.userId) return null;
 
   // Verify token_version and active status against database (supports immediate session revocation and blocks deleted accounts)
-  const user = await env.DB.prepare("SELECT token_version, email FROM users WHERE user_id = ?").bind(payload.userId).first<{token_version: number | null; email: string}>();
+  let user: { token_version: number | null; email: string } | null = null;
+  try {
+    user = await env.DB.prepare(
+      "SELECT token_version, email FROM users WHERE user_id = ?"
+    ).bind(payload.userId).first<{token_version: number | null; email: string}>();
+  } catch (dbErr) {
+    // Graceful fallback during migration deployment window if token_version is not yet applied
+    user = await env.DB.prepare(
+      "SELECT email FROM users WHERE user_id = ?"
+    ).bind(payload.userId).first<{email: string}>().then(r => r ? { token_version: 1, email: r.email } : null);
+  }
+
   if (!user || (user.email && user.email.startsWith("deleted_"))) return null;
 
   const currentVersion = user.token_version ?? 1;
