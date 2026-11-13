@@ -80,3 +80,28 @@ export async function verifyJWT(token: string, secret: string): Promise<any | nu
     return null;
   }
 }
+
+export async function signHeavyNodeToken(
+  claims: {
+    sub: string;
+    sid?: string;
+    eid?: string;
+    rid?: string;
+    mid?: string;
+    bdg?: string;
+  },
+  secret: string
+): Promise<string> {
+  const payload = {
+    iss: "nanomesh-edge",
+    aud: "nanomesh-heavy",
+    sub: claims.sub,
+    sid: claims.sid || "",
+    eid: claims.eid || "",
+    rid: claims.rid || "",
+    mid: claims.mid || "",
+    bdg: claims.bdg || "",
+    jti: crypto.randomUUID()
+  };
+  return await signJWT(payload, secret, 60);
+}

@@ -23,6 +23,7 @@ export interface Env {
   RESEND_FROM_EMAIL: string;
   BACKEND_URL: string;
   FRONTEND_URL: string;
+  HEAVY_JWT_SECRET?: string;
 }
 
 export interface User {

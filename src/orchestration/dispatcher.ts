@@ -6,7 +6,8 @@ import {
   lookupDeterministicCache, 
   storeDeterministicCache 
 } from "./signature";
-import { InstantiatedDAG, UnifiedProtocolEnvelope } from "./types";
+import { InstantiatedDAG, ModelMetadata, UnifiedProtocolEnvelope } from "./types";
+import { signHeavyNodeToken } from "../auth/jwt";
 
 export interface ExecutionOptions {
   userId: string;
@@ -20,6 +21,13 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
     binary += String.fromCharCode(bytes[i]);
   }
   return btoa(binary);
+}
+
+async function computeSha256Hex(data: string): Promise<string> {
+  const msgUint8 = new TextEncoder().encode(data);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 function isSafeExternalUrl(urlStr: string): boolean {
@@ -603,53 +611,124 @@ export async function executeDAGStream(
               throw new Error(`工作流执行中断：岗位【${node.role.name_zh}】强依赖图像资产输入，但未能检索到图片实体（R2 Key: ${imageAsset?.r2_key || '未指定'}）。严禁越权降级或跳过执行。`);
             }
 
-            // 4. Candidate Endpoints: STRICTLY Top-1 Primary + Top-2/Top-3 Standby Models from Step 3 Arbitration!
+            // 4. Candidate Models: STRICTLY Top-1 Primary + Top-2/Top-3 Standby Models from Step 3 Arbitration!
+            // Mathematically pre-filtered by hardFilterModels and ranked by scoreAndRankRoleModels.
             // ABSOLUTELY NO EXTERNAL ARBITRARY MODELS INJECTED!
-            const candidateEndpoints: string[] = [
-              node.selected_model.endpoint,
-              ...node.standby_models.map(m => m.endpoint)
-            ].filter((ep, i, arr) => ep && arr.indexOf(ep) === i);
+            const candidateModels: ModelMetadata[] = [
+              node.selected_model,
+              ...node.standby_models
+            ].filter((m, i, arr) => m && m.endpoint && arr.findIndex(x => x.model_id === m.model_id) === i);
 
             // 5. Execute candidate pool sequentially (Primary -> Standby Failover)
             let isExecutionSuccess = false;
             let didStreamChunks = false;
+            let actualExecutingModel: ModelMetadata = node.selected_model;
             const candidateErrors: string[] = [];
 
-            for (const endpoint of candidateEndpoints) {
-              if (!env.AI) break;
+            for (let attemptIdx = 0; attemptIdx < candidateModels.length; attemptIdx++) {
+              const currentCandidate = candidateModels[attemptIdx];
+              const endpoint = currentCandidate.endpoint;
+              if (!env.AI && !endpoint.startsWith('http')) break;
+
+              // Transparent failover notice: notify frontend explicitly when falling back to Standby models
+              if (attemptIdx > 0) {
+                const previousCandidate = candidateModels[attemptIdx - 1];
+                sendEvent('node_failover', {
+                  role_id: node.role.role_id,
+                  role_name: node.role.name_zh,
+                  failed_model: previousCandidate.display_name,
+                  failed_model_id: previousCandidate.model_id,
+                  fallback_model: currentCandidate.display_name,
+                  fallback_model_id: currentCandidate.model_id,
+                  attempt: attemptIdx + 1,
+                  total_candidates: candidateModels.length,
+                  reason_zh: `首选算力节点【${previousCandidate.display_name}】响应超时或不可用，透明故障转移至仲裁备选节点【${currentCandidate.display_name}】`,
+                  reason_en: `Primary node [${previousCandidate.display_name}] timed out or unavailable, transparent failover to standby node [${currentCandidate.display_name}]`
+                });
+              }
+
               try {
                 if (endpoint.startsWith('http')) {
                   if (!isSafeExternalUrl(endpoint)) {
                     console.warn(`[Dispatcher Security] Blocked SSRF attempt to unsafe endpoint: ${endpoint}`);
-                    candidateErrors.push(`[${endpoint}]: 目标地址不安全或属于受保护的私有网络`);
+                    candidateErrors.push(`[${currentCandidate.display_name}]: 目标地址不安全或属于受保护的私有网络`);
                     continue;
                   }
-                  // External API candidate endpoint (e.g. Alibaba Cloud Qwen2-VL)
-                  try {
-                    const extRes = await callWithTimeout(async () => {
-                      const fRes = await fetch(endpoint, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                          prompt: promptContent,
-                          image: imageB64
-                        })
-                      });
-                      if (!fRes.ok) throw new Error(`HTTP ${fRes.status}`);
-                      return await fRes.json();
-                    }, 10000);
-                    const parsed = await parseAIResponse(extRes);
-                    if (parsed && parsed.length > 5) {
-                      nodeOutput = parsed;
-                      isExecutionSuccess = true;
-                      break;
-                    } else {
-                      candidateErrors.push(`[${endpoint}]: 输出过短或空 (len=${parsed?.length || 0})`);
+
+                  // Dedicated Heavy Node Execution (AWS Lightsail via Cloudflare Tunnel)
+                  // Secured with single-use ephemeral JWT + SHA-256 body digest verification (anti-tamper/anti-replay)
+                  const chatPayload = {
+                    model: currentCandidate.model_id || "Meta-Llama-3.1-8B-Instruct",
+                    messages: [
+                      { role: "system", content: systemPrompt },
+                      { role: "user", content: promptContent }
+                    ],
+                    stream: isTailNode,
+                    max_tokens: 2048,
+                    temperature: 0.2
+                  };
+                  const payloadStr = JSON.stringify(chatPayload);
+                  const bodyDigest = await computeSha256Hex(payloadStr);
+
+                  const heavySecret = env.HEAVY_JWT_SECRET || env.JWT_SECRET;
+                  const heavyToken = await signHeavyNodeToken(
+                    {
+                      sub: options.userId,
+                      sid: envelope.session_id,
+                      eid: envelope.envelope_id,
+                      rid: node.role.role_id,
+                      mid: currentCandidate.model_id,
+                      bdg: bodyDigest
+                    },
+                    heavySecret
+                  );
+
+                  const parsed = await callWithTimeout(async () => {
+                    const fRes = await fetch(endpoint, {
+                      method: 'POST',
+                      headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${heavyToken}`,
+                        'User-Agent': 'NanoMesh-Edge-Dispatcher/1.0'
+                      },
+                      body: payloadStr
+                    });
+
+                    // Fail-fast on authentication/tampering violations (NEVER failover on security errors!)
+                    if (fRes.status === 401 || fRes.status === 403) {
+                      const errText = await fRes.text().catch(() => '');
+                      throw new Error(`[SECURITY_REJECTED] 算力网关鉴权拒绝 (HTTP ${fRes.status}): ${errText}`);
                     }
-                  } catch (extErr: any) {
-                    candidateErrors.push(`[${endpoint}]: ${extErr.message}`);
-                    console.warn(`External candidate [${endpoint}] failed:`, extErr.message);
-                    continue;
+
+                    if (!fRes.ok) {
+                      const errText = await fRes.text().catch(() => '');
+                      throw new Error(`HTTP ${fRes.status}: ${errText || fRes.statusText}`);
+                    }
+
+                    if (isTailNode && fRes.body) {
+                      return await parseAIResponse(fRes.body, (chunkText) => {
+                        if (chunkText) {
+                          didStreamChunks = true;
+                          sendEvent('text_chunk', {
+                            role_id: node.role.role_id,
+                            chunk: chunkText,
+                            cache_hit: false
+                          });
+                        }
+                      });
+                    } else {
+                      const jsonRes = await fRes.json();
+                      return await parseAIResponse(jsonRes);
+                    }
+                  }, 45000);
+
+                  if (parsed && parsed.length > 5) {
+                    nodeOutput = parsed;
+                    actualExecutingModel = currentCandidate;
+                    isExecutionSuccess = true;
+                    break;
+                  } else {
+                    candidateErrors.push(`[${currentCandidate.display_name}]: 输出过短或空 (len=${parsed?.length || 0})`);
                   }
                 } else if (endpoint.includes('moondream') && imageB64) {
                   // Moondream 3.1 Vision Language Model (MoE 9B/2B active)
@@ -664,10 +743,11 @@ export async function executeDAGStream(
                   const parsed = await parseAIResponse(aiRes);
                   if (parsed && parsed.length > 5) {
                     nodeOutput = parsed;
+                    actualExecutingModel = currentCandidate;
                     isExecutionSuccess = true;
                     break;
                   } else {
-                    candidateErrors.push(`[${endpoint}]: 解析输出过短或空 (len=${parsed?.length || 0})`);
+                    candidateErrors.push(`[${currentCandidate.display_name}]: 解析输出过短或空 (len=${parsed?.length || 0})`);
                   }
                 } else if (endpoint.includes('llava') && imageBytes) {
                   // LLaVA 1.5 7B Vision Model
@@ -682,10 +762,11 @@ export async function executeDAGStream(
                   const parsed = await parseAIResponse(aiRes);
                   if (parsed && parsed.length > 5) {
                     nodeOutput = parsed;
+                    actualExecutingModel = currentCandidate;
                     isExecutionSuccess = true;
                     break;
                   } else {
-                    candidateErrors.push(`[${endpoint}]: 解析输出过短或空 (len=${parsed?.length || 0})`);
+                    candidateErrors.push(`[${currentCandidate.display_name}]: 解析输出过短或空 (len=${parsed?.length || 0})`);
                   }
                 } else if (isImageNode && imageBytes) {
                   // Other Workers AI Vision models (e.g. LLaMA Vision)
@@ -700,10 +781,11 @@ export async function executeDAGStream(
                   const parsed = await parseAIResponse(aiRes);
                   if (parsed && parsed.length > 5) {
                     nodeOutput = parsed;
+                    actualExecutingModel = currentCandidate;
                     isExecutionSuccess = true;
                     break;
                   } else {
-                    candidateErrors.push(`[${endpoint}]: 解析输出过短或空 (len=${parsed?.length || 0})`);
+                    candidateErrors.push(`[${currentCandidate.display_name}]: 解析输出过短或空 (len=${parsed?.length || 0})`);
                   }
                 } else if (!isImageNode && endpoint.startsWith('@cf/')) {
                   // Text Model Execution with token-by-token streaming on tail node
@@ -732,22 +814,26 @@ export async function executeDAGStream(
                   });
                   if (parsed && parsed.length > 5) {
                     nodeOutput = parsed;
+                    actualExecutingModel = currentCandidate;
                     isExecutionSuccess = true;
                     break;
                   } else {
-                    candidateErrors.push(`[${endpoint}]: 解析输出过短或空 (len=${parsed?.length || 0})`);
+                    candidateErrors.push(`[${currentCandidate.display_name}]: 解析输出过短或空 (len=${parsed?.length || 0})`);
                   }
                 }
               } catch (execErr: any) {
-                candidateErrors.push(`[${endpoint}]: ${execErr.message}`);
-                console.warn(`Node [${node.role.name_zh}] candidate [${endpoint}] failed/timed out:`, execErr.message);
+                if (execErr.message?.includes('[SECURITY_REJECTED]')) {
+                  throw execErr;
+                }
+                candidateErrors.push(`[${currentCandidate.display_name}]: ${execErr.message}`);
+                console.warn(`Node [${node.role.name_zh}] candidate [${currentCandidate.display_name}] failed/timed out:`, execErr.message);
                 // Failover to next candidate in this role's arbitrated pool!
               }
             }
 
             // 6. Fail-Fast: If all Top-3 models in this role's pool failed, ABORT! NO ARBITRARY FALLBACK!
             if (!isExecutionSuccess || !nodeOutput.trim()) {
-              throw new Error(`岗位【${node.role.name_zh}】的精选模型池（${candidateEndpoints.join(', ')}）全部执行失败或超时。原因：${candidateErrors.join('；')}`);
+              throw new Error(`岗位【${node.role.name_zh}】的仲裁候选模型池（${candidateModels.map(m => m.display_name).join(', ')}）全部执行失败或超时。原因：${candidateErrors.join('；')}`);
             }
 
             // Stream output chunk (only tail node or single-node outputs directly to final answer, if not already streamed)
@@ -769,26 +855,36 @@ export async function executeDAGStream(
                                         nodeOutput.startsWith('已基于输入完成');
 
             if (isExecutionSuccess && !isSuspiciousNoImage && nodeOutput.length > 20) {
+              const actualCacheKey = (actualExecutingModel.model_id === node.selected_model.model_id)
+                ? cacheKey
+                : await computeDeterministicSignature(
+                    node.role.role_id,
+                    actualExecutingModel.model_id,
+                    inputDigest,
+                    fullPrompt
+                  );
               await storeDeterministicCache(
                 env,
-                cacheKey,
+                actualCacheKey,
                 node.role.role_id,
-                node.selected_model.model_id,
+                actualExecutingModel.model_id,
                 inputDigest,
                 fullPrompt,
                 nodeOutput
               );
             }
 
-            // Calculate cost (e.g. 1 ⚡ per execution)
-            const nodeCost = 1;
+            // Calculate cost (derived from actual executing model's cost)
+            const nodeCost = Math.max(1, Math.round(actualExecutingModel.cost_per_1k_tokens || 1));
             totalCost += nodeCost;
 
             sendEvent('node_complete', {
               role_id: node.role.role_id,
               role_name: node.role.name_zh,
               role_name_en: node.role.name_en,
-              model_id: node.selected_model.model_id,
+              model_id: actualExecutingModel.model_id,
+              model_name: actualExecutingModel.display_name,
+              was_failover: actualExecutingModel.model_id !== node.selected_model.model_id,
               node_index: idx,
               duration_ms: Date.now() - nodeStartTime,
               cache_hit: false,
