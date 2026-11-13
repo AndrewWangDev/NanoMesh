@@ -24,10 +24,11 @@ function applySecurityHeaders(res: Response): Response {
   res.headers.set("Content-Security-Policy",
     "default-src 'self'; " +
     "script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; " +
+    "worker-src 'self' blob:; " +
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
     "font-src 'self' https://fonts.gstatic.com; " +
     "img-src 'self' data: blob: https:; " +
-    "connect-src 'self' https://challenges.cloudflare.com; " +
+    "connect-src 'self' https://challenges.cloudflare.com https://huggingface.co https://*.huggingface.co https://hf-mirror.com https://cdn.jsdelivr.net https://*.r2.cloudflarestorage.com; " +
     "frame-src https://challenges.cloudflare.com; " +
     "object-src 'none'; base-uri 'self';"
   );
