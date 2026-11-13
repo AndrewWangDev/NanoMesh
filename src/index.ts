@@ -16,6 +16,24 @@ function getCorsHeaders(env: Env) {
   };
 }
 
+function applySecurityHeaders(res: Response): Response {
+  res.headers.set("X-Content-Type-Options", "nosniff");
+  res.headers.set("X-Frame-Options", "SAMEORIGIN");
+  res.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  res.headers.set("Content-Security-Policy",
+    "default-src 'self'; " +
+    "script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; " +
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
+    "font-src 'self' https://fonts.gstatic.com; " +
+    "img-src 'self' data: blob: https:; " +
+    "connect-src 'self' https://challenges.cloudflare.com; " +
+    "frame-src https://challenges.cloudflare.com; " +
+    "object-src 'none'; base-uri 'self';"
+  );
+  return res;
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -193,6 +211,8 @@ export default {
         const newRes = new Response(res.body, res);
         Object.entries(getCorsHeaders(env)).forEach(([k, v]) => newRes.headers.set(k, v));
         newRes.headers.set("X-Content-Type-Options", "nosniff");
+        newRes.headers.set("X-Frame-Options", "DENY");
+        newRes.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
         return newRes;
       }
 
@@ -204,14 +224,14 @@ export default {
         const assetRes = await env.ASSETS.fetch(new Request(new URL("/terms.html", request.url)));
         const res = new Response(assetRes.body, assetRes);
         res.headers.set("X-Robots-Tag", "noindex, follow");
-        return res;
+        return applySecurityHeaders(res);
       }
 
       if (url.pathname === "/privacy" || url.pathname === "/privacy/" || url.pathname === "/privacy.html") {
         const assetRes = await env.ASSETS.fetch(new Request(new URL("/privacy.html", request.url)));
         const res = new Response(assetRes.body, assetRes);
         res.headers.set("X-Robots-Tag", "noindex, follow");
-        return res;
+        return applySecurityHeaders(res);
       }
       
       // Serve R2 Storage (strictly restricted to public avatars)
@@ -241,12 +261,13 @@ export default {
           status: 404,
           headers: {
             'Content-Type': 'text/html;charset=UTF-8',
-            'X-Content-Type-Options': 'nosniff'
+            'X-Content-Type-Options': 'nosniff',
+            'X-Frame-Options': 'SAMEORIGIN'
           }
         });
       }
       const secureAssetRes = new Response(assetResponse.body, assetResponse);
-      secureAssetRes.headers.set("X-Content-Type-Options", "nosniff");
+      applySecurityHeaders(secureAssetRes);
       if (url.pathname.match(/^\/(favicon|apple-touch-icon|android-chrome|site\.webmanifest)/)) {
         secureAssetRes.headers.set("Cache-Control", "public, max-age=604800, stale-while-revalidate=86400");
         secureAssetRes.headers.set("Access-Control-Allow-Origin", "*");
