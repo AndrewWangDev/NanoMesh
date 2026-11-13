@@ -22,6 +22,29 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
+function isSafeExternalUrl(urlStr: string): boolean {
+  try {
+    const parsed = new URL(urlStr);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0.0.0.0') return false;
+    if (host.endsWith('.local') || host.endsWith('.internal')) return false;
+
+    const ip = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+    if (ip) {
+      const [o1, o2] = [parseInt(ip[1], 10), parseInt(ip[2], 10)];
+      if (o1 === 10 || o1 === 127 || (o1 === 169 && o2 === 254)) return false;
+      if (o1 === 172 && (o2 >= 16 && o2 <= 31)) return false;
+      if (o1 === 192 && o2 === 168) return false;
+      if (o1 === 100 && (o2 >= 64 && o2 <= 127)) return false;
+      if (o1 === 0) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function sanitizeLLMOutput(text: string): string {
   if (!text) return '';
   let cleaned = text;
@@ -586,6 +609,11 @@ export async function executeDAGStream(
               if (!env.AI) break;
               try {
                 if (endpoint.startsWith('http')) {
+                  if (!isSafeExternalUrl(endpoint)) {
+                    console.warn(`[Dispatcher Security] Blocked SSRF attempt to unsafe endpoint: ${endpoint}`);
+                    candidateErrors.push(`[${endpoint}]: 目标地址不安全或属于受保护的私有网络`);
+                    continue;
+                  }
                   // External API candidate endpoint (e.g. Alibaba Cloud Qwen2-VL)
                   try {
                     const extRes = await callWithTimeout(async () => {
