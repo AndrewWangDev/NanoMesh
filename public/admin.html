@@ -586,6 +586,81 @@
         -webkit-overflow-scrolling: touch;
       }
     }
+
+    /* Phase 4 Styles: Compute Topology, Competence Matrix & Linear Pipeline */
+    .badge-healthy { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+    .badge-warning { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+    .badge-critical { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+    .badge-tier-browser { background: rgba(14, 165, 233, 0.15); color: #38bdf8; border: 1px solid rgba(14, 165, 233, 0.3); }
+    .badge-tier-edge { background: rgba(168, 85, 247, 0.15); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); }
+    .badge-tier-heavy { background: rgba(249, 115, 22, 0.15); color: #fb923c; border: 1px solid rgba(249, 115, 22, 0.3); }
+
+    .pipeline-step-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      background: rgba(99, 102, 241, 0.12);
+      border: 1px solid rgba(99, 102, 241, 0.25);
+      border-radius: 8px;
+      font-size: 0.8rem;
+      font-weight: 500;
+      color: #c7d2fe;
+    }
+    .pipeline-arrow {
+      color: var(--text-secondary);
+      font-weight: 700;
+      margin: 0 4px;
+    }
+    .role-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+      gap: 16px;
+      margin-top: 16px;
+    }
+    .role-card {
+      background: var(--admin-surface-card);
+      border: 1px solid var(--admin-border);
+      border-radius: 12px;
+      padding: 18px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      backdrop-filter: blur(8px);
+    }
+    .role-card-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .role-card-title {
+      font-weight: 600;
+      font-size: 0.95rem;
+      color: #f8fafc;
+    }
+    .role-card-id {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.76rem;
+      color: var(--text-secondary);
+    }
+    .form-grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+    .admin-modal-box-wide {
+      max-width: 680px !important;
+    }
+    @media (max-width: 640px) {
+      .form-grid-2 {
+        grid-template-columns: 1fr;
+      }
+      .role-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
   </style>
 </head>
 <body>
@@ -619,12 +694,28 @@
         NanoMesh Admin
       </div>
       <div class="sidebar-nav">
-        <div class="nav-item active" data-tab="models" id="nav-tab-models">
+        <div class="nav-item active" data-tab="nodes" id="nav-tab-nodes">
           <div class="nav-item-content">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
-            <span id="t-nav-models">模型审核</span>
+            <span id="t-nav-nodes">算力节点管理</span>
           </div>
-          <span class="nav-badge" id="sidebar-pending-badge">0</span>
+          <span class="nav-badge active-badge" id="sidebar-nodes-count">0</span>
+        </div>
+
+        <div class="nav-item" data-tab="matrix" id="nav-tab-matrix">
+          <div class="nav-item-content">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
+            <span id="t-nav-matrix">岗位健康矩阵</span>
+          </div>
+          <span class="nav-badge" id="sidebar-matrix-badge" style="background:rgba(16,185,129,0.2); color:#34d399;">OK</span>
+        </div>
+
+        <div class="nav-item" data-tab="templates" id="nav-tab-templates">
+          <div class="nav-item-content">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
+            <span id="t-nav-templates">工作流模板</span>
+          </div>
+          <span class="nav-badge" id="sidebar-templates-count">0</span>
         </div>
 
         <div class="nav-item" data-tab="gift-codes" id="nav-tab-gift-codes">
@@ -663,34 +754,131 @@
         </div>
       </div>
 
-      <!-- View 1: Model Approvals -->
-      <div class="admin-content-view active-view" id="view-models">
-        <div class="filter-row">
-          <div class="filter-pills" id="model-filter-pills">
-            <button class="filter-pill active" data-status="all">全部</button>
-            <button class="filter-pill" data-status="pending">待审核</button>
-            <button class="filter-pill" data-status="approved">已通过</button>
-            <button class="filter-pill" data-status="published">已上线</button>
-            <button class="filter-pill" data-status="rejected">已拒绝</button>
+      <!-- View 1: Compute Topology Nodes -->
+      <div class="admin-content-view active-view" id="view-nodes">
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-label">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 14 14"></polyline></svg>
+              <span>节点总数</span>
+            </div>
+            <div class="stat-val" id="stat-total-nodes" style="color:#38bdf8;">0</div>
           </div>
-          <button class="btn btn-outline btn-sm" id="btn-refresh-models" style="display:flex; align-items:center; gap:4px;">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
-            刷新
-          </button>
+          <div class="stat-card">
+            <div class="stat-label">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+              <span>端侧轻节点 (WebGPU)</span>
+            </div>
+            <div class="stat-val" id="stat-browser-nodes" style="color:#34d399;">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+              <span>边缘中节点 (Workers AI)</span>
+            </div>
+            <div class="stat-val" id="stat-edge-nodes" style="color:#c084fc;">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect><rect x="9" y="9" width="6" height="6"></rect></svg>
+              <span>专用重节点 (VPS / API)</span>
+            </div>
+            <div class="stat-val" id="stat-heavy-nodes" style="color:#fb923c;">0</div>
+          </div>
+        </div>
+
+        <div class="filter-row">
+          <div class="filter-pills" id="node-filter-pills">
+            <button class="filter-pill active" data-filter="all">全部节点</button>
+            <button class="filter-pill" data-filter="browser">轻节点 (WebGPU)</button>
+            <button class="filter-pill" data-filter="edge">中节点 (Workers AI)</button>
+            <button class="filter-pill" data-filter="heavy">重节点 (VPS / API)</button>
+            <button class="filter-pill" data-filter="active">活跃中</button>
+            <button class="filter-pill" data-filter="disabled">已下线</button>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <button class="btn btn-primary btn-sm" id="btn-add-node" style="display:flex; align-items:center; gap:4px;">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+              声明算力节点
+            </button>
+            <button class="btn btn-outline btn-sm" id="btn-refresh-nodes" style="display:flex; align-items:center; gap:4px;">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+              刷新
+            </button>
+          </div>
         </div>
 
         <div class="admin-table-container">
           <table class="admin-table">
             <thead>
               <tr>
-                <th style="width: 20%;">提交者</th>
-                <th style="width: 24%;">模型规格</th>
-                <th style="width: 22%;">权重文件</th>
-                <th style="width: 12%;">状态</th>
-                <th style="width: 22%; text-align:right;">操作</th>
+                <th style="width: 22%;">节点标识与名称</th>
+                <th style="width: 14%;">层级与形态</th>
+                <th style="width: 28%;">端点与协议鉴权</th>
+                <th style="width: 14%;">上下文与费用</th>
+                <th style="width: 10%;">状态</th>
+                <th style="width: 12%; text-align:right;">操作</th>
               </tr>
             </thead>
-            <tbody id="models-tbody"></tbody>
+            <tbody id="nodes-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- View 2: Role Competence Health Matrix -->
+      <div class="admin-content-view" id="view-matrix">
+        <div class="admin-card" style="margin-bottom:20px; border-left:4px solid var(--admin-accent);">
+          <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px;">
+            <div>
+              <h3 style="margin:0 0 6px 0; font-size:1.05rem; display:flex; align-items:center; gap:8px;">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" style="color:#818cf8;"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
+                胜任定律 (Competence Law) 实时健康诊断
+              </h3>
+              <p style="margin:0; font-size:0.85rem; color:var(--text-secondary); line-height:1.5;">
+                调度池中每个岗位需具备足够的算力覆盖。<span style="color:#34d399; font-weight:600;">绿色</span> 为健康就绪；<span style="color:#fbbf24; font-weight:600;">黄色</span> 提示单点故障隐患；<span style="color:#f87171; font-weight:600;">红色</span> 提示孤儿岗位（0 可用模型，调度将被中断）。
+              </p>
+            </div>
+            <button class="btn btn-outline btn-sm" id="btn-refresh-matrix" style="display:flex; align-items:center; gap:4px;">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+              刷新诊断
+            </button>
+          </div>
+        </div>
+
+        <div class="role-grid" id="matrix-container"></div>
+      </div>
+
+      <!-- View 3: Workflow Templates Splicer -->
+      <div class="admin-content-view" id="view-templates">
+        <div class="filter-row">
+          <div>
+            <span style="font-weight:600; font-size:1.05rem;">线性工作流执行模板</span>
+            <span class="admin-meta-text">严格遵循单向输入输出模态连续性与活跃算力保底校验</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <button class="btn btn-primary btn-sm" id="btn-add-template" style="display:flex; align-items:center; gap:4px;">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+              新建工作流模板
+            </button>
+            <button class="btn btn-outline btn-sm" id="btn-refresh-templates" style="display:flex; align-items:center; gap:4px;">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+              刷新
+            </button>
+          </div>
+        </div>
+
+        <div class="admin-table-container">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th style="width: 22%;">模板名称与 ID</th>
+                <th style="width: 40%;">线性执行工序</th>
+                <th style="width: 14%;">进出模态</th>
+                <th style="width: 12%;">状态</th>
+                <th style="width: 12%; text-align:right;">操作</th>
+              </tr>
+            </thead>
+            <tbody id="templates-tbody"></tbody>
           </table>
         </div>
       </div>
@@ -952,6 +1140,164 @@
     </div>
   </div>
 
+  <!-- Modal: Register / Edit Compute Node -->
+  <div class="admin-modal-overlay" id="node-modal-overlay">
+    <div class="admin-modal-box admin-modal-box-wide">
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+        <h3 style="margin:0; font-size:1.15rem; font-weight:600;" id="node-modal-title">声明算力节点</h3>
+        <button class="btn btn-outline btn-sm" id="btn-close-node-modal" style="padding:4px 8px !important;">✕</button>
+      </div>
+
+      <!-- Preset Pills -->
+      <div style="margin-bottom:14px;">
+        <span style="font-size:0.8rem; color:var(--text-secondary); display:block; margin-bottom:6px;">快速套用模板预设 (Quick Presets):</span>
+        <div class="preset-pills" id="node-presets">
+          <button type="button" class="preset-btn" data-preset="webgpu">端侧 WebGPU</button>
+          <button type="button" class="preset-btn" data-preset="workers_ai">Workers AI 中节点</button>
+          <button type="button" class="preset-btn" data-preset="vps">私有 VPS 重节点</button>
+          <button type="button" class="preset-btn" data-preset="gemini">Google AI (Gemini)</button>
+        </div>
+      </div>
+
+      <form id="node-form">
+        <input type="hidden" id="node-is-edit" value="0">
+        <div class="form-grid-2">
+          <div style="margin-bottom:12px;">
+            <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">节点唯一 ID (model_id) *</label>
+            <input type="text" id="node-id-input" class="input-field" placeholder="如 cf-llama-3.2-3b" required>
+          </div>
+          <div style="margin-bottom:12px;">
+            <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">展示别名 (display_name) *</label>
+            <input type="text" id="node-name-input" class="input-field" placeholder="如 Llama 3.2 3B Instruct" required>
+          </div>
+        </div>
+
+        <div class="form-grid-2">
+          <div style="margin-bottom:12px;">
+            <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">算力提供商 (provider) *</label>
+            <input type="text" id="node-provider-input" class="input-field" placeholder="如 cloudflare, private-vps, google-ai" required>
+          </div>
+          <div style="margin-bottom:12px;">
+            <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">部署层级 (Target Layer) *</label>
+            <select id="node-target-select" class="input-field" style="background:#11131f;">
+              <option value="edge">中节点 (Edge / Cloudflare)</option>
+              <option value="browser">轻节点 (Browser / WebGPU)</option>
+              <option value="heavy">重节点 (Dedicated / Cloud API)</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="margin-bottom:12px;">
+          <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">调用端点 (endpoint) *</label>
+          <input type="text" id="node-endpoint-input" class="input-field" placeholder="如 @cf/meta/llama-3.2-3b-instruct 或 https://vps.com/v1/chat/completions" required>
+        </div>
+
+        <div class="form-grid-2">
+          <div style="margin-bottom:12px;">
+            <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">协议格式 (api_format) *</label>
+            <select id="node-format-select" class="input-field" style="background:#11131f;">
+              <option value="workers_ai">Cloudflare Workers AI</option>
+              <option value="openai_compat">OpenAI 兼容协议 (/v1/chat/completions)</option>
+              <option value="google_ai">Google AI Studio (Gemini REST)</option>
+            </select>
+          </div>
+          <div style="margin-bottom:12px;">
+            <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">鉴权模式 (auth_mode) *</label>
+            <select id="node-authmode-select" class="input-field" style="background:#11131f;">
+              <option value="none">无鉴权 / 内部调用 (none)</option>
+              <option value="bearer_static">静态 API Key (Bearer / x-goog-api-key)</option>
+              <option value="jwt_ephemeral">防重放防篡改短效 JWT (jwt_ephemeral)</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="margin-bottom:12px;">
+          <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">密钥凭据 (auth_secret) - 脱敏保护</label>
+          <input type="password" id="node-secret-input" class="input-field" placeholder="若未修改请留空；输入新密钥将覆盖保存">
+        </div>
+
+        <div class="form-grid-2">
+          <div style="margin-bottom:12px;">
+            <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">物理上下文窗口 (Tokens)</label>
+            <input type="number" id="node-context-input" class="input-field" value="4096" min="512">
+          </div>
+          <div style="margin-bottom:12px;">
+            <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">单价 (⚡ / 1K Tokens)</label>
+            <input type="number" id="node-cost-input" class="input-field" value="1.0" step="0.1" min="0">
+          </div>
+        </div>
+
+        <div style="margin-bottom:12px;">
+          <label class="form-label" style="display:block; margin-bottom:6px; font-size:0.82rem;">支持模态 (Modalities)</label>
+          <div style="display:flex; gap:16px;">
+            <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; cursor:pointer;"><input type="checkbox" id="modality-text" checked> 文本 (text)</label>
+            <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; cursor:pointer;"><input type="checkbox" id="modality-image"> 图像/视觉 (image)</label>
+            <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; cursor:pointer;"><input type="checkbox" id="modality-audio"> 语音 (audio)</label>
+          </div>
+        </div>
+
+        <div style="margin-bottom:18px;">
+          <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">资质标签 (Capability Tags, 英文逗号分隔)</label>
+          <input type="text" id="node-tags-input" class="input-field" value="#chat, #general" placeholder="#chat, #ocr_precise, #reasoning, #asr">
+        </div>
+
+        <div style="display:flex; justify-content:flex-end; gap:10px;">
+          <button type="button" class="btn btn-outline btn-sm" id="btn-cancel-node-modal">取消</button>
+          <button type="submit" class="btn btn-primary btn-sm" id="btn-submit-node">保存节点配置</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal: Linear Workflow Splicer -->
+  <div class="admin-modal-overlay" id="template-modal-overlay">
+    <div class="admin-modal-box admin-modal-box-wide">
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+        <h3 style="margin:0; font-size:1.15rem; font-weight:600;">线性工作流流水线拼接器 (Linear Pipeline Splicer)</h3>
+        <button class="btn btn-outline btn-sm" id="btn-close-template-modal" style="padding:4px 8px !important;">✕</button>
+      </div>
+
+      <p style="font-size:0.82rem; color:var(--text-secondary); margin:0 0 16px 0; line-height:1.5;">
+        管理员可通过岗位库自由拼接执行工序。系统将实时验证相邻节点的<strong>模态闭环传递连续性</strong>（上游产物模态与下游要求模态必须存在交集），并检查调度池中<strong>算力保底有效性</strong>。
+      </p>
+
+      <form id="template-form">
+        <div class="form-grid-2">
+          <div style="margin-bottom:12px;">
+            <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">模板名称 (Template Name) *</label>
+            <input type="text" id="tpl-name-input" class="input-field" placeholder="如 视觉 OCR 结构化润色" required>
+          </div>
+          <div style="margin-bottom:12px;">
+            <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">模板唯一 ID (可选，留空自动生成)</label>
+            <input type="text" id="tpl-id-input" class="input-field" placeholder="如 tpl-ocr-polish">
+          </div>
+        </div>
+
+        <div style="margin-bottom:14px;">
+          <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">模板业务描述</label>
+          <input type="text" id="tpl-desc-input" class="input-field" placeholder="如 提取图片文字并润色生成结构化 Markdown">
+        </div>
+
+        <!-- Pipeline Steps Container -->
+        <div style="margin-bottom:14px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+            <label class="form-label" style="font-size:0.85rem; font-weight:600;">工序执行链条 (Ordered Pipeline Steps)</label>
+            <button type="button" class="btn btn-outline btn-sm" id="btn-add-step" style="padding:4px 10px !important;">+ 添加后置工序</button>
+          </div>
+          <div id="pipeline-steps-wrap" style="display:flex; flex-direction:column; gap:8px;"></div>
+        </div>
+
+        <!-- Real-time Modality Continuity Banner -->
+        <div id="pipeline-validation-banner" style="margin-bottom:18px; padding:12px; border-radius:8px; font-size:0.84rem; display:none;"></div>
+
+        <div style="display:flex; justify-content:flex-end; gap:10px;">
+          <button type="button" class="btn btn-outline btn-sm" id="btn-cancel-template-modal">取消</button>
+          <button type="submit" class="btn btn-primary btn-sm" id="btn-submit-template">保存工作流模板</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <!-- Modal: Generated Codes Result (One-time Display) -->
   <div class="admin-modal-overlay" id="result-modal-overlay">
     <div class="admin-modal-box">
@@ -1102,10 +1448,13 @@
     }
 
     // State
-    let currentTab = 'models';
-    let currentModelFilter = 'all';
+    let currentTab = 'nodes';
+    let currentNodeFilter = 'all';
     let currentCodeFilter = 'all';
     let generatedDataForModal = null;
+    let globalRoles = [];
+    let globalNodes = [];
+    let pipelineSteps = [];
 
     // Timezone setup
     const userTz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
@@ -1133,13 +1482,25 @@
       localStorage.setItem('nanomesh-lang', lang);
       document.getElementById('admin-lang-toggle').textContent = lang === 'zh' ? '中 / EN' : 'EN / 中';
       const isZh = lang === 'zh';
-      document.getElementById('t-nav-models').textContent = isZh ? '模型审核' : 'Model Review';
+      
+      const navNodes = document.getElementById('t-nav-nodes');
+      if (navNodes) navNodes.textContent = isZh ? '算力节点管理' : 'Compute Topology';
+      const navMatrix = document.getElementById('t-nav-matrix');
+      if (navMatrix) navMatrix.textContent = isZh ? '岗位健康矩阵' : 'Competence Matrix';
+      const navTemplates = document.getElementById('t-nav-templates');
+      if (navTemplates) navTemplates.textContent = isZh ? '工作流模板' : 'Workflow Templates';
+      
       document.getElementById('t-nav-giftcodes').textContent = isZh ? '兑换码管理' : 'Gift Codes';
       const notifNav = document.getElementById('t-nav-notifications');
       if (notifNav) notifNav.textContent = isZh ? '消息推送' : 'Push Notices';
       document.getElementById('t-logout').textContent = isZh ? '退出' : 'Sign Out';
-      if (currentTab === 'models') {
-        document.getElementById('header-view-title').textContent = isZh ? '模型审核' : 'Model Review';
+
+      if (currentTab === 'nodes') {
+        document.getElementById('header-view-title').textContent = isZh ? '算力节点拓扑管理' : 'Compute Topology Management';
+      } else if (currentTab === 'matrix') {
+        document.getElementById('header-view-title').textContent = isZh ? '岗位胜任健康矩阵' : 'Competence Health Matrix';
+      } else if (currentTab === 'templates') {
+        document.getElementById('header-view-title').textContent = isZh ? '线性工作流执行模板' : 'Linear Workflow Templates';
       } else if (currentTab === 'gift-codes') {
         document.getElementById('header-view-title').textContent = isZh ? '兑换码管理' : 'Gift Codes Management';
       } else {
@@ -1158,37 +1519,50 @@
       document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
       document.querySelectorAll('.admin-content-view').forEach(el => el.classList.remove('active-view'));
 
-      if (tab === 'models') {
-        document.getElementById('nav-tab-models').classList.add('active');
-        document.getElementById('view-models').classList.add('active-view');
-        loadModels();
+      if (tab === 'nodes') {
+        document.getElementById('nav-tab-nodes')?.classList.add('active');
+        document.getElementById('view-nodes')?.classList.add('active-view');
+        loadNodes();
+      } else if (tab === 'matrix') {
+        document.getElementById('nav-tab-matrix')?.classList.add('active');
+        document.getElementById('view-matrix')?.classList.add('active-view');
+        loadMatrix();
+      } else if (tab === 'templates') {
+        document.getElementById('nav-tab-templates')?.classList.add('active');
+        document.getElementById('view-templates')?.classList.add('active-view');
+        loadTemplates();
       } else if (tab === 'gift-codes') {
-        document.getElementById('nav-tab-gift-codes').classList.add('active');
-        document.getElementById('view-gift-codes').classList.add('active-view');
+        document.getElementById('nav-tab-gift-codes')?.classList.add('active');
+        document.getElementById('view-gift-codes')?.classList.add('active-view');
         loadGiftCodes();
       } else if (tab === 'notifications') {
-        document.getElementById('nav-tab-notifications').classList.add('active');
-        document.getElementById('view-notifications').classList.add('active-view');
+        document.getElementById('nav-tab-notifications')?.classList.add('active');
+        document.getElementById('view-notifications')?.classList.add('active-view');
         loadAdminNotifications();
       }
       applyAdminLang(currentLang);
     }
 
-    document.getElementById('nav-tab-models').addEventListener('click', () => switchTab('models'));
-    document.getElementById('nav-tab-gift-codes').addEventListener('click', () => switchTab('gift-codes'));
-    document.getElementById('nav-tab-notifications').addEventListener('click', () => switchTab('notifications'));
+    document.getElementById('nav-tab-nodes')?.addEventListener('click', () => switchTab('nodes'));
+    document.getElementById('nav-tab-matrix')?.addEventListener('click', () => switchTab('matrix'));
+    document.getElementById('nav-tab-templates')?.addEventListener('click', () => switchTab('templates'));
+    document.getElementById('nav-tab-gift-codes')?.addEventListener('click', () => switchTab('gift-codes'));
+    document.getElementById('nav-tab-notifications')?.addEventListener('click', () => switchTab('notifications'));
 
     // Check hash on load
-    if (window.location.hash === '#gift-codes') {
-      currentTab = 'gift-codes';
-    } else if (window.location.hash === '#notifications') {
-      currentTab = 'notifications';
-    }
+    if (window.location.hash === '#matrix') currentTab = 'matrix';
+    else if (window.location.hash === '#templates') currentTab = 'templates';
+    else if (window.location.hash === '#gift-codes') currentTab = 'gift-codes';
+    else if (window.location.hash === '#notifications') currentTab = 'notifications';
+    else currentTab = 'nodes';
 
-    // ----------------- Model Approvals -----------------
-    async function loadModels() {
+    // =========================================================================
+    // 1. Compute Topology & Node Registry (Nodes View)
+    // =========================================================================
+
+    async function loadNodes(filter = currentNodeFilter) {
       try {
-        const res = await fetch(`/api/admin/models?status=${encodeURIComponent(currentModelFilter)}`);
+        const res = await fetch(`/api/admin/nodes?filter=${encodeURIComponent(filter)}`);
         if (res.status === 401) {
           document.getElementById('login-section').style.display = 'flex';
           document.getElementById('admin-section').style.display = 'none';
@@ -1198,121 +1572,616 @@
         document.getElementById('admin-section').style.display = 'flex';
 
         const data = await res.json();
-        const models = data.models || [];
-        document.getElementById('sidebar-pending-badge').textContent = data.pendingCount || 0;
+        const nodes = data.nodes || [];
+        globalNodes = nodes;
+
+        // Update stats
+        const activeNodes = nodes.filter(n => n.status === 'active');
+        document.getElementById('sidebar-nodes-count').textContent = activeNodes.length;
+        document.getElementById('stat-total-nodes').textContent = nodes.length;
+        document.getElementById('stat-browser-nodes').textContent = nodes.filter(n => n.inference_target === 'browser').length;
+        document.getElementById('stat-edge-nodes').textContent = nodes.filter(n => n.inference_target === 'edge').length;
+        document.getElementById('stat-heavy-nodes').textContent = nodes.filter(n => n.inference_target === 'heavy' || n.inference_target === 'cloud').length;
 
         let html = '';
-        if (models.length === 0) {
-          html = `<tr><td colspan="5" style="text-align:center; padding:3rem; color:var(--text-secondary);">暂无相关模型</td></tr>`;
+        if (nodes.length === 0) {
+          html = `<tr><td colspan="6" style="text-align:center; padding:3rem; color:var(--text-secondary);">暂无相关算力节点</td></tr>`;
         } else {
-          models.forEach(m => {
-            const sizeStr = formatBytes(m.file_size);
-            const dateStr = formatLocalDate(m.created_at);
-            const statusClass = 'badge-' + (m.status || 'pending');
-            const displayStatus = (m.status || '').toUpperCase();
-
-            let actions = `<button class="btn btn-outline btn-sm" onclick="downloadFile('${escapeHtml(m.upload_id)}')"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg> 下载</button>`;
-
-            if (m.status === 'pending') {
-              actions += ` <button class="btn btn-primary btn-sm" onclick="confirmUpdateModel('${escapeHtml(m.upload_id)}', 'approved')">通过</button>`;
-              actions += ` <button class="btn btn-danger-outline btn-sm" onclick="confirmUpdateModel('${escapeHtml(m.upload_id)}', 'rejected', true)">拒绝</button>`;
-            } else if (m.status === 'approved') {
-              actions += ` <button class="btn btn-primary btn-sm" style="background:#10b981; border-color:#10b981; color:#fff;" onclick="confirmUpdateModel('${escapeHtml(m.upload_id)}', 'published')">上线网络</button>`;
-            } else if (m.status === 'published') {
-              actions += ` <button class="btn btn-danger-outline btn-sm" onclick="confirmUpdateModel('${escapeHtml(m.upload_id)}', 'approved', true, true)">下线</button>`;
+          nodes.forEach(n => {
+            let tierBadge = '<span class="badge-pill badge-tier-edge">边缘 Workers AI</span>';
+            if (n.inference_target === 'browser') {
+              tierBadge = '<span class="badge-pill badge-tier-browser">端侧 WebGPU</span>';
+            } else if (n.inference_target === 'heavy' || n.inference_target === 'cloud') {
+              tierBadge = '<span class="badge-pill badge-tier-heavy">专用重节点 (VPS/API)</span>';
             }
+
+            const statusClass = n.status === 'active' ? 'badge-active' : 'badge-revoked';
+            const statusText = n.status === 'active' ? '活跃' : '已下线';
+
+            let authBadge = '<span style="color:var(--text-secondary); font-size:0.75rem;">无鉴权 (none)</span>';
+            if (n.auth_mode === 'jwt_ephemeral') {
+              authBadge = '<span class="badge-pill" style="background:rgba(99,102,241,0.15); color:#818cf8;">短效 JWT 密钥对</span>';
+            } else if (n.auth_mode === 'bearer_static') {
+              authBadge = '<span class="badge-pill" style="background:rgba(245,158,11,0.15); color:#fbbf24;">静态 API Key</span>';
+            }
+
+            const secretDisplay = n.has_secret ? ' <span title="Secret Credential Masked" style="font-family:monospace; color:#34d399; font-size:0.75rem;">🔑 ••••••••</span>' : '';
+
+            const toggleActionText = n.status === 'active' ? '下线' : '启用';
+            const toggleNewStatus = n.status === 'active' ? 'disabled' : 'active';
+            const isDanger = n.status === 'active';
 
             html += `<tr>
               <td>
-                <div style="font-weight:600;">${escapeHtml(m.username || 'Unknown')}</div>
-                <span class="admin-meta-text">${escapeHtml(m.email || '—')}</span>
+                <div style="font-weight:600; color:#f8fafc;">${escapeHtml(n.display_name)}</div>
+                <span class="role-card-id">${escapeHtml(n.model_id)}</span>
+              </td>
+              <td>${tierBadge}</td>
+              <td>
+                <div style="font-family:'JetBrains Mono',monospace; font-size:0.8rem; max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(n.endpoint)}">${escapeHtml(n.endpoint)}</div>
+                <div style="display:flex; align-items:center; gap:6px; margin-top:3px;">
+                  <span style="font-size:0.75rem; color:var(--text-secondary);">${escapeHtml(n.api_format)}</span>
+                  ${authBadge}${secretDisplay}
+                </div>
               </td>
               <td>
-                <div style="font-weight:600;">${escapeHtml(m.display_name)}</div>
-                <span class="admin-meta-text">${escapeHtml(m.param_scale || '—')} · Context: ${escapeHtml(m.context_window || '4k')}</span>
+                <div style="font-size:0.85rem; font-family:'JetBrains Mono',monospace;">${n.context_window >= 1024 ? Math.round(n.context_window/1024) + 'K' : n.context_window} Tokens</div>
+                <span class="admin-meta-text">${Number(n.cost_per_1k_tokens).toFixed(2)} ⚡ / 1K</span>
               </td>
-              <td>
-                <div style="font-family:'JetBrains Mono', monospace; font-size:0.83rem;">${escapeHtml(m.file_name || '—')}</div>
-                <span class="admin-meta-text">${sizeStr} · ${dateStr}</span>
+              <td><span class="badge-pill ${statusClass}">${statusText}</span></td>
+              <td style="text-align:right;">
+                <div class="action-buttons-wrap">
+                  <button class="btn btn-outline btn-sm" onclick="openEditNodeModal('${escapeHtml(n.model_id)}')">编辑</button>
+                  <button class="btn ${isDanger ? 'btn-danger-outline' : 'btn-primary'} btn-sm" onclick="toggleNodeStatus('${escapeHtml(n.model_id)}', '${toggleNewStatus}')">${toggleActionText}</button>
+                  <button class="btn btn-danger-outline btn-sm" onclick="deleteNode('${escapeHtml(n.model_id)}')">删除</button>
+                </div>
               </td>
-              <td><span class="badge-pill ${statusClass}">${displayStatus}</span></td>
-              <td style="text-align:right;"><div class="action-buttons-wrap">${actions}</div></td>
             </tr>`;
           });
         }
-        document.getElementById('models-tbody').innerHTML = html;
+        document.getElementById('nodes-tbody').innerHTML = html;
       } catch (err) {
-        showToast('加载模型失败: ' + err.message);
+        showToast('加载节点失败: ' + err.message);
       }
     }
 
-    window.confirmUpdateModel = async function(id, status, isDanger = false, isDelist = false) {
-      let actionName = '更新';
-      let showInput = false;
-      let inputLabel = '';
-
-      if (status === 'approved' && isDelist) {
-        actionName = '下线模型';
-        showInput = true;
-        inputLabel = '下线理由（可选，将通知给模型上传者）';
-      } else if (status === 'approved') {
-        actionName = '审核通过';
-      } else if (status === 'rejected') {
-        actionName = '驳回拒绝';
-        showInput = true;
-        inputLabel = '驳回理由（可选，将通知给模型上传者）';
-      } else if (status === 'published') {
-        actionName = '正式上线至全网调度系统';
-      }
-
-      const res = await showConfirmModal('确认操作', `确定要将该模型状态变更为「${actionName}」吗？`, '确定', isDanger, showInput, inputLabel);
-      if (!res || !res.confirmed) return;
-
-      try {
-        const fetchRes = await fetch(`/api/admin/models/${id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status, reason: res.value })
-        });
-        if (!fetchRes.ok) {
-          const errData = await fetchRes.json().catch(() => ({}));
-          throw new Error(errData.error || 'Update failed');
-        }
-        showToast(`操作成功: 已变更状态为 ${status}`, 'success');
-        loadModels();
-      } catch (err) {
-        showToast(err.message);
-      }
-    };
-
-    window.downloadFile = async function(id) {
-      try {
-        const res = await fetch(`/api/admin/models/${id}/download`);
-        if (!res.ok) {
-          const errData = await res.json().catch(() => ({}));
-          throw new Error(errData.error || '下载链接生成失败');
-        }
-        const data = await res.json();
-        if (data.url) {
-          showToast('正在调取 R2 安全预签名下载...', 'success');
-          window.location.href = data.url;
-        }
-      } catch (err) {
-        showToast(err.message);
-      }
-    };
-
-    // Filter pills for models
-    document.querySelectorAll('#model-filter-pills .filter-pill').forEach(btn => {
+    // Filter pills
+    document.querySelectorAll('#node-filter-pills .filter-pill').forEach(btn => {
       btn.addEventListener('click', () => {
-        document.querySelectorAll('#model-filter-pills .filter-pill').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('#node-filter-pills .filter-pill').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
-        currentModelFilter = btn.dataset.status;
-        loadModels();
+        currentNodeFilter = btn.dataset.filter;
+        loadNodes(currentNodeFilter);
       });
     });
-    document.getElementById('btn-refresh-models').addEventListener('click', loadModels);
+    document.getElementById('btn-refresh-nodes')?.addEventListener('click', () => loadNodes(currentNodeFilter));
 
+    // Open Add / Edit Node Modal
+    document.getElementById('btn-add-node')?.addEventListener('click', () => {
+      document.getElementById('node-modal-title').textContent = '声明算力节点 (Register Compute Node)';
+      document.getElementById('node-is-edit').value = '0';
+      document.getElementById('node-id-input').disabled = false;
+      document.getElementById('node-form').reset();
+      document.getElementById('node-context-input').value = '4096';
+      document.getElementById('node-cost-input').value = '1.0';
+      document.getElementById('modality-text').checked = true;
+      document.getElementById('modality-image').checked = false;
+      document.getElementById('modality-audio').checked = false;
+      document.getElementById('node-tags-input').value = '#chat, #general';
+      document.getElementById('node-secret-input').placeholder = '输入密钥或 VPS Secret (可选)';
+      document.getElementById('node-modal-overlay').style.display = 'flex';
+    });
+
+    window.openEditNodeModal = function(modelId) {
+      const node = globalNodes.find(n => n.model_id === modelId);
+      if (!node) return;
+      document.getElementById('node-modal-title').textContent = '编辑算力节点 (Edit Compute Node)';
+      document.getElementById('node-is-edit').value = '1';
+      document.getElementById('node-id-input').value = node.model_id;
+      document.getElementById('node-id-input').disabled = true;
+      document.getElementById('node-name-input').value = node.display_name;
+      document.getElementById('node-provider-input').value = node.provider;
+      document.getElementById('node-target-select').value = node.inference_target || 'edge';
+      document.getElementById('node-endpoint-input').value = node.endpoint;
+      document.getElementById('node-format-select').value = node.api_format || 'workers_ai';
+      document.getElementById('node-authmode-select').value = node.auth_mode || 'none';
+      document.getElementById('node-secret-input').value = '';
+      document.getElementById('node-secret-input').placeholder = node.has_secret ? '已配置密钥 (留空保持现有密钥，输入新值覆盖)' : '输入密钥或 VPS Secret';
+      document.getElementById('node-context-input').value = node.context_window;
+      document.getElementById('node-cost-input').value = node.cost_per_1k_tokens;
+      
+      const mods = node.modalities || [];
+      document.getElementById('modality-text').checked = mods.includes('text');
+      document.getElementById('modality-image').checked = mods.includes('image');
+      document.getElementById('modality-audio').checked = mods.includes('audio');
+
+      document.getElementById('node-tags-input').value = (node.tags || []).join(', ');
+      document.getElementById('node-modal-overlay').style.display = 'flex';
+    };
+
+    function closeNodeModal() {
+      document.getElementById('node-modal-overlay').style.display = 'none';
+    }
+    document.getElementById('btn-close-node-modal')?.addEventListener('click', closeNodeModal);
+    document.getElementById('btn-cancel-node-modal')?.addEventListener('click', closeNodeModal);
+
+    // Presets Click Handlers
+    document.querySelectorAll('#node-presets .preset-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const p = btn.dataset.preset;
+        if (p === 'webgpu') {
+          document.getElementById('node-id-input').value = 'browser-smollm2-135m';
+          document.getElementById('node-name-input').value = 'SmolLM2 135M WebGPU';
+          document.getElementById('node-provider-input').value = 'local-webgpu';
+          document.getElementById('node-target-select').value = 'browser';
+          document.getElementById('node-endpoint-input').value = '/models/smollm2-135m-q4f16.onnx';
+          document.getElementById('node-format-select').value = 'workers_ai';
+          document.getElementById('node-authmode-select').value = 'none';
+          document.getElementById('node-context-input').value = '4096';
+          document.getElementById('node-cost-input').value = '0';
+          document.getElementById('modality-text').checked = true;
+          document.getElementById('modality-image').checked = false;
+          document.getElementById('modality-audio').checked = false;
+          document.getElementById('node-tags-input').value = '#chat, #text_generation';
+        } else if (p === 'workers_ai') {
+          document.getElementById('node-id-input').value = 'cf-llama-3.3-70b';
+          document.getElementById('node-name-input').value = 'Llama 3.3 70B Instruct';
+          document.getElementById('node-provider-input').value = 'cloudflare';
+          document.getElementById('node-target-select').value = 'edge';
+          document.getElementById('node-endpoint-input').value = '@cf/meta/llama-3.3-70b-instruct';
+          document.getElementById('node-format-select').value = 'workers_ai';
+          document.getElementById('node-authmode-select').value = 'none';
+          document.getElementById('node-context-input').value = '8192';
+          document.getElementById('node-cost-input').value = '0.5';
+          document.getElementById('modality-text').checked = true;
+          document.getElementById('modality-image').checked = false;
+          document.getElementById('modality-audio').checked = false;
+          document.getElementById('node-tags-input').value = '#chat, #reasoning, #general';
+        } else if (p === 'vps') {
+          document.getElementById('node-id-input').value = 'heavy-llama-3.1-8b';
+          document.getElementById('node-name-input').value = 'Llama 3.1 8B (Dedicated VPS)';
+          document.getElementById('node-provider-input').value = 'private-vps';
+          document.getElementById('node-target-select').value = 'heavy';
+          document.getElementById('node-endpoint-input').value = 'https://vps.example.com/v1/chat/completions';
+          document.getElementById('node-format-select').value = 'openai_compat';
+          document.getElementById('node-authmode-select').value = 'jwt_ephemeral';
+          document.getElementById('node-context-input').value = '4096';
+          document.getElementById('node-cost-input').value = '1.5';
+          document.getElementById('modality-text').checked = true;
+          document.getElementById('modality-image').checked = false;
+          document.getElementById('modality-audio').checked = false;
+          document.getElementById('node-tags-input').value = '#reasoning, #analysis, #text_generation';
+        } else if (p === 'gemini') {
+          document.getElementById('node-id-input').value = 'heavy-gemini-2.5-flash';
+          document.getElementById('node-name-input').value = 'Gemini 2.5 Flash (Google AI)';
+          document.getElementById('node-provider-input').value = 'google-ai';
+          document.getElementById('node-target-select').value = 'heavy';
+          document.getElementById('node-endpoint-input').value = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash';
+          document.getElementById('node-format-select').value = 'google_ai';
+          document.getElementById('node-authmode-select').value = 'bearer_static';
+          document.getElementById('node-context-input').value = '131072';
+          document.getElementById('node-cost-input').value = '0.25';
+          document.getElementById('modality-text').checked = true;
+          document.getElementById('modality-image').checked = true;
+          document.getElementById('modality-audio').checked = false;
+          document.getElementById('node-tags-input').value = '#chat, #reasoning, #ocr_precise, #multimodal_vision';
+        }
+      });
+    });
+
+    // Node Form Submit
+    document.getElementById('node-form')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const isEdit = document.getElementById('node-is-edit').value === '1';
+      const modelId = document.getElementById('node-id-input').value.trim();
+      const displayName = document.getElementById('node-name-input').value.trim();
+      const provider = document.getElementById('node-provider-input').value.trim();
+      const target = document.getElementById('node-target-select').value;
+      const endpoint = document.getElementById('node-endpoint-input').value.trim();
+      const format = document.getElementById('node-format-select').value;
+      const authMode = document.getElementById('node-authmode-select').value;
+      const secret = document.getElementById('node-secret-input').value.trim();
+      const contextWindow = Number(document.getElementById('node-context-input').value);
+      const cost = Number(document.getElementById('node-cost-input').value);
+
+      const modalities = [];
+      if (document.getElementById('modality-text').checked) modalities.push('text');
+      if (document.getElementById('modality-image').checked) modalities.push('image');
+      if (document.getElementById('modality-audio').checked) modalities.push('audio');
+
+      const tags = document.getElementById('node-tags-input').value
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+
+      const payload = {
+        model_id: modelId,
+        display_name: displayName,
+        provider,
+        inference_target: target,
+        endpoint,
+        api_format: format,
+        auth_mode: authMode,
+        context_window: contextWindow,
+        cost_per_1k_tokens: cost,
+        modalities,
+        tags
+      };
+
+      if (secret) {
+        payload.auth_secret = secret;
+      }
+
+      const btn = document.getElementById('btn-submit-node');
+      btn.disabled = true;
+      btn.textContent = '保存中...';
+
+      try {
+        const url = isEdit ? `/api/admin/nodes/${encodeURIComponent(modelId)}` : '/api/admin/nodes';
+        const method = isEdit ? 'PATCH' : 'POST';
+        const res = await fetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '保存失败');
+
+        showToast(isEdit ? '节点已成功更新' : '新节点声明成功！', 'success');
+        closeNodeModal();
+        loadNodes(currentNodeFilter);
+      } catch (err) {
+        showToast(err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '保存节点配置';
+      }
+    });
+
+    window.toggleNodeStatus = async function(modelId, newStatus) {
+      try {
+        const res = await fetch(`/api/admin/nodes/${encodeURIComponent(modelId)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: newStatus })
+        });
+        if (!res.ok) throw new Error('状态切换失败');
+        showToast(`节点已变更为「${newStatus === 'active' ? '活跃' : '已下线'}」`, 'success');
+        loadNodes(currentNodeFilter);
+      } catch (err) {
+        showToast(err.message);
+      }
+    };
+
+    window.deleteNode = async function(modelId) {
+      const ok = await showConfirmModal('确认删除算力节点', `确定要彻底删除节点「${modelId}」吗？`, '删除', true);
+      if (!ok) return;
+
+      try {
+        const res = await fetch(`/api/admin/nodes/${encodeURIComponent(modelId)}?permanent=true`, { method: 'DELETE' });
+        if (!res.ok) throw new Error('删除失败');
+        showToast('节点已彻底删除', 'success');
+        loadNodes(currentNodeFilter);
+      } catch (err) {
+        showToast(err.message);
+      }
+    };
+
+    // =========================================================================
+    // 2. Role Competence Health Matrix View
+    // =========================================================================
+
+    async function loadMatrix() {
+      try {
+        const res = await fetch('/api/admin/competence-matrix');
+        if (res.status === 401) {
+          document.getElementById('login-section').style.display = 'flex';
+          document.getElementById('admin-section').style.display = 'none';
+          return;
+        }
+        const data = await res.json();
+        const matrix = data.matrix || [];
+
+        let hasCritical = false;
+        let hasWarning = false;
+        let html = '';
+
+        matrix.forEach(item => {
+          let badgeHtml = '<span class="badge-pill badge-healthy">✓ 健康就绪 (' + item.count + ' 候选)</span>';
+          if (item.health_status === 'critical_orphaned') {
+            badgeHtml = '<span class="badge-pill badge-critical">🚨 孤儿岗位 (0 候选)</span>';
+            hasCritical = true;
+          } else if (item.health_status === 'warning_single_point') {
+            badgeHtml = '<span class="badge-pill badge-warning">⚠️ 单点故障 (仅 1 候选)</span>';
+            hasWarning = true;
+          }
+
+          const inMods = (item.in_modalities || []).map(m => `<span class="badge-pill" style="background:rgba(255,255,255,0.06);">${escapeHtml(m)}</span>`).join(' ');
+          const outMods = (item.out_modalities || []).map(m => `<span class="badge-pill" style="background:rgba(255,255,255,0.06);">${escapeHtml(m)}</span>`).join(' ');
+          const tags = (item.requisition_tags || []).map(t => `<span class="badge-pill" style="background:rgba(99,102,241,0.12); color:#c7d2fe; font-size:0.73rem;">${escapeHtml(t)}</span>`).join(' ');
+
+          let modelsListHtml = '';
+          if (item.matching_models && item.matching_models.length > 0) {
+            modelsListHtml = item.matching_models.map(m => {
+              return `<div style="display:flex; align-items:center; justify-content:space-between; padding:6px 10px; background:rgba(255,255,255,0.03); border:1px solid var(--admin-border-subtle); border-radius:8px; font-size:0.8rem;">
+                <span style="font-weight:500;">${escapeHtml(m.display_name)}</span>
+                <span style="font-family:'JetBrains Mono',monospace; color:var(--text-secondary); font-size:0.75rem;">${escapeHtml(m.provider)} · ${Number(m.cost_per_1k_tokens).toFixed(2)} ⚡</span>
+              </div>`;
+            }).join('');
+          } else {
+            modelsListHtml = `<div style="padding:10px; background:rgba(239,68,68,0.1); border:1px solid rgba(239,68,68,0.25); border-radius:8px; color:#f87171; font-size:0.8rem;">
+              ⚠️ 调度池中无任何模型满足此岗位资质。依赖此岗位的工作流模板在运行时将被熔断。
+            </div>`;
+          }
+
+          html += `<div class="role-card">
+            <div class="role-card-header">
+              <div>
+                <div class="role-card-title">${escapeHtml(item.name_zh)} <span style="font-size:0.8rem; color:var(--text-secondary); font-weight:normal;">(${escapeHtml(item.name_en)})</span></div>
+                <div class="role-card-id">${escapeHtml(item.role_id)}</div>
+              </div>
+              <div>${badgeHtml}</div>
+            </div>
+
+            <div style="font-size:0.82rem; display:flex; align-items:center; gap:6px;">
+              <span style="color:var(--text-secondary);">模态流转:</span>
+              ${inMods} <span class="pipeline-arrow">➔</span> ${outMods}
+            </div>
+
+            <div style="display:flex; flex-wrap:wrap; gap:4px;">
+              ${tags}
+            </div>
+
+            <div style="margin-top:6px;">
+              <span style="font-size:0.78rem; color:var(--text-secondary); display:block; margin-bottom:6px;">匹配算力模型池 (${item.count}):</span>
+              <div style="display:flex; flex-direction:column; gap:4px;">
+                ${modelsListHtml}
+              </div>
+            </div>
+          </div>`;
+        });
+
+        document.getElementById('matrix-container').innerHTML = html;
+
+        // Badge in sidebar
+        const badgeEl = document.getElementById('sidebar-matrix-badge');
+        if (hasCritical) {
+          badgeEl.textContent = 'CRITICAL';
+          badgeEl.style.background = 'rgba(239,68,68,0.2)';
+          badgeEl.style.color = '#f87171';
+        } else if (hasWarning) {
+          badgeEl.textContent = 'WARN';
+          badgeEl.style.background = 'rgba(245,158,11,0.2)';
+          badgeEl.style.color = '#fbbf24';
+        } else {
+          badgeEl.textContent = 'OK';
+          badgeEl.style.background = 'rgba(16,185,129,0.2)';
+          badgeEl.style.color = '#34d399';
+        }
+      } catch (err) {
+        showToast('加载矩阵诊断失败: ' + err.message);
+      }
+    }
+    document.getElementById('btn-refresh-matrix')?.addEventListener('click', loadMatrix);
+
+    // =========================================================================
+    // 3. Linear Workflow Templates Splicer View
+    // =========================================================================
+
+    async function loadTemplates() {
+      try {
+        const res = await fetch('/api/admin/templates');
+        if (res.status === 401) {
+          document.getElementById('login-section').style.display = 'flex';
+          document.getElementById('admin-section').style.display = 'none';
+          return;
+        }
+        const data = await res.json();
+        const templates = data.templates || [];
+        document.getElementById('sidebar-templates-count').textContent = templates.length;
+
+        // Also fetch roles to map role names
+        const rolesRes = await fetch('/api/admin/roles');
+        const rolesData = await rolesRes.json();
+        globalRoles = rolesData.roles || [];
+        const rolesMap = new Map(globalRoles.map(r => [r.role_id, r]));
+
+        let html = '';
+        if (templates.length === 0) {
+          html = `<tr><td colspan="5" style="text-align:center; padding:3rem; color:var(--text-secondary);">暂无工作流模板</td></tr>`;
+        } else {
+          templates.forEach(t => {
+            const seq = t.role_sequence || [];
+            const stepsHtml = seq.map((rid, idx) => {
+              const r = rolesMap.get(rid);
+              const rName = r ? r.name_zh : rid;
+              return `<span class="pipeline-step-pill">${idx + 1}. ${escapeHtml(rName)}</span>`;
+            }).join(' <span class="pipeline-arrow">➔</span> ');
+
+            const inOutDisplay = `<span class="badge-pill" style="background:rgba(255,255,255,0.06);">${(t.in_modalities || []).join(',')}</span> <span class="pipeline-arrow">➔</span> <span class="badge-pill" style="background:rgba(255,255,255,0.06);">${(t.out_modalities || []).join(',')}</span>`;
+
+            const statusClass = t.is_active ? 'badge-active' : 'badge-revoked';
+            const statusText = t.is_active ? '已启用' : '已停用';
+            const toggleActionText = t.is_active ? '停用' : '启用';
+
+            html += `<tr>
+              <td>
+                <div style="font-weight:600; color:#f8fafc;">${escapeHtml(t.name)}</div>
+                <span class="role-card-id">${escapeHtml(t.template_id)}</span>
+                ${t.description ? `<div style="font-size:0.78rem; color:var(--text-secondary); margin-top:2px;">${escapeHtml(t.description)}</div>` : ''}
+              </td>
+              <td><div style="display:flex; flex-wrap:wrap; align-items:center; gap:4px;">${stepsHtml}</div></td>
+              <td>${inOutDisplay}</td>
+              <td><span class="badge-pill ${statusClass}">${statusText}</span></td>
+              <td style="text-align:right;">
+                <button class="btn btn-outline btn-sm" onclick="toggleTemplateActive('${escapeHtml(t.template_id)}', ${t.is_active ? 1 : 0})">${toggleActionText}</button>
+              </td>
+            </tr>`;
+          });
+        }
+        document.getElementById('templates-tbody').innerHTML = html;
+      } catch (err) {
+        showToast('加载工作流模板失败: ' + err.message);
+      }
+    }
+    document.getElementById('btn-refresh-templates')?.addEventListener('click', loadTemplates);
+
+    // Open Template Modal & Linear Splicer
+    document.getElementById('btn-add-template')?.addEventListener('click', async () => {
+      if (globalRoles.length === 0) {
+        const rolesRes = await fetch('/api/admin/roles');
+        const rolesData = await rolesRes.json();
+        globalRoles = rolesData.roles || [];
+      }
+      document.getElementById('template-form').reset();
+      document.getElementById('tpl-id-input').value = '';
+      pipelineSteps = [globalRoles[0]?.role_id || '', globalRoles[1]?.role_id || ''];
+      renderPipelineSteps();
+      document.getElementById('template-modal-overlay').style.display = 'flex';
+    });
+
+    function closeTemplateModal() {
+      document.getElementById('template-modal-overlay').style.display = 'none';
+    }
+    document.getElementById('btn-close-template-modal')?.addEventListener('click', closeTemplateModal);
+    document.getElementById('btn-cancel-template-modal')?.addEventListener('click', closeTemplateModal);
+
+    function renderPipelineSteps() {
+      const container = document.getElementById('pipeline-steps-wrap');
+      container.innerHTML = '';
+
+      pipelineSteps.forEach((selectedRoleId, idx) => {
+        let opts = '';
+        globalRoles.forEach(r => {
+          const isSel = r.role_id === selectedRoleId ? 'selected' : '';
+          opts += `<option value="${escapeHtml(r.role_id)}" ${isSel}>${escapeHtml(r.name_zh)} (${escapeHtml(r.role_id)}) [输入: ${r.in_modalities.join(',')} ➔ 输出: ${r.out_modalities.join(',')}]</option>`;
+        });
+
+        const stepDiv = document.createElement('div');
+        stepDiv.style.cssText = 'display:flex; align-items:center; gap:8px; padding:8px 12px; background:rgba(255,255,255,0.03); border:1px solid var(--admin-border-subtle); border-radius:8px;';
+        stepDiv.innerHTML = `
+          <span style="font-weight:600; font-size:0.85rem; color:#818cf8; min-width:60px;">工序 ${idx + 1}:</span>
+          <select class="input-field step-role-select" style="flex:1; background:#11131f; font-size:0.84rem;" data-idx="${idx}">
+            ${opts}
+          </select>
+          ${pipelineSteps.length > 1 ? `<button type="button" class="btn btn-danger-outline btn-sm" onclick="removePipelineStep(${idx})" style="padding:4px 8px !important;">✕</button>` : ''}
+        `;
+        container.appendChild(stepDiv);
+      });
+
+      // Bind change listeners
+      document.querySelectorAll('.step-role-select').forEach(sel => {
+        sel.addEventListener('change', (e) => {
+          const idx = parseInt(e.target.dataset.idx);
+          pipelineSteps[idx] = e.target.value;
+          validatePipelineClient();
+        });
+      });
+
+      validatePipelineClient();
+    }
+
+    document.getElementById('btn-add-step')?.addEventListener('click', () => {
+      pipelineSteps.push(globalRoles[0]?.role_id || '');
+      renderPipelineSteps();
+    });
+
+    window.removePipelineStep = function(idx) {
+      if (pipelineSteps.length <= 1) return;
+      pipelineSteps.splice(idx, 1);
+      renderPipelineSteps();
+    };
+
+    function validatePipelineClient() {
+      const banner = document.getElementById('pipeline-validation-banner');
+      const submitBtn = document.getElementById('btn-submit-template');
+      const rolesMap = new Map(globalRoles.map(r => [r.role_id, r]));
+
+      if (pipelineSteps.length === 0) {
+        banner.style.display = 'none';
+        submitBtn.disabled = true;
+        return;
+      }
+
+      // Check continuity
+      for (let i = 0; i < pipelineSteps.length - 1; i++) {
+        const cur = rolesMap.get(pipelineSteps[i]);
+        const next = rolesMap.get(pipelineSteps[i + 1]);
+        if (!cur || !next) continue;
+
+        const outSet = new Set(cur.out_modalities || []);
+        const hasOverlap = (next.in_modalities || []).some(m => outSet.has(m));
+        if (!hasOverlap) {
+          banner.style.display = 'block';
+          banner.style.background = 'rgba(239,68,68,0.15)';
+          banner.style.border = '1px solid rgba(239,68,68,0.3)';
+          banner.style.color = '#f87171';
+          banner.innerHTML = `<strong>✕ 模态断裂:</strong> 工序 ${i + 1} (${escapeHtml(cur.name_zh)}) 输出 [${cur.out_modalities.join(', ')}]，而工序 ${i + 2} (${escapeHtml(next.name_zh)}) 要求输入 [${next.in_modalities.join(', ')}]。相邻模态无法闭环传递！`;
+          submitBtn.disabled = true;
+          return;
+        }
+      }
+
+      // Check continuous
+      const chain = pipelineSteps.map(rid => rolesMap.get(rid)?.name_zh || rid).join(' ➔ ');
+      banner.style.display = 'block';
+      banner.style.background = 'rgba(16,185,129,0.15)';
+      banner.style.border = '1px solid rgba(16,185,129,0.3)';
+      banner.style.color = '#34d399';
+      banner.innerHTML = `<strong>✓ 模态连续闭环验证通过:</strong> ${escapeHtml(chain)}`;
+      submitBtn.disabled = false;
+    }
+
+    // Submit Template
+    document.getElementById('template-form')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const name = document.getElementById('tpl-name-input').value.trim();
+      const templateId = document.getElementById('tpl-id-input').value.trim() || undefined;
+      const description = document.getElementById('tpl-desc-input').value.trim();
+
+      const btn = document.getElementById('btn-submit-template');
+      btn.disabled = true;
+      btn.textContent = '验证并保存中...';
+
+      try {
+        const res = await fetch('/api/admin/templates', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            template_id: templateId,
+            name,
+            description,
+            role_sequence: pipelineSteps
+          })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '保存模板失败');
+
+        showToast('工作流模板已成功保存并通过双重校验！', 'success');
+        closeTemplateModal();
+        loadTemplates();
+      } catch (err) {
+        showToast(err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '保存工作流模板';
+      }
+    });
+
+    window.toggleTemplateActive = async function(templateId, currentActive) {
+      try {
+        const res = await fetch(`/api/admin/templates/${encodeURIComponent(templateId)}/toggle`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ is_active: currentActive ? 0 : 1 })
+        });
+        if (!res.ok) throw new Error('切换状态失败');
+        showToast('模板启用状态已更新', 'success');
+        loadTemplates();
+      } catch (err) {
+        showToast(err.message);
+      }
+    };
     // ----------------- Gift Codes Console -----------------
     async function loadGiftCodes() {
       try {

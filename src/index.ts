@@ -53,6 +53,31 @@ export default {
            const admin = await import("./api/admin");
            if (url.pathname === "/api/admin/login") res = await admin.handleAdminLogin(request, env);
            else if (url.pathname === "/api/admin/logout") res = await admin.handleAdminLogout(request, env);
+           // Compute Topology Nodes
+           else if (url.pathname === "/api/admin/nodes" && request.method === "GET") res = await admin.handleAdminListNodes(request, env);
+           else if (url.pathname === "/api/admin/nodes" && request.method === "POST") res = await admin.handleAdminCreateNode(request, env);
+           else if (url.pathname.startsWith("/api/admin/nodes/") && request.method === "PATCH") {
+             const nodeId = url.pathname.slice("/api/admin/nodes/".length);
+             res = await admin.handleAdminUpdateNode(request, env, nodeId);
+           } else if (url.pathname.startsWith("/api/admin/nodes/") && request.method === "DELETE") {
+             const nodeId = url.pathname.slice("/api/admin/nodes/".length);
+             res = await admin.handleAdminDeleteNode(request, env, nodeId);
+           } else if (url.pathname === "/api/admin/nodes/upload-light" && request.method === "POST") {
+             res = await admin.handleAdminUploadLightNode(request, env);
+           }
+           // Role Dictionary & Competence Health Matrix
+           else if (url.pathname === "/api/admin/roles" && request.method === "GET") res = await admin.handleAdminListRoles(request, env);
+           else if (url.pathname === "/api/admin/roles" && request.method === "POST") res = await admin.handleAdminCreateOrUpdateRole(request, env);
+           else if (url.pathname === "/api/admin/competence-matrix" && request.method === "GET") res = await admin.handleAdminCompetenceMatrix(request, env);
+           // Linear Workflow Templates
+           else if (url.pathname === "/api/admin/templates" && request.method === "GET") res = await admin.handleAdminListTemplates(request, env);
+           else if (url.pathname === "/api/admin/templates" && request.method === "POST") res = await admin.handleAdminCreateOrUpdateTemplate(request, env);
+           else if (url.pathname.startsWith("/api/admin/templates/") && url.pathname.endsWith("/toggle") && request.method === "POST") {
+             const parts = url.pathname.split("/");
+             const templateId = parts[parts.length - 2];
+             res = await admin.handleAdminToggleTemplate(request, env, templateId);
+           }
+           // Gift codes & notifications & legacy compat
            else if (url.pathname === "/api/admin/models" && request.method === "GET") res = await admin.handleAdminListModels(request, env);
            else if (url.pathname.endsWith("/download") && request.method === "GET") res = await admin.handleAdminDownload(request, env);
            else if (url.pathname === "/api/admin/gift-codes" && request.method === "POST") res = await admin.handleAdminCreateGiftCodes(request, env);
