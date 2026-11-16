@@ -79,7 +79,7 @@ export function sliceEnvelopeForNode(
     parent_role_name: parentRoleName,
     custom_prompt: node.custom_prompt,
     compensation_prompt: node.compensation_prompt,
-    target_language: envelope.constraint_context.target_language,
-    output_style: envelope.constraint_context.output_style
+    target_language: envelope.constraint_context?.target_language,
+    output_style: envelope.constraint_context?.output_style
   };
 }
