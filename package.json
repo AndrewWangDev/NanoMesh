@@ -6,7 +6,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "types": "wrangler types",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "npx tsx tests/unit_test.ts && npx tsx tests/integration_test.ts"
   },
   "dependencies": {
     "aws4fetch": "^1.0.19",

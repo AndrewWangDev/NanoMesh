@@ -101,7 +101,7 @@ function buildConstraintDirective(targetLang?: string, outputStyle?: string): st
  * Operates on promptContent by preserving system directives and user's current-round highest priority commands,
  * while truncating earlier historical context / redundant upstream notes from the head if necessary.
  */
-function applyContextWindowGuard(
+export function applyContextWindowGuard(
   systemPrompt: string,
   promptContent: string,
   contextWindow: number = 4096,
@@ -1142,18 +1142,20 @@ export async function executeDAGStream(
         try { controller.close(); } catch (e) {}
       }
     },
-    cancel(reason) {
+    async cancel(reason) {
       isStreamCancelled = true;
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       try { abortController.abort(); } catch (e) {}
       // If user aborted before any real tokens were generated, release pre-deducted reservation
       if (options.hasPreDeducted && !hasEmittedTokens) {
         options.hasPreDeducted = false;
-        env.DB.prepare(
-          "UPDATE users SET credits = credits + 1 WHERE user_id = ?"
-        ).bind(options.userId).run().catch((refundErr) => {
+        try {
+          await env.DB.prepare(
+            "UPDATE users SET credits = credits + 1 WHERE user_id = ?"
+          ).bind(options.userId).run();
+        } catch (refundErr) {
           console.error("[Dispatcher] Failed to refund reserved credit on cancel:", refundErr);
-        });
+        }
       }
     }
   });
