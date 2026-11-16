@@ -3,7 +3,7 @@ import { DAGTemplate, ModelMetadata } from "./types";
 
 /**
  * Step 1: Hard Filtering for Models
- * Drops models with user rating < 1.0, active concurrency > 300 or at capacity, or insufficient context window
+ * Drops models with user rating < 1.0, status inactive, or insufficient context window
  */
 export function hardFilterModels(
   models: ModelMetadata[],
@@ -15,15 +15,12 @@ export function hardFilterModels(
     if (disableBrowser && m.inference_target === 'browser') return false;
 
     // 1. Rating check: Rm >= 1.0
-    if (m.user_rating < 1.0) return false;
+    if ((m.user_rating || 5.0) < 1.0) return false;
 
-    // 2. Concurrency check: active <= 300 and active < max
-    if (m.active_connections > 300 || m.active_connections >= m.max_concurrency) return false;
-
-    // 3. Context window check
+    // 2. Physical context window check: token budget must fit within model's context window
     if (m.context_window < estimatedTokens) return false;
 
-    // 4. Status active
+    // 3. Status active
     if (m.status !== 'active') return false;
 
     return true;

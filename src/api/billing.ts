@@ -63,6 +63,10 @@ export async function handleGetLedger(req: Request, env: Env) {
 
 export async function handleRedeem(req: Request, env: Env): Promise<Response> {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+
+  // Opportunistic cleanup of stale redeem attempts (> 1 day old)
+  env.DB.prepare("DELETE FROM redeem_attempts WHERE created_at < datetime('now', '-1 day')").run().catch(() => {});
+
   const session = await getSession(req, env);
   if (!session || !session.userId) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });

@@ -83,7 +83,7 @@ export interface ModelMetadata {
   prior_score: number;
   scenario_anchors: string[];
   anchor_embeddings?: number[][] | null;
-  inference_target?: 'cloud' | 'browser' | 'heavy';
+  inference_target?: 'cloud' | 'browser' | 'heavy' | 'edge';
   browser_runtime?: 'webgpu' | 'wasm';
   download_size_bytes?: number;
   auth_mode?: 'none' | 'jwt_ephemeral' | 'bearer_static';
@@ -97,6 +97,9 @@ export interface ScoredModel {
   sim: number;
   concurrency_penalty: number;
   specialist_score: number;
+  context_fit_score?: number;
+  tier_score?: number;
+  jitter_score?: number;
 }
 
 export interface InstantiatedDAGNode {
