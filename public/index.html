@@ -453,10 +453,6 @@
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"></rect><line x1="2" y1="10" x2="22" y2="10"></line></svg>
             <span data-i18n="settings.nav.billing">Billing & Quota</span>
           </li>
-          <li class="settings-nav-item" data-tab="models">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
-            <span data-i18n="settings.nav.models">My Models</span>
-          </li>
           <li class="settings-nav-item" data-tab="messages">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
             <span data-i18n="settings.nav.messages">Notifications</span>
@@ -705,37 +701,7 @@
             </div>
         </div>
 
-        <!-- Tab 3: Models -->
-        <div class="settings-tab-pane" id="settings-tab-models">
-          <div class="models-header">
-            <div class="models-header-left">
-              <h2 class="settings-pane-title" style="margin: 0 0 0.25rem 0;" data-i18n="settings.nav.models">My Models</h2>
-              <span class="models-subtitle" data-i18n="models.supportText">Supports .gguf, .safetensors weight files (max 3GB per file)</span>
-            </div>
-            <button class="models-upload-btn" id="btn-upload-model">
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-              <span data-i18n="models.upload">Upload Model</span>
-            </button>
-          </div>
-
-          <div class="models-card">
-            <table class="models-table">
-              <thead>
-                <tr>
-                  <th class="models-th-model" data-i18n="settings.models.colModel">Model & Specs</th>
-                  <th class="models-th-usage" data-i18n="settings.models.colUsage">Usage</th>
-                  <th class="models-th-status" data-i18n="settings.models.colStatus">Status</th>
-                  <th class="models-th-action" data-i18n="settings.models.colAction"></th>
-                </tr>
-              </thead>
-              <tbody id="user-models-tbody"></tbody>
-            </table>
-            <div class="models-card-footer">
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-              <span><span data-i18n="settings.models.contactSupport">Approved nodes cannot be deleted directly. To take down, contact</span> <a href="mailto:support@andrewwangdev.com" class="models-footer-email">support@andrewwangdev.com</a></span>
-            </div>
-          </div>
-        </div>
+        <!-- Tab 3: Notifications (Formerly Tab 5) -->
 
         <!-- Tab 4: API Keys -->
         <div class="settings-tab-pane" id="settings-tab-apikeys">
@@ -791,166 +757,7 @@
       </div>
     </div>
   </div>
-  <div class="modal-overlay" id="compliance-modal-overlay" style="background: rgba(0, 0, 0, 0.8); backdrop-filter: blur(8px); z-index: 10000;">
-    <div class="compliance-modal">
-      <div class="compliance-header">
-        <h3 class="compliance-title" data-i18n="compliance.title">Model Upload & Deployment Compliance Statement</h3>
-        <p class="compliance-subtitle" data-i18n="compliance.subtitle">To ensure the security of the NanoMesh ecosystem and your legal rights, please carefully read and confirm the following compliance terms before connecting model weights to the NanoMesh scheduling network.</p>
-      </div>
-      <div class="compliance-content">
-        <div class="compliance-item">
-          <div class="compliance-item-header">
-            <span class="compliance-icon">⚖️</span>
-            <strong data-i18n="compliance.item1.title">Copyright & Licensing Guidelines</strong>
-          </div>
-          <ul class="compliance-list">
-            <li data-i18n="compliance.item1.desc1">You guarantee that the uploaded model weights and architecture do not infringe on any third-party intellectual property rights.</li>
-            <li data-i18n="compliance.item1.desc2">Uploading leaked closed-source commercial models or fine-tuned models that violate the original author's open-source license is strictly prohibited.</li>
-          </ul>
-        </div>
-        <div class="compliance-item">
-          <div class="compliance-item-header">
-            <span class="compliance-icon">🛡️</span>
-            <strong data-i18n="compliance.item2.title">Content Safety Standards</strong>
-          </div>
-          <ul class="compliance-list">
-            <li data-i18n="compliance.item2.desc1">You promise that the model has not been maliciously trained. Generating illegal content such as child pornography, extreme violence, terrorism promotion, or hate speech is strictly prohibited.</li>
-          </ul>
-        </div>
-        <div class="compliance-item">
-          <div class="compliance-item-header">
-            <span class="compliance-icon">🔒</span>
-            <strong data-i18n="compliance.item3.title">Privacy & Data Regulations</strong>
-          </div>
-          <ul class="compliance-list">
-            <li data-i18n="compliance.item3.desc1">You promise that the model does not contain any form of backdoor instructions, phishing prompt injections, or user data theft mechanisms.</li>
-            <li data-i18n="compliance.item3.desc2">You promise that the models you upload will not directly or indirectly bypass our security protocols, disrupt NanoMesh's normal operations, or infringe upon the legitimate rights and interests of NanoMesh and others.</li>
-          </ul>
-        </div>
-        <p class="compliance-warning-text" data-i18n="compliance.warning">NanoMesh will conduct a security audit on every connected model. If violations are found, the platform reserves the right to unconditionally block the node, take down the model, freeze all credits/points, and permanently ban your developer account. In severe cases, we will report to the relevant authorities.</p>
-      </div>
-      <div class="compliance-footer">
-        <label class="compliance-checkbox-label">
-          <input type="checkbox" id="compliance-checkbox">
-          <span class="compliance-checkbox-text">
-            <span data-i18n="compliance.checkbox">I have read, understood, and promise to fully comply with the above requirements and the </span><a href="/terms" target="_blank" class="compliance-link" data-i18n="compliance.terms">NanoMesh Terms of Service</a><span data-i18n="compliance.checkboxEnd">.</span>
-          </span>
-        </label>
-        <div class="compliance-actions">
-          <button class="btn btn-outline" id="compliance-cancel-btn" data-i18n="compliance.decline">Decline & Cancel</button>
-          <button class="btn btn-primary" id="compliance-agree-btn" data-i18n="compliance.agree" disabled style="opacity: 0.5; cursor: not-allowed;">Agree & Continue</button>
-        </div>
-      </div>
-    </div>
-  </div>
 
-  <!-- Upload Form Modal -->
-  <div class="modal-overlay" id="upload-form-overlay" style="background: rgba(0, 0, 0, 0.8); backdrop-filter: blur(8px); z-index: 10000;">
-    <div class="compliance-modal" style="max-width: 560px;">
-      <div class="compliance-header">
-        <h3 class="compliance-title" data-i18n="upload.formTitle">Submit Model Information</h3>
-        <p class="compliance-subtitle" data-i18n="upload.formSubtitle">Please fill in the basic information for platform review and scheduling network integration.</p>
-      </div>
-      <div class="compliance-content" style="gap: 1.25rem;">
-
-        <!-- Drop Zone -->
-        <div class="upload-dropzone" id="upload-dropzone">
-          <svg viewBox="0 0 24 24" width="36" height="36" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-          <p class="upload-dropzone-text" data-i18n="upload.dropzone">Drag & drop file here, or click to browse</p>
-          <span class="upload-dropzone-hint" data-i18n="upload.dropzoneHint">Only .gguf / .safetensors, max 3GB</span>
-          <input type="file" id="upload-file-input" accept=".gguf,.safetensors" style="display:none;">
-        </div>
-        <div class="upload-file-info" id="upload-file-info" style="display:none;">
-          <span class="upload-file-name" id="upload-file-name"></span>
-          <button class="upload-file-remove" id="upload-file-remove">&times;</button>
-        </div>
-
-        <!-- Display Name -->
-        <div class="upload-field">
-          <label class="upload-label" data-i18n="upload.displayName">Model Display Name</label>
-          <input type="text" id="upload-display-name" class="input-field" maxlength="50" placeholder="Llama3-8B-Medical-ZH" data-i18n-placeholder="upload.displayNamePlaceholder">
-          <span class="upload-hint" data-i18n="upload.displayNameRule">3~50 chars, letters, numbers, hyphens only</span>
-        </div>
-
-        <!-- Param Scale -->
-        <div class="upload-field">
-          <label class="upload-label" data-i18n="upload.paramScale">Parameter Scale</label>
-          <div class="upload-segmented" id="upload-param-scale">
-            <button type="button" class="upload-seg-btn active" data-value="lt1b" data-i18n="upload.paramScale.lt1b">< 1B</button>
-            <button type="button" class="upload-seg-btn" data-value="1b_3b" data-i18n="upload.paramScale.1b_3b">1B ~ 3B</button>
-            <button type="button" class="upload-seg-btn" data-value="7b_9b" data-i18n="upload.paramScale.7b_9b">7B ~ 9B</button>
-            <button type="button" class="upload-seg-btn" data-value="13b_14b" data-i18n="upload.paramScale.13b_14b">13B ~ 14B</button>
-            <button type="button" class="upload-seg-btn" data-value="30b_plus" data-i18n="upload.paramScale.30b_plus">30B+</button>
-          </div>
-        </div>
-
-        <!-- Input Modalities (multi-select capsules) -->
-        <div class="upload-field">
-          <label class="upload-label"><span data-i18n="upload.inModalities">Supported Input Modalities</span> <span class="upload-hint-inline" data-i18n="upload.inModalities.hint">Select at least 1</span></label>
-          <div class="upload-capsule-group" id="upload-in-modalities">
-            <label class="upload-capsule"><input type="checkbox" value="text" checked><span data-i18n="upload.modality.text">Text</span></label>
-            <label class="upload-capsule"><input type="checkbox" value="image"><span data-i18n="upload.modality.image">Image</span></label>
-            <label class="upload-capsule"><input type="checkbox" value="audio"><span data-i18n="upload.modality.audio">Audio</span></label>
-            <label class="upload-capsule"><input type="checkbox" value="video"><span data-i18n="upload.modality.video">Video</span></label>
-          </div>
-        </div>
-
-        <!-- Output Modality (single-select radio pills) -->
-        <div class="upload-field">
-          <label class="upload-label" data-i18n="upload.outModality">Output Modality</label>
-          <div class="upload-capsule-group" id="upload-out-modality">
-            <label class="upload-capsule"><input type="radio" name="out-modality" value="text" checked><span data-i18n="upload.modality.text">Text</span></label>
-            <label class="upload-capsule"><input type="radio" name="out-modality" value="image"><span data-i18n="upload.modality.image">Image</span></label>
-            <label class="upload-capsule"><input type="radio" name="out-modality" value="audio"><span data-i18n="upload.modality.audio">Audio</span></label>
-          </div>
-        </div>
-
-        <!-- Capability Tags (max 3) -->
-        <div class="upload-field">
-          <label class="upload-label"><span data-i18n="upload.capabilityTags">Core Capability Tags</span> <span class="upload-hint-inline" data-i18n="upload.capabilityTags.hint">Select up to 3</span></label>
-          <div class="upload-capsule-group upload-tags-group" id="upload-capability-tags">
-            <label class="upload-capsule"><input type="checkbox" value="ocr"><span data-i18n="upload.tag.ocr">OCR Extraction</span></label>
-            <label class="upload-capsule"><input type="checkbox" value="translation"><span data-i18n="upload.tag.translation">Multilingual Translation</span></label>
-            <label class="upload-capsule"><input type="checkbox" value="code_gen"><span data-i18n="upload.tag.code_gen">Code Generation</span></label>
-            <label class="upload-capsule"><input type="checkbox" value="summarization"><span data-i18n="upload.tag.summarization">Structured Summarization</span></label>
-            <label class="upload-capsule"><input type="checkbox" value="creative_writing"><span data-i18n="upload.tag.creative_writing">Creative Writing</span></label>
-            <label class="upload-capsule"><input type="checkbox" value="speech_transcription"><span data-i18n="upload.tag.speech_transcription">Speech Transcription</span></label>
-          </div>
-        </div>
-
-        <!-- Context Window (segmented control) -->
-        <div class="upload-field">
-          <label class="upload-label" data-i18n="upload.contextWindow">Max Context Window</label>
-          <div class="upload-segmented" id="upload-context-window">
-            <button type="button" class="upload-seg-btn active" data-value="4096">4K</button>
-            <button type="button" class="upload-seg-btn" data-value="8192">8K</button>
-            <button type="button" class="upload-seg-btn" data-value="16384">16K</button>
-            <button type="button" class="upload-seg-btn" data-value="32768">32K</button>
-            <button type="button" class="upload-seg-btn" data-value="131072">128K</button>
-          </div>
-        </div>
-
-        <!-- Description -->
-        <div class="upload-field">
-          <label class="upload-label" data-i18n="upload.description">Model Description</label>
-          <textarea id="upload-description" class="input-field upload-textarea" rows="3" maxlength="200" data-i18n-placeholder="upload.descriptionPlaceholder" placeholder="该模型针对什么垂直场景做过微调？擅长什么？不擅长什么？"></textarea>
-          <div class="upload-desc-footer">
-            <span class="upload-hint" data-i18n="upload.descriptionRule">Required, 20~200 characters</span>
-            <span class="upload-char-count" id="upload-char-count">0 / 200</span>
-          </div>
-        </div>
-
-      </div>
-      <div class="compliance-footer">
-        <div class="compliance-actions">
-          <button class="btn btn-outline" id="upload-form-cancel" data-i18n="upload.cancel">Cancel</button>
-          <button class="btn btn-primary" id="upload-form-submit" data-i18n="upload.submit">Submit for Review</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  
   <!-- Recharge & Redeem Modal -->
   <div class="modal-overlay" id="recharge-modal-overlay" style="display: none; background: rgba(0, 0, 0, 0.82); backdrop-filter: blur(8px); z-index: 10000; align-items: center; justify-content: center;">
     <div class="modal recharge-modal" style="width: 100%; max-width: 460px; background: var(--surface-color); border: 1px solid var(--border-color); border-radius: 16px; padding: 24px; box-shadow: 0 24px 48px rgba(0, 0, 0, 0.5); position: relative; animation: modalFadeIn 0.2s ease-out;">
