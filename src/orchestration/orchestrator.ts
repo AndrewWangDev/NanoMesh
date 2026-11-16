@@ -263,26 +263,67 @@ export async function runOrchestrationPipeline(
   // ----------------------------------------------------
   // Step 1: Load DB metadata & Hard Filter & Subsistence Law
   // ----------------------------------------------------
+  const rawRoles = await env.DB.prepare(
+    "SELECT * FROM dag_roles"
+  ).all<any>().catch(() => ({ results: [] }));
+
+  const roleMap = new Map<string, DAGRole>();
+  for (const r of (rawRoles.results || [])) {
+    roleMap.set(r.role_id, {
+      role_id: r.role_id,
+      name_zh: r.name_zh,
+      name_en: r.name_en,
+      in_modalities: safeJsonParse<string[]>(r.in_modalities, []),
+      out_modalities: safeJsonParse<string[]>(r.out_modalities, []),
+      in_degree: 0,
+      out_degree: 0,
+      requisition_tags: safeJsonParse<string[]>(r.requisition_tags, []),
+      compensation_prompts: safeJsonParse<Record<string, string>>(r.compensation_prompts, {})
+    });
+  }
+
   const rawTemplates = await env.DB.prepare(
     "SELECT * FROM dag_templates WHERE status = 'active'"
   ).all<any>();
 
-  const allTemplates: DAGTemplate[] = (rawTemplates.results || []).map(r => ({
-    template_id: r.template_id,
-    name_zh: r.template_id === 'tpl-vision-ocr-summary' ? '视觉多模态全景分析' : r.name_zh,
-    name_en: r.template_id === 'tpl-vision-ocr-summary' ? 'Multimodal Vision Analysis' : r.name_en,
-    desc_zh: r.template_id === 'tpl-vision-ocr-summary'
-      ? '两阶段图像综合分析：第一阶段进行高精度视觉主体理解、艺术排版与风格解析及OCR提取，第二阶段由语言模型进行结构化梳理与润色'
-      : r.desc_zh,
-    desc_en: r.template_id === 'tpl-vision-ocr-summary'
-      ? 'Two-stage visual analysis pipeline: high-precision visual understanding, style/layout analysis, and OCR extraction followed by structured synthesis'
-      : r.desc_en,
-    head_modalities: safeJsonParse<string[]>(r.head_modalities, []),
-    tail_modalities: safeJsonParse<string[]>(r.tail_modalities, []),
-    roles: safeJsonParse<DAGRole[]>(r.roles, []),
-    priority: r.priority || 1,
-    status: r.status || 'active'
-  }));
+  const allTemplates: DAGTemplate[] = (rawTemplates.results || []).map(r => {
+    const roleSequence = safeJsonParse<string[]>(r.role_sequence, []);
+    let resolvedRoles: DAGRole[] = [];
+
+    if (roleSequence.length > 0 && roleMap.size > 0) {
+      resolvedRoles = roleSequence.map((roleId, idx) => {
+        const baseRole = roleMap.get(roleId);
+        if (!baseRole) return null;
+        return {
+          ...baseRole,
+          in_degree: idx === 0 ? 0 : 1,
+          out_degree: idx === roleSequence.length - 1 ? 0 : 1
+        };
+      }).filter((x): x is DAGRole => x !== null);
+    }
+
+    if (resolvedRoles.length === 0) {
+      resolvedRoles = safeJsonParse<DAGRole[]>(r.roles, []);
+    }
+
+    return {
+      template_id: r.template_id,
+      name_zh: r.template_id === 'tpl-vision-ocr-summary' ? '视觉多模态全景分析' : r.name_zh,
+      name_en: r.template_id === 'tpl-vision-ocr-summary' ? 'Multimodal Vision Analysis' : r.name_en,
+      desc_zh: r.template_id === 'tpl-vision-ocr-summary'
+        ? '两阶段图像综合分析：第一阶段进行高精度视觉主体理解、艺术排版与风格解析及OCR提取，第二阶段由语言模型进行结构化梳理与润色'
+        : r.desc_zh,
+      desc_en: r.template_id === 'tpl-vision-ocr-summary'
+        ? 'Two-stage visual analysis pipeline: high-precision visual understanding, style/layout analysis, and OCR extraction followed by structured synthesis'
+        : r.desc_en,
+      head_modalities: safeJsonParse<string[]>(r.head_modalities, []),
+      tail_modalities: safeJsonParse<string[]>(r.tail_modalities, []),
+      roles: resolvedRoles,
+      role_sequence: roleSequence,
+      priority: r.priority || 1,
+      status: r.status || 'active'
+    };
+  });
 
   const rawModels = await env.DB.prepare(
     "SELECT * FROM models WHERE status = 'active'"
@@ -309,7 +350,10 @@ export async function runOrchestrationPipeline(
     anchor_embeddings: r.anchor_embeddings ? safeJsonParse<number[][] | null>(r.anchor_embeddings, null) : null,
     inference_target: r.inference_target || 'cloud',
     browser_runtime: r.browser_runtime || undefined,
-    download_size_bytes: r.download_size_bytes || 0
+    download_size_bytes: r.download_size_bytes || 0,
+    auth_mode: r.auth_mode || 'none',
+    auth_secret: r.auth_secret || null,
+    api_format: r.api_format || 'workers_ai'
   }));
 
   // Hard filter models

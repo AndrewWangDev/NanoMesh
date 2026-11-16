@@ -59,6 +59,7 @@ export interface DAGTemplate {
   head_modalities: string[];
   tail_modalities: string[];
   roles: DAGRole[];
+  role_sequence?: string[];
   priority: number;
   status: string;
 }
@@ -85,6 +86,9 @@ export interface ModelMetadata {
   inference_target?: 'cloud' | 'browser' | 'heavy';
   browser_runtime?: 'webgpu' | 'wasm';
   download_size_bytes?: number;
+  auth_mode?: 'none' | 'jwt_ephemeral' | 'bearer_static';
+  auth_secret?: string | null;
+  api_format?: 'workers_ai' | 'openai_compat' | 'google_ai';
 }
 
 export interface ScoredModel {
