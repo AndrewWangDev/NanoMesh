@@ -183,9 +183,11 @@ export function resolveRoleCompetence(
         if (!modelIn.has(reqIn)) return false;
       }
 
-      // (2) Role.out ⊆ Model.out (Model must support outputting text if required)
-      if (roleOut.has('text') && !modelIn.has('text') && !m.modalities.includes('text')) {
-        // Most models output text
+      // (2) Role.out ⊆ Model.out (If role outputs non-text such as audio or image, model must support it)
+      for (const reqOut of roleOut) {
+        if (reqOut !== 'text' && !modelIn.has(reqOut)) {
+          return false;
+        }
       }
 
       // (3) Role.tag ⊆ Model.tags
@@ -211,6 +213,11 @@ export function resolveRoleCompetence(
       const modelIn = new Set(m.modalities);
       for (const reqIn of roleIn) {
         if (!modelIn.has(reqIn)) return false;
+      }
+      for (const reqOut of roleOut) {
+        if (reqOut !== 'text' && !modelIn.has(reqOut)) {
+          return false;
+        }
       }
       return true;
     });
