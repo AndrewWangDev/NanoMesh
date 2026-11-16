@@ -81,9 +81,6 @@ export default {
            const notifId = url.pathname.split("/")[3];
            const { handleMarkAsRead } = await import("./api/notifications");
            res = await handleMarkAsRead(request, env, notifId);
-        } else if (url.pathname.startsWith("/api/models/mine/") && request.method === "DELETE") {
-           const { handleDeleteMyModel } = await import("./api/models");
-           res = await handleDeleteMyModel(request, env);
         } else if (url.pathname === "/api/history" && request.method === "GET") {
            const { handleGetHistory } = await import("./api/history");
            res = await handleGetHistory(request, env);
@@ -171,21 +168,9 @@ export default {
               res = Response.json({ credits: dbUser?.credits ?? 0 });
               break;
             }
-            case "/api/models/upload/init": {
-              const { handleUploadInit } = await import("./api/models");
-              res = await handleUploadInit(request, env); break;
-            }
-            case "/api/models/upload/complete": {
-              const { handleUploadComplete } = await import("./api/models");
-              res = await handleUploadComplete(request, env); break;
-            }
-            case "/api/models/upload/abort": {
-              const { handleUploadAbort } = await import("./api/models");
-              res = await handleUploadAbort(request, env); break;
-            }
-            case "/api/models/mine": {
-              const { handleListMyModels } = await import("./api/models");
-              res = await handleListMyModels(request, env); break;
+            case "/api/models": {
+              const { handleGetPublicModels } = await import("./api/models");
+              res = await handleGetPublicModels(request, env); break;
             }
             case "/api/chat": {
               const { handleChat } = await import("./api/chat");
