@@ -30,7 +30,7 @@ async function computeSha256Hex(data: string): Promise<string> {
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-function isSafeExternalUrl(urlStr: string): boolean {
+export function isSafeExternalUrl(urlStr: string): boolean {
   try {
     const parsed = new URL(urlStr);
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
@@ -183,6 +183,10 @@ async function buildAuthHeaders(
     );
     headers['Authorization'] = `Bearer ${heavyToken}`;
     return headers;
+  }
+
+  if (model.api_format === 'google_ai' && model.auth_secret) {
+    headers['x-goog-api-key'] = model.auth_secret;
   }
 
   return headers;
@@ -388,12 +392,19 @@ export async function executeDAGStream(
   options: ExecutionOptions
 ): Promise<ReadableStream> {
   const encoder = new TextEncoder();
+  const abortController = new AbortController();
+  let heartbeatTimer: any = null;
+  let isStreamCancelled = false;
+  let hasEmittedTokens = false;
 
   return new ReadableStream({
     async start(controller) {
       function sendEvent(eventType: string, data: any) {
-        const payload = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
-        controller.enqueue(encoder.encode(payload));
+        if (isStreamCancelled) return;
+        try {
+          const payload = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
+          controller.enqueue(encoder.encode(payload));
+        } catch (e) {}
       }
 
       async function refundReservedCredit() {
@@ -410,10 +421,16 @@ export async function executeDAGStream(
       }
 
       // SSE Keep-Alive Heartbeat to prevent edge gateway timeouts
-      const heartbeatTimer = setInterval(() => {
+      heartbeatTimer = setInterval(() => {
+        if (isStreamCancelled) {
+          clearInterval(heartbeatTimer);
+          return;
+        }
         try {
           controller.enqueue(encoder.encode(': keep-alive\n\n'));
-        } catch (e) {}
+        } catch (e) {
+          clearInterval(heartbeatTimer);
+        }
       }, 2500);
 
       let upstreamOutput = '';
@@ -789,10 +806,7 @@ export async function executeDAGStream(
                       const action = isStream ? 'streamGenerateContent?alt=sse' : 'generateContent';
                       targetUrl = `${baseUrl}/${currentCandidate.model_id}:${action}`;
                     }
-                    if (currentCandidate.auth_secret && !targetUrl.includes('key=')) {
-                      const separator = targetUrl.includes('?') ? '&' : '?';
-                      targetUrl = `${targetUrl}${separator}key=${encodeURIComponent(currentCandidate.auth_secret)}`;
-                    }
+                    // Google AI Studio Key is passed securely via 'x-goog-api-key' HTTP header
 
                     requestPayload = {
                       system_instruction: {
@@ -839,7 +853,8 @@ export async function executeDAGStream(
                     const fRes = await fetch(targetUrl, {
                       method: 'POST',
                       headers: reqHeaders,
-                      body: payloadStr
+                      body: payloadStr,
+                      signal: abortController.signal
                     });
 
                     // Fail-fast on authentication/tampering violations (NEVER failover on security errors!)
@@ -857,6 +872,7 @@ export async function executeDAGStream(
                       return await parseAIResponse(fRes.body, (chunkText) => {
                         if (chunkText) {
                           didStreamChunks = true;
+                          hasEmittedTokens = true;
                           sendEvent('text_chunk', {
                             role_id: node.role.role_id,
                             chunk: chunkText,
@@ -1112,14 +1128,32 @@ export async function executeDAGStream(
         });
 
       } catch (err: any) {
+        if (isStreamCancelled || err.name === 'AbortError') {
+          // Client disconnected early, cancel() callback already triggered refund if eligible
+          return;
+        }
         // Unconditionally release pre-deducted reservation if DAG fails to deliver end-to-end (All-or-Nothing delivery)
         await refundReservedCredit();
         sendEvent('dag_error', {
           error: err.message || 'Execution error'
         });
       } finally {
-        clearInterval(heartbeatTimer);
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
         try { controller.close(); } catch (e) {}
+      }
+    },
+    cancel(reason) {
+      isStreamCancelled = true;
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      try { abortController.abort(); } catch (e) {}
+      // If user aborted before any real tokens were generated, release pre-deducted reservation
+      if (options.hasPreDeducted && !hasEmittedTokens) {
+        options.hasPreDeducted = false;
+        env.DB.prepare(
+          "UPDATE users SET credits = credits + 1 WHERE user_id = ?"
+        ).bind(options.userId).run().catch((refundErr) => {
+          console.error("[Dispatcher] Failed to refund reserved credit on cancel:", refundErr);
+        });
       }
     }
   });

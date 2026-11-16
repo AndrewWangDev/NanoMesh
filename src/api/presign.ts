@@ -185,18 +185,41 @@ export async function handleChatUpload(request: Request, env: Env): Promise<Resp
 }
 
 export async function handleGetAsset(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  let key = url.searchParams.get("key");
+  if (!key) {
+    if (url.pathname.startsWith("/api/assets/")) {
+      key = decodeURIComponent(url.pathname.slice("/api/assets/".length));
+    } else if (url.pathname.startsWith("/api/asset/")) {
+      key = decodeURIComponent(url.pathname.slice("/api/asset/".length));
+    }
+  }
+
+  if (!key) {
+    return new Response("Missing asset key", { status: 400 });
+  }
+
+  // 1. Public Light Node Models: accessible without user session for WebGPU/browser runtimes
+  if (key.startsWith("models/light/")) {
+    const object = await env.R2.get(key);
+    if (!object) {
+      return new Response("Not Found", { status: 404 });
+    }
+    const headers = new Headers();
+    object.writeHttpMetadata(headers);
+    headers.set("etag", object.httpEtag);
+    headers.set("cache-control", "public, max-age=31536000, immutable");
+    headers.set("access-control-allow-origin", "*");
+    return new Response(object.body, { headers });
+  }
+
+  // 2. Private Temporary User Assets: strictly require user session and isolation
   const session = await getSession(request, env);
   if (!session) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), { 
       status: 401, 
       headers: { "Content-Type": "application/json" } 
     });
-  }
-
-  const url = new URL(request.url);
-  const key = url.searchParams.get("key");
-  if (!key) {
-    return new Response("Missing asset key", { status: 400 });
   }
 
   // Security check: Only allow user to access their own assets

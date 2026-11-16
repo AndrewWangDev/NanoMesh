@@ -520,7 +520,9 @@ export async function runOrchestrationPipeline(
         env,
         roleResolution.selectedModels,
         promptEmbedding,
-        envelope.instruction_payload
+        envelope.instruction_payload,
+        envelope.session_id,
+        envelope.metadata?.estimated_input_tokens || 512
       );
 
       if (scoredModels.length === 0) {

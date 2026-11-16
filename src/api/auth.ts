@@ -146,35 +146,42 @@ export async function handleRegister(req: Request, env: Env) {
   const newReferralCode = await generateUniqueReferralCode(env.DB);
   const initialCredits = referrerId ? 150 : 100;
 
-  await env.DB.prepare(`
-    INSERT INTO users (user_id, username, email, password_hash, credits, referral_code, referred_by) 
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).bind(userId || '', username || '', email || '', hash || '', initialCredits, newReferralCode, referrerId).run();
+  const statements = [
+    env.DB.prepare(`
+      INSERT INTO users (user_id, username, email, password_hash, credits, referral_code, referred_by) 
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).bind(userId, username || '', email || '', hash || '', initialCredits, newReferralCode, referrerId),
 
-  // Write signup bonus ledger entry (100)
-  await env.DB.prepare(`
-    INSERT INTO credit_ledger (ledger_id, user_id, category, amount, balance, title, detail)
-    VALUES (?, ?, 'signup_bonus', 100, 100, 'Signup Bonus', 'Welcome credit pack')
-  `).bind(crypto.randomUUID(), (userId || '')).run();
+    // Write signup bonus ledger entry (100)
+    env.DB.prepare(`
+      INSERT INTO credit_ledger (ledger_id, user_id, category, amount, balance, title, detail)
+      VALUES (?, ?, 'signup_bonus', 100, 100, 'Signup Bonus', 'Welcome credit pack')
+    `).bind(crypto.randomUUID(), userId)
+  ];
 
-  // If referred, reward both the new user (+50) and the referrer (+50)
+  // If referred, reward both the new user (+50) and the referrer (+50) atomically
   if (referrerId) {
-    // 1. Reward the new user +50 (bringing balance to 150)
-    await env.DB.prepare(`
-      INSERT INTO credit_ledger (ledger_id, user_id, category, amount, balance, title, detail, related_id)
-      VALUES (?, ?, 'referral_reward', 50, 150, 'Referral Bonus', 'Invited by friend', ?)
-    `).bind(crypto.randomUUID(), (userId || ''), referrerId).run();
+    statements.push(
+      // 1. Reward the new user +50 (bringing balance to 150)
+      env.DB.prepare(`
+        INSERT INTO credit_ledger (ledger_id, user_id, category, amount, balance, title, detail, related_id)
+        VALUES (?, ?, 'referral_reward', 50, 150, 'Referral Bonus', 'Invited by friend', ?)
+      `).bind(crypto.randomUUID(), userId, referrerId),
 
-    // 2. Reward the referrer +50
-    await env.DB.prepare("UPDATE users SET credits = credits + 50 WHERE user_id = ?").bind(referrerId).run();
-    const referrerCredits = await env.DB.prepare("SELECT credits FROM users WHERE user_id = ?").bind(referrerId).first<{credits: number}>();
-    await env.DB.prepare(`
-      INSERT INTO credit_ledger (ledger_id, user_id, category, amount, balance, title, detail, related_id)
-      VALUES (?, ?, 'referral_reward', 50, ?, 'Referral Reward', ?, ?)
-    `).bind(crypto.randomUUID(), referrerId, referrerCredits?.credits || 0, username, (userId || '')).run();
+      // 2. Reward the referrer +50
+      env.DB.prepare("UPDATE users SET credits = credits + 50 WHERE user_id = ?").bind(referrerId),
+
+      // 3. Subquery ensures atomic snapshot of referrer credits without read-after-write race
+      env.DB.prepare(`
+        INSERT INTO credit_ledger (ledger_id, user_id, category, amount, balance, title, detail, related_id)
+        VALUES (?, ?, 'referral_reward', 50, (SELECT credits FROM users WHERE user_id = ?), 'Referral Reward', ?, ?)
+      `).bind(crypto.randomUUID(), referrerId, referrerId, username, userId)
+    );
   }
 
-  await env.DB.prepare("DELETE FROM verification_codes WHERE id = ?").bind(activeCode.id).run();
+  statements.push(env.DB.prepare("DELETE FROM verification_codes WHERE id = ?").bind(activeCode.id));
+
+  await env.DB.batch(statements);
 
   const token = await signJWT({ userId, tokenVersion: 1 }, env.JWT_SECRET, SESSION_TTL_SECONDS);
   
@@ -216,6 +223,10 @@ export async function handleLogin(req: Request, env: Env) {
 
 export async function handleSendCode(req: Request, env: Env) {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+
+  // Opportunistic cleanup of expired verification codes (> 1 day old)
+  env.DB.prepare("DELETE FROM verification_codes WHERE expires_at < datetime('now', '-1 day')").run().catch(() => {});
+
   const body: any = await req.json().catch(() => ({}));
   let { email, turnstile_token, lang } = body;
   

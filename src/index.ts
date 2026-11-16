@@ -10,7 +10,7 @@ import { getSession } from "./auth/middleware";
 function getCorsHeaders(env: Env) {
   return {
     "Access-Control-Allow-Origin": env.FRONTEND_URL,
-    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, Cookie",
     "Access-Control-Allow-Credentials": "true",
   };
@@ -135,7 +135,10 @@ export default {
            } else if (url.pathname.startsWith("/api/auth/passkey/") && request.method === "DELETE") {
              const credentialId = url.pathname.slice("/api/auth/passkey/".length);
              res = await passkey.handlePasskeyDelete(request, env, credentialId);
-           } else {
+           } else if (url.pathname === "/api/asset" || url.pathname === "/api/assets" || url.pathname.startsWith("/api/assets/") || url.pathname.startsWith("/api/asset/")) {
+            const { handleGetAsset } = await import("./api/presign");
+            res = await handleGetAsset(request, env);
+         } else {
              res = new Response("Not Found", { status: 404 });
            }
         } else {
@@ -208,10 +211,6 @@ export default {
             case "/api/upload/file": {
               const { handleChatUpload } = await import("./api/presign");
               res = await handleChatUpload(request, env); break;
-            }
-            case "/api/asset": {
-              const { handleGetAsset } = await import("./api/presign");
-              res = await handleGetAsset(request, env); break;
             }
             default:
               res = new Response("Not Found", { status: 404 }); break;

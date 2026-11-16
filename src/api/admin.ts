@@ -3,6 +3,7 @@ import { signJWT, verifyJWT } from "../auth/jwt";
 import { AwsClient } from "aws4fetch";
 import { hashGiftCode, normalizeGiftCode } from "./billing";
 import { resolveRoleCompetence } from "../orchestration/competence";
+import { isSafeExternalUrl } from "../orchestration/dispatcher";
 import type { DAGRole, ModelMetadata } from "../orchestration/types";
 
 function safeJsonParse<T>(val: any, fallback: T): T {
@@ -50,6 +51,9 @@ export async function getAdminSession(request: Request, env: Env) {
 }
 
 export async function handleAdminLogin(request: Request, env: Env): Promise<Response> {
+  // Opportunistic cleanup of stale admin login attempts (> 1 day old)
+  env.DB.prepare("DELETE FROM admin_login_attempts WHERE created_at < datetime('now', '-1 day')").run().catch(() => {});
+
   const adminPass = env.ADMIN_PASSWORD;
   // Security hardening: reject login if ADMIN_PASSWORD secret is not configured
   if (!adminPass) {
@@ -90,9 +94,9 @@ export async function handleAdminLogin(request: Request, env: Env): Promise<Resp
   // Clear failed attempts on successful authentication
   await env.DB.prepare("DELETE FROM admin_login_attempts WHERE ip = ?").bind(ip).run();
 
-  const token = await signJWT({ role: "admin" }, env.JWT_SECRET, 8 * 3600);
+  const token = await signJWT({ role: "admin" }, env.JWT_SECRET, 2 * 3600);
   const headers = new Headers();
-  headers.set("Set-Cookie", `admin_session=${token}; HttpOnly; Path=/; Max-Age=${8 * 3600}; SameSite=Lax; Secure`);
+  headers.set("Set-Cookie", `admin_session=${token}; HttpOnly; Path=/; Max-Age=${2 * 3600}; SameSite=Lax; Secure`);
   headers.set("Content-Type", "application/json");
   return new Response(JSON.stringify({ success: true }), { headers });
 }
@@ -178,6 +182,18 @@ export async function handleAdminCreateNode(request: Request, env: Env): Promise
     return Response.json({ error: "Invalid model_id format: only letters, numbers, dash, underscore, and dot allowed" }, { status: 400 });
   }
 
+  if (endpoint.startsWith("http://") || endpoint.startsWith("https://")) {
+    if (!isSafeExternalUrl(endpoint)) {
+      return Response.json({
+        error: "非法算力终端地址：禁止绑定本地回环、内网私有地址（RFC1918）或受保护的网络接口"
+      }, { status: 400 });
+    }
+  } else if (!endpoint.startsWith("@cf/") && body.inference_target !== "browser") {
+    return Response.json({
+      error: "未知节点协议：必须为合法 HTTP(S) 地址或 Workers AI 标识符（如 @cf/...）"
+    }, { status: 400 });
+  }
+
   const modalities = Array.isArray(body.modalities) ? body.modalities : (typeof body.modalities === "string" ? body.modalities.split(",").map((s: string) => s.trim()).filter(Boolean) : ["text"]);
   const tags = Array.isArray(body.tags) ? body.tags : (typeof body.tags === "string" ? body.tags.split(",").map((s: string) => s.trim()).filter(Boolean) : ["#chat"]);
   const contextWindow = Number(body.context_window) || 4096;
@@ -248,6 +264,20 @@ export async function handleAdminUpdateNode(request: Request, env: Env, nodeId: 
   const displayName = body.display_name !== undefined ? body.display_name.trim() : existing.display_name;
   const provider = body.provider !== undefined ? body.provider.trim() : existing.provider;
   const endpoint = body.endpoint !== undefined ? body.endpoint.trim() : existing.endpoint;
+
+  if (body.endpoint !== undefined) {
+    if (endpoint.startsWith("http://") || endpoint.startsWith("https://")) {
+      if (!isSafeExternalUrl(endpoint)) {
+        return Response.json({
+          error: "非法算力终端地址：禁止绑定本地回环、内网私有地址（RFC1918）或受保护的网络接口"
+        }, { status: 400 });
+      }
+    } else if (!endpoint.startsWith("@cf/") && existing.inference_target !== "browser") {
+      return Response.json({
+        error: "未知节点协议：必须为合法 HTTP(S) 地址或 Workers AI 标识符（如 @cf/...）"
+      }, { status: 400 });
+    }
+  }
   const modalities = body.modalities !== undefined ? (Array.isArray(body.modalities) ? JSON.stringify(body.modalities) : body.modalities) : existing.modalities;
   const tags = body.tags !== undefined ? (Array.isArray(body.tags) ? JSON.stringify(body.tags) : body.tags) : existing.tags;
   const contextWindow = body.context_window !== undefined ? Number(body.context_window) : existing.context_window;
