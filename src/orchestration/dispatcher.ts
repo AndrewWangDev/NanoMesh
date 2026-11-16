@@ -95,6 +95,99 @@ function buildConstraintDirective(targetLang?: string, outputStyle?: string): st
   return `\n\n系统执行指示（仅供内部遵从，绝对禁止在回答末尾复述本条或打印为小标题）：\n- 语言偏好：${lang}\n- 详略偏好：${style}\n- 直接输出最终业务成果，严禁在正文附带规则声明、策略说明或思考自白。`;
 }
 
+/**
+ * Hard sliding window context guard:
+ * Prevents input prompts from exhausting the physical context window of the target model (e.g. 4096 tokens for 8B models).
+ * Operates on promptContent by preserving system directives and user's current-round highest priority commands,
+ * while truncating earlier historical context / redundant upstream notes from the head if necessary.
+ */
+function applyContextWindowGuard(
+  systemPrompt: string,
+  promptContent: string,
+  contextWindow: number = 4096,
+  reserveOutputTokens: number = 1024
+): { systemPrompt: string; promptContent: string } {
+  // Approximate 1 token ~= 3.5 characters for mixed multilingual/code
+  const maxAllowedInputChars = Math.max(1000, Math.floor((contextWindow - reserveOutputTokens) * 3.5));
+  const currentTotalChars = systemPrompt.length + promptContent.length;
+
+  if (currentTotalChars <= maxAllowedInputChars) {
+    return { systemPrompt, promptContent };
+  }
+
+  // System prompt is untouchable (contains role boundaries and core directives)
+  const availableForPrompt = Math.max(500, maxAllowedInputChars - systemPrompt.length);
+
+  if (promptContent.length > availableForPrompt) {
+    // Preserve the tail (most recent instructions) rather than the head
+    const truncatedHead = promptContent.slice(promptContent.length - availableForPrompt);
+    const guardedPrompt = `[...前序冗余历史上下文已自动滑窗折叠，保留核心提炼实体与当轮最高优先级指令...]\n` + truncatedHead;
+    return { systemPrompt, promptContent: guardedPrompt };
+  }
+
+  return { systemPrompt, promptContent };
+}
+
+/**
+ * Universal authentication header builder for disparate node providers:
+ * - 'none': Local / Edge serverless (no special credentials)
+ * - 'bearer_static': Google AI Studio Key / OpenAI API Key (Authorization: Bearer & x-goog-api-key)
+ * - 'jwt_ephemeral': Private VPS / llama-server gateway with anti-tamper SHA-256 body digest & anti-replay jti
+ */
+async function buildAuthHeaders(
+  model: ModelMetadata,
+  env: Env,
+  requestBodyStr: string,
+  context: {
+    userId?: string;
+    sessionId?: string;
+    envelopeId?: string;
+    roleId?: string;
+  }
+): Promise<Record<string, string>> {
+  const authMode = model.auth_mode || (model.endpoint.startsWith('http') ? 'jwt_ephemeral' : 'none');
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'User-Agent': 'NanoMesh-Edge-Dispatcher/1.0'
+  };
+
+  if (authMode === 'none') {
+    return headers;
+  }
+
+  if (authMode === 'bearer_static') {
+    const token = model.auth_secret || '';
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+      headers['x-goog-api-key'] = token;
+    }
+    return headers;
+  }
+
+  if (authMode === 'jwt_ephemeral') {
+    const heavySecret = model.auth_secret || env.HEAVY_JWT_SECRET || env.JWT_SECRET;
+    if (!heavySecret) {
+      throw new Error(`[SECURITY_REJECTED] 算力节点【${model.display_name}】需要 jwt_ephemeral 鉴权，但服务器未配置对应密钥。`);
+    }
+    const bodyDigest = await computeSha256Hex(requestBodyStr);
+    const heavyToken = await signHeavyNodeToken(
+      {
+        sub: context.userId || 'anonymous',
+        sid: context.sessionId || 'session',
+        eid: context.envelopeId || 'envelope',
+        rid: context.roleId || 'role',
+        mid: model.model_id,
+        bdg: bodyDigest
+      },
+      heavySecret
+    );
+    headers['Authorization'] = `Bearer ${heavyToken}`;
+    return headers;
+  }
+
+  return headers;
+}
+
 function extractChunkText(it: any): string {
   if (!it || typeof it !== 'object') return '';
 
@@ -106,17 +199,28 @@ function extractChunkText(it: any): string {
     }
   }
 
-  // 2. Cloudflare top-level response field (may be string or integer/number, e.g. {"response": 20})
+  // 2. Google Gemini API format: candidates[0].content.parts[0].text
+  if (Array.isArray(it.candidates) && it.candidates.length > 0) {
+    const parts = it.candidates[0]?.content?.parts;
+    if (Array.isArray(parts) && parts.length > 0) {
+      const text = parts.map((p: any) => p?.text || '').join('');
+      if (text) {
+        return text;
+      }
+    }
+  }
+
+  // 3. Cloudflare top-level response field (may be string or integer/number, e.g. {"response": 20})
   if (it.response !== undefined && it.response !== null) {
     return String(it.response);
   }
 
-  // 3. Caption field
+  // 4. Caption field
   if (it.caption !== undefined && it.caption !== null) {
     return String(it.caption);
   }
 
-  // 4. Answer field
+  // 5. Answer field
   if (it.answer !== undefined && it.answer !== null) {
     return String(it.answer);
   }
@@ -143,6 +247,16 @@ async function parseAIResponse(aiRes: any, onChunk?: (chunk: string) => void): P
     const content = aiRes.choices[0]?.message?.content;
     if (content !== undefined && content !== null && String(content).trim()) {
       return sanitizeLLMOutput(String(content));
+    }
+  }
+  // Google Gemini JSON response: candidates[0].content.parts[0].text
+  if (Array.isArray(aiRes.candidates) && aiRes.candidates.length > 0) {
+    const parts = aiRes.candidates[0]?.content?.parts;
+    if (Array.isArray(parts) && parts.length > 0) {
+      const text = parts.map((p: any) => p?.text || '').join('');
+      if (text.trim()) {
+        return sanitizeLLMOutput(text);
+      }
     }
   }
 
@@ -655,42 +769,76 @@ export async function executeDAGStream(
                     continue;
                   }
 
-                  // Dedicated Heavy Node Execution (AWS Lightsail via Cloudflare Tunnel)
-                  // Secured with single-use ephemeral JWT + SHA-256 body digest verification (anti-tamper/anti-replay)
-                  const chatPayload = {
-                    model: currentCandidate.model_id || "Meta-Llama-3.1-8B-Instruct",
-                    messages: [
-                      { role: "system", content: systemPrompt },
-                      { role: "user", content: promptContent }
-                    ],
-                    stream: isTailNode,
-                    max_tokens: 2048,
-                    temperature: 0.2
-                  };
-                  const payloadStr = JSON.stringify(chatPayload);
-                  const bodyDigest = await computeSha256Hex(payloadStr);
+                  // 1. Context Window Guard (sliding window tail preservation)
+                  const { systemPrompt: guardedSysPrompt, promptContent: guardedPromptContent } = applyContextWindowGuard(
+                    systemPrompt,
+                    promptContent,
+                    currentCandidate.context_window || 4096,
+                    1024
+                  );
 
-                  const heavySecret = env.HEAVY_JWT_SECRET || env.JWT_SECRET;
-                  const heavyToken = await signHeavyNodeToken(
+                  // 2. Protocol Adapter: OpenAI Compatible vs Google AI Studio (Gemini)
+                  const apiFormat = currentCandidate.api_format || 'openai_compat';
+                  let targetUrl = endpoint;
+                  let requestPayload: any;
+
+                  if (apiFormat === 'google_ai') {
+                    const isStream = isTailNode;
+                    if (!targetUrl.includes(':generateContent') && !targetUrl.includes(':streamGenerateContent')) {
+                      const baseUrl = targetUrl.replace(/\/+$/, '');
+                      const action = isStream ? 'streamGenerateContent?alt=sse' : 'generateContent';
+                      targetUrl = `${baseUrl}/${currentCandidate.model_id}:${action}`;
+                    }
+                    if (currentCandidate.auth_secret && !targetUrl.includes('key=')) {
+                      const separator = targetUrl.includes('?') ? '&' : '?';
+                      targetUrl = `${targetUrl}${separator}key=${encodeURIComponent(currentCandidate.auth_secret)}`;
+                    }
+
+                    requestPayload = {
+                      system_instruction: {
+                        parts: [{ text: guardedSysPrompt }]
+                      },
+                      contents: [
+                        {
+                          role: 'user',
+                          parts: [{ text: guardedPromptContent }]
+                        }
+                      ],
+                      generationConfig: {
+                        temperature: 0.2,
+                        maxOutputTokens: 2048
+                      }
+                    };
+                  } else {
+                    requestPayload = {
+                      model: currentCandidate.model_id || "Meta-Llama-3.1-8B-Instruct",
+                      messages: [
+                        { role: "system", content: guardedSysPrompt },
+                        { role: "user", content: guardedPromptContent }
+                      ],
+                      stream: isTailNode,
+                      max_tokens: 2048,
+                      temperature: 0.2
+                    };
+                  }
+
+                  const payloadStr = JSON.stringify(requestPayload);
+                  const reqHeaders = await buildAuthHeaders(
+                    currentCandidate,
+                    env,
+                    payloadStr,
                     {
-                      sub: options.userId,
-                      sid: envelope.session_id,
-                      eid: envelope.envelope_id,
-                      rid: node.role.role_id,
-                      mid: currentCandidate.model_id,
-                      bdg: bodyDigest
-                    },
-                    heavySecret
+                      userId: options.userId,
+                      sessionId: envelope.session_id,
+                      envelopeId: envelope.envelope_id,
+                      roleId: node.role.role_id
+                    }
                   );
 
                   const parsed = await callWithTimeout(async () => {
-                    const fRes = await fetch(endpoint, {
+                    const fRes = await fetch(targetUrl, {
                       method: 'POST',
-                      headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${heavyToken}`,
-                        'User-Agent': 'NanoMesh-Edge-Dispatcher/1.0'
-                      },
+                      headers: reqHeaders,
                       body: payloadStr
                     });
 
