@@ -12,7 +12,8 @@ import {
   handleAdminListRoles,
   handleAdminCompetenceMatrix,
   handleAdminListTemplates,
-  handleAdminCreateOrUpdateTemplate
+  handleAdminCreateOrUpdateTemplate,
+  handleAdminDeleteTemplate
 } from "../src/api/admin";
 import { runOrchestrationPipeline } from "../src/orchestration/orchestrator";
 import { executeDAGStream } from "../src/orchestration/dispatcher";
@@ -346,6 +347,13 @@ function createMockD1(store: TableStore) {
             return { meta: { changes: 1 } };
           }
 
+          // DELETE FROM dag_templates
+          if (cleanSql.startsWith("DELETE FROM dag_templates")) {
+            const templateId = boundArgs[0];
+            store.dag_templates = store.dag_templates.filter(t => t.template_id !== templateId);
+            return { meta: { changes: 1 } };
+          }
+
           // DELETE FROM verification_codes
           if (cleanSql.startsWith("DELETE FROM verification_codes")) {
             return { meta: { changes: 1 } };
@@ -384,15 +392,24 @@ function createMockR2() {
         }
       };
     },
-    async list(options?: { prefix?: string }) {
+    async list(options?: { prefix?: string; cursor?: string; limit?: number }) {
       const prefix = options?.prefix || "";
-      const objects = [];
+      const limit = options?.limit || 1000;
+      const allObjects = [];
       for (const [key, val] of store.entries()) {
         if (key.startsWith(prefix)) {
-          objects.push({ key, size: val.body.length });
+          allObjects.push({ key, size: val.body.length });
         }
       }
-      return { objects };
+      const startIndex = options?.cursor ? parseInt(options.cursor, 10) : 0;
+      const sliced = allObjects.slice(startIndex, startIndex + limit);
+      const nextIndex = startIndex + sliced.length;
+      const truncated = nextIndex < allObjects.length;
+      return { 
+        objects: sliced, 
+        truncated, 
+        cursor: truncated ? String(nextIndex) : undefined 
+      };
     },
     async delete(keys: string | string[]) {
       const arr = Array.isArray(keys) ? keys : [keys];
@@ -796,6 +813,28 @@ async function runIntegrationTests() {
 
   // Restore password for remaining admin scenarios
   (env as any).ADMIN_PASSWORD = originalPass;
+
+  // 3.7 [ADMIN-02 Dead Endpoint Activation Guard]
+  store.models.push({
+    model_id: "test-ghost-model",
+    display_name: "Ghost Mock",
+    provider: "test",
+    endpoint: "/api/infer",
+    modalities: "[\"text\"]",
+    tags: "[\"#test\"]",
+    status: "disabled",
+    inference_target: "edge"
+  });
+  const activateGhostReq = new Request("https://nanomesh.local/api/admin/nodes/test-ghost-model", {
+    method: "PATCH",
+    headers: adminReqHeaders,
+    body: JSON.stringify({ status: "active" })
+  });
+  const activateGhostRes = await handleAdminUpdateNode(activateGhostReq, env, "test-ghost-model");
+  assert.equal(activateGhostRes.status, 400, "Activating a model with dead endpoint /api/infer must be blocked with 400");
+  const ghostErr = await activateGhostRes.json();
+  assert.ok(ghostErr.error.includes("无法启用节点"), "Must explain invalid endpoint reason");
+
   console.log("  ✓ Admin login 2h TTL, SSRF filter & safe masked credential update: PASSED");
 
   // -----------------------------------------------------------------------
@@ -846,6 +885,19 @@ async function runIntegrationTests() {
   const gate3Data = await gate3Res.json();
   assert.ok(gate3Data.template_id);
   assert.ok(store.dag_templates.some(t => t.template_id === gate3Data.template_id));
+
+  // 4.5 [ADMIN-04 Template Deletion]
+  const delTplReq = new Request(`https://nanomesh.local/api/admin/templates/${gate3Data.template_id}`, {
+    method: "DELETE",
+    headers: adminReqHeaders
+  });
+  const delTplRes = await handleAdminDeleteTemplate(delTplReq, env, gate3Data.template_id);
+  assert.equal(delTplRes.status, 200, "Deleting template must succeed");
+  assert.ok(!store.dag_templates.some(t => t.template_id === gate3Data.template_id), "Template must be removed from store");
+
+  // Re-create it for subsequent workflow tests
+  await handleAdminCreateOrUpdateTemplate(gate3Req, env);
+
   console.log("  ✓ Linear pipeline splicer Gate 1, Gate 2, Gate 3 verification: PASSED");
 
   // -----------------------------------------------------------------------

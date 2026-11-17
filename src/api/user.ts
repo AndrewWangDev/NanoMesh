@@ -174,11 +174,17 @@ export async function handleDeleteAccount(req: Request, env: Env) {
     const prefixes = [`tmp/${session.userId}/`, `avatars/${session.userId}_`];
     for (const prefix of prefixes) {
       try {
-        const listed = await env.R2.list({ prefix });
-        if (listed && listed.objects && listed.objects.length > 0) {
-          const keys = listed.objects.map(o => o.key);
-          await env.R2.delete(keys);
-        }
+        let cursor: string | undefined = undefined;
+        let pages = 0;
+        do {
+          const listed = await env.R2.list({ prefix, cursor, limit: 1000 });
+          if (listed && listed.objects && listed.objects.length > 0) {
+            const keys = listed.objects.map(o => o.key);
+            await env.R2.delete(keys);
+          }
+          cursor = listed.truncated ? listed.cursor : undefined;
+          pages++;
+        } while (cursor && pages < 20); // Safety limit: up to 20,000 files
       } catch (r2Err) {
         console.warn(`[GDPR] Failed to delete R2 objects for prefix ${prefix}:`, r2Err);
       }

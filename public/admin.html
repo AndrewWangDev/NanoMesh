@@ -661,6 +661,73 @@
       }
     }
 
+    /* Form & Input Reset for Admin Console (Fix 40px left padding bug) */
+    .admin-modal-box .input-field,
+    .admin-card .input-field,
+    .filter-row .input-field,
+    .admin-modal-box select,
+    .admin-card select,
+    .filter-row select {
+      padding-left: 0.85rem !important;
+    }
+
+    /* Industrial Dark Select Styling */
+    select.input-field,
+    select.filter-select {
+      appearance: none;
+      -webkit-appearance: none;
+      background-color: #11131f !important;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 0.75rem center;
+      background-size: 14px;
+      padding-right: 2.2rem !important;
+      cursor: pointer;
+      color: var(--text-primary);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+    }
+    select.input-field:focus,
+    select.filter-select:focus {
+      outline: none;
+      border-color: #6366f1;
+    }
+
+    /* Modality Chip Checkbox Styling */
+    .modality-chip-group {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .modality-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--admin-border);
+      border-radius: 8px;
+      font-size: 0.84rem;
+      cursor: pointer;
+      user-select: none;
+      transition: all 0.2s ease;
+      color: var(--text-secondary);
+    }
+    .modality-chip:hover {
+      background: rgba(255, 255, 255, 0.08);
+      color: #fff;
+    }
+    .modality-chip input[type="checkbox"] {
+      display: none;
+    }
+    .modality-chip.active {
+      background: rgba(99, 102, 241, 0.18);
+      border-color: #6366f1;
+      color: #c7d2fe;
+      font-weight: 500;
+      box-shadow: 0 0 12px rgba(99, 102, 241, 0.2);
+    }
+
   </style>
 </head>
 <body>
@@ -743,7 +810,7 @@
           <button class="admin-mobile-toggle" id="admin-sidebar-toggle" aria-label="Toggle Menu">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
           </button>
-          <span id="header-view-title">模型审核</span>
+          <span id="header-view-title">算力节点拓扑管理</span>
         </div>
         <div class="admin-header-actions">
           <button class="top-pill" id="admin-lang-toggle">中 / EN</button>
@@ -1100,7 +1167,6 @@
                 <label style="font-size:0.82rem; color:var(--text-secondary);">点击跳转 (Action Route):</label>
                 <select id="notif-action-route" class="filter-select" style="height:34px;">
                   <option value="none">无跳转 (None)</option>
-                  <option value="models">我的模型 (Settings -> My Models)</option>
                   <option value="billing">计费与额度 (Settings -> Billing)</option>
                   <option value="recharge">充值中心 (Recharge Modal)</option>
                 </select>
@@ -1229,10 +1295,10 @@
 
         <div style="margin-bottom:12px;">
           <label class="form-label" style="display:block; margin-bottom:6px; font-size:0.82rem;">支持模态 (Modalities)</label>
-          <div style="display:flex; gap:16px;">
-            <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; cursor:pointer;"><input type="checkbox" id="modality-text" checked> 文本 (text)</label>
-            <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; cursor:pointer;"><input type="checkbox" id="modality-image"> 图像/视觉 (image)</label>
-            <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; cursor:pointer;"><input type="checkbox" id="modality-audio"> 语音 (audio)</label>
+          <div class="modality-chip-group">
+            <label class="modality-chip active" id="chip-modality-text"><input type="checkbox" id="modality-text" checked> <span>📝 文本 (text)</span></label>
+            <label class="modality-chip" id="chip-modality-image"><input type="checkbox" id="modality-image"> <span>🖼️ 图像 (image)</span></label>
+            <label class="modality-chip" id="chip-modality-audio"><input type="checkbox" id="modality-audio"> <span>🎙️ 语音 (audio)</span></label>
           </div>
         </div>
 
@@ -1264,18 +1330,35 @@
       <form id="template-form">
         <div class="form-grid-2">
           <div style="margin-bottom:12px;">
-            <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">模板名称 (Template Name) *</label>
-            <input type="text" id="tpl-name-input" class="input-field" placeholder="如 视觉 OCR 结构化润色" required>
+            <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">中文名称 (Name ZH) *</label>
+            <input type="text" id="tpl-name-zh-input" class="input-field" placeholder="如 视觉 OCR 结构化润色" required>
           </div>
           <div style="margin-bottom:12px;">
-            <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">模板唯一 ID (可选，留空自动生成)</label>
-            <input type="text" id="tpl-id-input" class="input-field" placeholder="如 tpl-ocr-polish">
+            <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">英文名称 (Name EN)</label>
+            <input type="text" id="tpl-name-en-input" class="input-field" placeholder="e.g. Vision OCR & Markdown Polish">
           </div>
         </div>
 
-        <div style="margin-bottom:14px;">
-          <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">模板业务描述</label>
-          <input type="text" id="tpl-desc-input" class="input-field" placeholder="如 提取图片文字并润色生成结构化 Markdown">
+        <div class="form-grid-2">
+          <div style="margin-bottom:12px;">
+            <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">模板唯一 ID (留空自动生成)</label>
+            <input type="text" id="tpl-id-input" class="input-field" placeholder="如 tpl-ocr-polish">
+          </div>
+          <div style="margin-bottom:12px;">
+            <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">调度优先级 (Priority, 默认 100)</label>
+            <input type="number" id="tpl-priority-input" class="input-field" value="100" min="1" max="999">
+          </div>
+        </div>
+
+        <div class="form-grid-2" style="margin-bottom:14px;">
+          <div>
+            <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">中文业务描述 (Desc ZH)</label>
+            <input type="text" id="tpl-desc-zh-input" class="input-field" placeholder="如 提取图片文字并润色生成结构化 Markdown">
+          </div>
+          <div>
+            <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">英文业务描述 (Desc EN)</label>
+            <input type="text" id="tpl-desc-en-input" class="input-field" placeholder="e.g. Extract text from image and format into Markdown">
+          </div>
         </div>
 
         <!-- Pipeline Steps Container -->
@@ -1454,6 +1537,8 @@
     let generatedDataForModal = null;
     let globalRoles = [];
     let globalNodes = [];
+    let globalTemplates = [];
+    let globalMatrix = [];
     let pipelineSteps = [];
 
     // Timezone setup
@@ -1581,7 +1666,7 @@
         document.getElementById('stat-total-nodes').textContent = nodes.length;
         document.getElementById('stat-browser-nodes').textContent = nodes.filter(n => n.inference_target === 'browser').length;
         document.getElementById('stat-edge-nodes').textContent = nodes.filter(n => n.inference_target === 'edge').length;
-        document.getElementById('stat-heavy-nodes').textContent = nodes.filter(n => n.inference_target === 'heavy' || n.inference_target === 'cloud').length;
+        document.getElementById('stat-heavy-nodes').textContent = nodes.filter(n => n.inference_target === 'heavy').length;
 
         let html = '';
         if (nodes.length === 0) {
@@ -1591,7 +1676,7 @@
             let tierBadge = '<span class="badge-pill badge-tier-edge">边缘 Workers AI</span>';
             if (n.inference_target === 'browser') {
               tierBadge = '<span class="badge-pill badge-tier-browser">端侧 WebGPU</span>';
-            } else if (n.inference_target === 'heavy' || n.inference_target === 'cloud') {
+            } else if (n.inference_target === 'heavy') {
               tierBadge = '<span class="badge-pill badge-tier-heavy">专用重节点 (VPS/API)</span>';
             }
 
@@ -1656,17 +1741,31 @@
     });
     document.getElementById('btn-refresh-nodes')?.addEventListener('click', () => loadNodes(currentNodeFilter));
 
+    function updateModalityChips() {
+      const textChecked = !!document.getElementById('modality-text')?.checked;
+      const imageChecked = !!document.getElementById('modality-image')?.checked;
+      const audioChecked = !!document.getElementById('modality-audio')?.checked;
+      document.getElementById('chip-modality-text')?.classList.toggle('active', textChecked);
+      document.getElementById('chip-modality-image')?.classList.toggle('active', imageChecked);
+      document.getElementById('chip-modality-audio')?.classList.toggle('active', audioChecked);
+    }
+    document.getElementById('modality-text')?.addEventListener('change', updateModalityChips);
+    document.getElementById('modality-image')?.addEventListener('change', updateModalityChips);
+    document.getElementById('modality-audio')?.addEventListener('change', updateModalityChips);
+
     // Open Add / Edit Node Modal
     document.getElementById('btn-add-node')?.addEventListener('click', () => {
       document.getElementById('node-modal-title').textContent = '声明算力节点 (Register Compute Node)';
       document.getElementById('node-is-edit').value = '0';
       document.getElementById('node-id-input').disabled = false;
       document.getElementById('node-form').reset();
+      document.querySelectorAll('#node-presets .preset-btn').forEach(b => b.classList.remove('active'));
       document.getElementById('node-context-input').value = '4096';
       document.getElementById('node-cost-input').value = '1.0';
       document.getElementById('modality-text').checked = true;
       document.getElementById('modality-image').checked = false;
       document.getElementById('modality-audio').checked = false;
+      updateModalityChips();
       document.getElementById('node-tags-input').value = '#chat, #general';
       document.getElementById('node-secret-input').placeholder = '输入密钥或 VPS Secret (可选)';
       document.getElementById('node-modal-overlay').style.display = 'flex';
@@ -1675,6 +1774,7 @@
     window.openEditNodeModal = function(modelId) {
       const node = globalNodes.find(n => n.model_id === modelId);
       if (!node) return;
+      document.querySelectorAll('#node-presets .preset-btn').forEach(b => b.classList.remove('active'));
       document.getElementById('node-modal-title').textContent = '编辑算力节点 (Edit Compute Node)';
       document.getElementById('node-is-edit').value = '1';
       document.getElementById('node-id-input').value = node.model_id;
@@ -1694,6 +1794,7 @@
       document.getElementById('modality-text').checked = mods.includes('text');
       document.getElementById('modality-image').checked = mods.includes('image');
       document.getElementById('modality-audio').checked = mods.includes('audio');
+      updateModalityChips();
 
       document.getElementById('node-tags-input').value = (node.tags || []).join(', ');
       document.getElementById('node-modal-overlay').style.display = 'flex';
@@ -1708,6 +1809,8 @@
     // Presets Click Handlers
     document.querySelectorAll('#node-presets .preset-btn').forEach(btn => {
       btn.addEventListener('click', () => {
+        document.querySelectorAll('#node-presets .preset-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
         const p = btn.dataset.preset;
         if (p === 'webgpu') {
           document.getElementById('node-id-input').value = 'browser-smollm2-135m';
@@ -1766,6 +1869,7 @@
           document.getElementById('modality-audio').checked = false;
           document.getElementById('node-tags-input').value = '#chat, #reasoning, #ocr_precise, #multimodal_vision';
         }
+        updateModalityChips();
       });
     });
 
@@ -1881,6 +1985,7 @@
         }
         const data = await res.json();
         const matrix = data.matrix || [];
+        globalMatrix = matrix;
 
         let hasCritical = false;
         let hasWarning = false;
@@ -1938,6 +2043,12 @@
                 ${modelsListHtml}
               </div>
             </div>
+            ${item.health_status !== 'healthy' ? `
+            <div style="margin-top:10px; display:flex; justify-content:flex-end;">
+              <button class="btn btn-outline btn-sm" onclick="quickRegisterForRole('${escapeHtml(item.role_id)}')" style="font-size:0.75rem; padding:4px 8px; display:flex; align-items:center; gap:4px;">
+                + 为此岗位配置算力
+              </button>
+            </div>` : ''}
           </div>`;
         });
 
@@ -1964,6 +2075,20 @@
     }
     document.getElementById('btn-refresh-matrix')?.addEventListener('click', loadMatrix);
 
+    window.quickRegisterForRole = function(roleId) {
+      const role = (globalMatrix || []).find(r => r.role_id === roleId);
+      if (!role) return;
+      document.getElementById('btn-add-node')?.click();
+      document.getElementById('node-name-input').value = `${role.name_zh} 候选节点`;
+      document.getElementById('node-tags-input').value = (role.requisition_tags || []).join(', ');
+      
+      const inOutMods = new Set([...(role.in_modalities || []), ...(role.out_modalities || [])]);
+      document.getElementById('modality-text').checked = inOutMods.has('text');
+      document.getElementById('modality-image').checked = inOutMods.has('image');
+      document.getElementById('modality-audio').checked = inOutMods.has('audio');
+      updateModalityChips();
+    };
+
     // =========================================================================
     // 3. Linear Workflow Templates Splicer View
     // =========================================================================
@@ -1978,6 +2103,7 @@
         }
         const data = await res.json();
         const templates = data.templates || [];
+        globalTemplates = templates;
         document.getElementById('sidebar-templates-count').textContent = templates.length;
 
         // Also fetch roles to map role names
@@ -2014,7 +2140,11 @@
               <td>${inOutDisplay}</td>
               <td><span class="badge-pill ${statusClass}">${statusText}</span></td>
               <td style="text-align:right;">
-                <button class="btn btn-outline btn-sm" onclick="toggleTemplateActive('${escapeHtml(t.template_id)}', ${t.is_active ? 1 : 0})">${toggleActionText}</button>
+                <div class="action-buttons-wrap">
+                  <button class="btn btn-outline btn-sm" onclick="openEditTemplateModal('${escapeHtml(t.template_id)}')">编辑</button>
+                  <button class="btn btn-outline btn-sm" onclick="toggleTemplateActive('${escapeHtml(t.template_id)}', ${t.is_active ? 1 : 0})">${toggleActionText}</button>
+                  <button class="btn btn-danger-outline btn-sm" onclick="deleteTemplate('${escapeHtml(t.template_id)}')">删除</button>
+                </div>
               </td>
             </tr>`;
           });
@@ -2035,10 +2165,47 @@
       }
       document.getElementById('template-form').reset();
       document.getElementById('tpl-id-input').value = '';
+      document.getElementById('tpl-id-input').disabled = false;
+      document.getElementById('tpl-priority-input').value = '100';
       pipelineSteps = [globalRoles[0]?.role_id || '', globalRoles[1]?.role_id || ''];
       renderPipelineSteps();
       document.getElementById('template-modal-overlay').style.display = 'flex';
     });
+
+    window.openEditTemplateModal = async function(templateId) {
+      if (globalRoles.length === 0) {
+        const rolesRes = await fetch('/api/admin/roles');
+        const rolesData = await rolesRes.json();
+        globalRoles = rolesData.roles || [];
+      }
+      const t = (globalTemplates || []).find(item => item.template_id === templateId);
+      if (!t) return;
+      document.getElementById('template-form').reset();
+      document.getElementById('tpl-id-input').value = t.template_id;
+      document.getElementById('tpl-id-input').disabled = true;
+      document.getElementById('tpl-name-zh-input').value = t.name_zh || t.name || '';
+      document.getElementById('tpl-name-en-input').value = t.name_en || '';
+      document.getElementById('tpl-desc-zh-input').value = t.desc_zh || t.description || '';
+      document.getElementById('tpl-desc-en-input').value = t.desc_en || '';
+      document.getElementById('tpl-priority-input').value = t.priority || 100;
+      pipelineSteps = [...(t.role_sequence || [])];
+      renderPipelineSteps();
+      document.getElementById('template-modal-overlay').style.display = 'flex';
+    };
+
+    window.deleteTemplate = async function(templateId) {
+      const ok = await showConfirmModal('确认删除工作流模板', `确定要彻底删除工作流模板「${templateId}」吗？`, '删除', true);
+      if (!ok) return;
+
+      try {
+        const res = await fetch(`/api/admin/templates/${encodeURIComponent(templateId)}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error('删除失败');
+        showToast('工作流模板已彻底删除', 'success');
+        loadTemplates();
+      } catch (err) {
+        showToast(err.message);
+      }
+    };
 
     function closeTemplateModal() {
       document.getElementById('template-modal-overlay').style.display = 'none';
@@ -2135,9 +2302,12 @@
     // Submit Template
     document.getElementById('template-form')?.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const name = document.getElementById('tpl-name-input').value.trim();
       const templateId = document.getElementById('tpl-id-input').value.trim() || undefined;
-      const description = document.getElementById('tpl-desc-input').value.trim();
+      const nameZh = document.getElementById('tpl-name-zh-input').value.trim();
+      const nameEn = document.getElementById('tpl-name-en-input').value.trim();
+      const descZh = document.getElementById('tpl-desc-zh-input').value.trim();
+      const descEn = document.getElementById('tpl-desc-en-input').value.trim();
+      const priority = Number(document.getElementById('tpl-priority-input').value) || 100;
 
       const btn = document.getElementById('btn-submit-template');
       btn.disabled = true;
@@ -2149,8 +2319,13 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             template_id: templateId,
-            name,
-            description,
+            name: nameZh || nameEn,
+            name_zh: nameZh,
+            name_en: nameEn,
+            description: descZh || descEn,
+            desc_zh: descZh,
+            desc_en: descEn,
+            priority: priority,
             role_sequence: pipelineSteps
           })
         });
@@ -2688,6 +2863,27 @@
       item.addEventListener('click', () => {
         if (window.innerWidth <= 1024 && sidebarEl) {
           sidebarEl.classList.remove('sidebar-open');
+        }
+      });
+    });
+
+    // Global ESC key listener to close modals
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        const modals = document.querySelectorAll('.admin-modal-overlay');
+        modals.forEach(m => {
+          if (m.style.display === 'flex' && m.id !== 'result-modal-overlay') {
+            m.style.display = 'none';
+          }
+        });
+      }
+    });
+
+    // Backdrop click listener to close modals
+    document.querySelectorAll('.admin-modal-overlay').forEach(overlay => {
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay && overlay.id !== 'result-modal-overlay') {
+          overlay.style.display = 'none';
         }
       });
     });
