@@ -210,6 +210,7 @@ export async function handleGetAsset(request: Request, env: Env): Promise<Respon
     headers.set("etag", object.httpEtag);
     headers.set("cache-control", "public, max-age=31536000, immutable");
     headers.set("access-control-allow-origin", "*");
+    headers.set("X-Content-Type-Options", "nosniff");
     return new Response(object.body, { headers });
   }
 
@@ -236,6 +237,8 @@ export async function handleGetAsset(request: Request, env: Env): Promise<Respon
   object.writeHttpMetadata(headers);
   headers.set("etag", object.httpEtag);
   headers.set("cache-control", "private, max-age=86400");
+  headers.set("X-Content-Type-Options", "nosniff");
+  headers.set("Content-Security-Policy", "default-src 'none'; sandbox");
   return new Response(object.body, { headers });
 }
 

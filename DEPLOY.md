@@ -134,6 +134,9 @@ wrangler secret put ADMIN_PASSWORD
 # 用户身份认证与会话签发 JWT 密钥 (至少 32 字符随机串, 必填)
 wrangler secret put JWT_SECRET
 
+# 外部重节点 (VPS) 动态通信签名专用密钥 (自建 VPS 算力集群时必填，切勿与 JWT_SECRET 复用)
+wrangler secret put HEAVY_JWT_SECRET
+
 # Cloudflare Turnstile 密钥 (必填)
 wrangler secret put TURNSTILE_SECRET_KEY
 
@@ -203,7 +206,8 @@ NanoMesh 统一抽象了标准化协议接口，支持自建算力与第三方�
 2. **终端调用地址**：填写你的 VPS 域名（如 `https://gpu.yourdomain.com/v1/chat/completions`）；
    *(注意：NanoMesh 内置 SSRF 防御守卫，禁止填写 `127.0.0.1` 或内网私有 IP)*
 3. **鉴权方式**：选择 `动态短期 JWT 凭据 (jwt_ephemeral)`；
-4. **工作机制**：NanoMesh 调度器向你的 VPS 发起调用时，会根据请求体实时计算 SHA-256 摘要，并利用共享密钥即时签发 60 秒有效期的防篡改、防重放 JWT（通过 `Authorization: Bearer <Token>` 传递），你的 VPS 只需简单校验该 JWT 即可确保请求来源可信。
+4. **认证凭据**：填入该节点的私有通信密钥（或在 Step 5 配置全局 `HEAVY_JWT_SECRET`）；
+5. **工作机制**：NanoMesh 调度器向你的 VPS 发起调用时，会根据请求体实时计算 SHA-256 摘要，并利用专用密钥即时签发 60 秒有效期的防篡改、防重放 JWT（通过 `Authorization: Bearer <Token>` 传递），你的 VPS 只需简单校验该 JWT 即可确保请求来源可信（系统严禁复用 `JWT_SECRET` 内部主密钥）。
 
 ---
 

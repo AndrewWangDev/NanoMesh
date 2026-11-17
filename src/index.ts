@@ -51,7 +51,7 @@ export default {
            res = await handleUnbindOAuth(request, env, provider || "");
         } else if (url.pathname.startsWith("/api/admin/")) {
            const admin = await import("./api/admin");
-           if (url.pathname === "/api/admin/login") res = await admin.handleAdminLogin(request, env);
+           if (url.pathname === "/api/admin/login") res = await admin.handleAdminLogin(request, env, ctx);
            else if (url.pathname === "/api/admin/logout") res = await admin.handleAdminLogout(request, env);
            // Compute Topology Nodes
            else if (url.pathname === "/api/admin/nodes" && request.method === "GET") res = await admin.handleAdminListNodes(request, env);
@@ -135,12 +135,12 @@ export default {
            } else if (url.pathname.startsWith("/api/auth/passkey/") && request.method === "DELETE") {
              const credentialId = url.pathname.slice("/api/auth/passkey/".length);
              res = await passkey.handlePasskeyDelete(request, env, credentialId);
-           } else if (url.pathname === "/api/asset" || url.pathname === "/api/assets" || url.pathname.startsWith("/api/assets/") || url.pathname.startsWith("/api/asset/")) {
-            const { handleGetAsset } = await import("./api/presign");
-            res = await handleGetAsset(request, env);
-         } else {
+           } else {
              res = new Response("Not Found", { status: 404 });
            }
+        } else if (url.pathname === "/api/asset" || url.pathname === "/api/assets" || url.pathname.startsWith("/api/assets/") || url.pathname.startsWith("/api/asset/")) {
+           const { handleGetAsset } = await import("./api/presign");
+           res = await handleGetAsset(request, env);
         } else {
           switch (url.pathname) {
             case "/api/auth/register":
@@ -150,7 +150,7 @@ export default {
             case "/api/auth/logout":
               res = await handleLogout(request, env); break;
             case "/api/auth/send-code":
-              res = await handleSendCode(request, env); break;
+              res = await handleSendCode(request, env, ctx); break;
             case "/api/auth/me":
               res = await handleMe(request, env); break;
             case "/api/user/bindings":
@@ -187,7 +187,7 @@ export default {
             }
             case "/api/billing/redeem": {
               const { handleRedeem } = await import("./api/billing");
-              res = await handleRedeem(request, env); break;
+              res = await handleRedeem(request, env, ctx); break;
             }
             case "/api/user/credits": {
               const user = await getSession(request, env);
@@ -258,6 +258,9 @@ export default {
         headers.set("etag", object.httpEtag);
         // Cache control for immutable assets
         headers.set("cache-control", "public, max-age=31536000, immutable");
+        headers.set("X-Content-Type-Options", "nosniff");
+        headers.set("Content-Security-Policy", "default-src 'none'; sandbox");
+        headers.set("Cross-Origin-Resource-Policy", "cross-origin");
         
         return new Response(object.body, { headers });
       }

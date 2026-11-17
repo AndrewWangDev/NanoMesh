@@ -46,5 +46,5 @@ bucket_name = "nanomesh-assets"
 TURNSTILE_SITE_KEY = "your-turnstile-site-key-here"
 RESEND_FROM_EMAIL = "noreply@yourdomain.com"
 FRONTEND_URL = "https://nano.yourdomain.com"
-# Optional legacy backend URL (Demo only; in standard deployments, Heavy Nodes are managed via /admin)
-# BACKEND_URL = "https://ai.yourdomain.com"
+# Heavy Node JWT ephemeral authentication secret should be set via wrangler secret:
+# wrangler secret put HEAVY_JWT_SECRET

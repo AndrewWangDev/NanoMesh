@@ -1,7 +1,9 @@
 // tests/integration_test.ts
 import assert from "node:assert/strict";
+import worker from "../src/index";
 import { signJWT, verifyJWT } from "../src/auth/jwt";
 import { handleGetAsset } from "../src/api/presign";
+import { handleDeleteAccount } from "../src/api/user";
 import { 
   handleAdminLogin, 
   handleAdminListNodes, 
@@ -30,6 +32,9 @@ interface TableStore {
   verification_codes: any[];
   redeem_attempts: any[];
   admin_login_attempts: any[];
+  user_chat_sessions: any[];
+  user_oauth_bindings: any[];
+  account_tombstones: any[];
 }
 
 function createMockD1(store: TableStore) {
@@ -100,10 +105,66 @@ function createMockD1(store: TableStore) {
             return { results: res as any };
           }
 
+          // 7. SELECT * FROM user_chat_sessions
+          if (cleanSql.includes("FROM user_chat_sessions")) {
+            let res = [...store.user_chat_sessions];
+            if (cleanSql.includes("WHERE user_id = ?")) {
+              res = res.filter(s => s.user_id === boundArgs[0]);
+            }
+            return { results: res as any };
+          }
+
+          // 8. SELECT * FROM user_oauth_bindings
+          if (cleanSql.includes("FROM user_oauth_bindings")) {
+            let res = [...store.user_oauth_bindings];
+            if (cleanSql.includes("WHERE user_id = ?")) {
+              res = res.filter(b => b.user_id === boundArgs[0]);
+            }
+            return { results: res as any };
+          }
+
           return { results: [] };
         },
         async run(): Promise<{ meta: { changes: number } }> {
           const cleanSql = sql.trim();
+
+          // DELETE FROM user_chat_sessions
+          if (cleanSql.startsWith("DELETE FROM user_chat_sessions")) {
+            const userId = boundArgs[0];
+            store.user_chat_sessions = store.user_chat_sessions.filter(s => s.user_id !== userId);
+            return { meta: { changes: 1 } };
+          }
+
+          // DELETE FROM user_oauth_bindings
+          if (cleanSql.startsWith("DELETE FROM user_oauth_bindings")) {
+            const userId = boundArgs[0];
+            store.user_oauth_bindings = store.user_oauth_bindings.filter(b => b.user_id !== userId);
+            return { meta: { changes: 1 } };
+          }
+
+          // DELETE FROM user_passkeys
+          if (cleanSql.startsWith("DELETE FROM user_passkeys")) {
+            return { meta: { changes: 1 } };
+          }
+
+          // INSERT INTO account_tombstones
+          if (cleanSql.startsWith("INSERT INTO account_tombstones")) {
+            store.account_tombstones.push({ hash_id: boundArgs[0] });
+            return { meta: { changes: 1 } };
+          }
+
+          // UPDATE users (anonymization)
+          if (cleanSql.startsWith("UPDATE users") && cleanSql.includes("SET email = 'deleted_'")) {
+            const userId = boundArgs[0];
+            const u = store.users.find(usr => usr.user_id === userId);
+            if (u) {
+              u.email = 'deleted_' + userId;
+              u.username = 'del_' + userId.slice(0, 12);
+              u.credits = 0;
+              u.token_version = (u.token_version || 1) + 1;
+            }
+            return { meta: { changes: 1 } };
+          }
 
           // DELETE FROM admin_login_attempts
           if (cleanSql.startsWith("DELETE FROM admin_login_attempts")) {
@@ -161,7 +222,17 @@ function createMockD1(store: TableStore) {
             let detail: string;
             let related_id: any;
 
-            if (cleanSql.includes("(SELECT credits FROM users")) {
+            if (cleanSql.includes("'compute_cost'")) {
+              ledger_id = boundArgs[0];
+              user_id = boundArgs[1];
+              category = "compute_cost";
+              amount = boundArgs.length === 4 ? -1 : (Number(boundArgs[2]) || -1);
+              const u = store.users.find(usr => usr.user_id === user_id);
+              balance = u?.credits ?? 0;
+              title = "DAG智能编排调用";
+              detail = boundArgs.length === 4 ? (boundArgs[3] || "") : (boundArgs[4] || "");
+              related_id = null;
+            } else if (cleanSql.includes("(SELECT credits FROM users")) {
               ledger_id = boundArgs[0];
               user_id = boundArgs[1];
               category = "referral_reward";
@@ -458,7 +529,10 @@ function buildMockEnv(): { env: Env; store: TableStore } {
     ],
     verification_codes: [],
     redeem_attempts: [],
-    admin_login_attempts: []
+    admin_login_attempts: [],
+    user_chat_sessions: [],
+    user_oauth_bindings: [],
+    account_tombstones: []
   };
 
   const env = {
@@ -543,6 +617,21 @@ async function runIntegrationTests() {
   assert.equal(publicRes.status, 200, "Public light model weights must be accessible without login");
   assert.equal(publicRes.headers.get("cache-control"), "public, max-age=31536000, immutable", "Must set 1-year immutable caching");
   assert.equal(publicRes.headers.get("access-control-allow-origin"), "*", "Must allow cross-origin fetching for browser WebGPU");
+
+  // [ISSUE-01: Verify Gateway worker.fetch router dispatching to /api/assets/ without 404 nesting error]
+  const gatewayReq = new Request(`https://nanomesh.local/api/assets/${modelKey}`);
+  const gatewayRes = await worker.fetch(gatewayReq, env, {} as any);
+  assert.equal(gatewayRes.status, 200, "Gateway must dispatch /api/assets/ to handleGetAsset without 404 route nesting error");
+
+  // [ISSUE-02: Verify Avatar Static Storage security headers via worker.fetch]
+  const avatarKey = `avatars/${newUserId}_1700000000.png`;
+  await env.R2.put(avatarKey, "PNG_AVATAR_BYTES", { httpMetadata: { contentType: "image/png" } });
+  const storageReq = new Request(`https://nanomesh.local/storage/${avatarKey}`);
+  const storageRes = await worker.fetch(storageReq, env, {} as any);
+  assert.equal(storageRes.status, 200, "Storage avatar endpoint must serve 200 OK");
+  assert.equal(storageRes.headers.get("x-content-type-options"), "nosniff", "Storage must enforce nosniff");
+  assert.equal(storageRes.headers.get("content-security-policy"), "default-src 'none'; sandbox", "Storage must enforce CSP sandbox");
+  assert.equal(storageRes.headers.get("cross-origin-resource-policy"), "cross-origin");
 
   // 2.2 Private User Asset in tmp/${userId}/... (Strict user session required!)
   const userAssetKey = `tmp/${newUserId}/my_sketch.png`;
@@ -678,6 +767,21 @@ async function runIntegrationTests() {
   const rawDeepseek = store.models.find(m => m.model_id === "cloud_vps_deepseek");
   assert.equal(rawDeepseek.display_name, "DeepSeek R1 High Precision");
   assert.equal(rawDeepseek.auth_secret, "sk-my-confidential-api-key-9988", "Real secret must be preserved when placeholder is submitted");
+
+  // 3.6 [ISSUE-06 Admin Password Change Instant Revocation Verification]
+  const validAdminReq = new Request("https://nanomesh.local/api/admin/nodes", { headers: adminReqHeaders });
+  const validAdminRes = await handleAdminListNodes(validAdminReq, env);
+  assert.equal(validAdminRes.status, 200, "Admin with valid token must have access");
+
+  const originalPass = (env as any).ADMIN_PASSWORD;
+  (env as any).ADMIN_PASSWORD = "NewlyRotatedPassword789!";
+  
+  const revokedAdminReq = new Request("https://nanomesh.local/api/admin/nodes", { headers: adminReqHeaders });
+  const revokedAdminRes = await handleAdminListNodes(revokedAdminReq, env);
+  assert.equal(revokedAdminRes.status, 401, "Changing ADMIN_PASSWORD must immediately revoke existing admin tokens (401)");
+
+  // Restore password for remaining admin scenarios
+  (env as any).ADMIN_PASSWORD = originalPass;
   console.log("  ✓ Admin login 2h TTL, SSRF filter & safe masked credential update: PASSED");
 
   // -----------------------------------------------------------------------
@@ -815,8 +919,76 @@ async function runIntegrationTests() {
   assert.equal(refundedUser.credits, 149, "Pre-deducted credit must be safely refunded on cancel");
   console.log("  ✓ Premature client disconnect cleanly triggers credit refund: PASSED");
 
+  // 6.2 [ISSUE-04: Premature Stream Cancelation AFTER Token Generation - Settle Ledger]
+  await env.DB.prepare(
+    "UPDATE users SET credits = credits - 1 WHERE user_id = ? AND credits >= 1"
+  ).bind(newUserId).run();
+  assert.equal(store.users.find(u => u.user_id === newUserId).credits, 148);
+
+  const activeStream = await executeDAGStream(env, dag, envelope, {
+    userId: newUserId,
+    hasPreDeducted: true
+  });
+  const activeReader = activeStream.getReader();
+  const textDecoder = new TextDecoder();
+  let sawToken = false;
+  while (!sawToken) {
+    const chunk = await activeReader.read();
+    if (chunk.done) break;
+    const text = textDecoder.decode(chunk.value);
+    if (text.includes("event: text_chunk")) {
+      sawToken = true;
+    }
+  }
+  assert.ok(sawToken, "Must receive at least one real text_chunk token before cancelling");
+
+  // User aborts connection mid-stream after tokens generated
+  await activeReader.cancel("Client disconnected mid-stream");
+  await new Promise(r => setTimeout(r, 50));
+
+  // Verify credit is retained (148)
+  const abortedUser = store.users.find(u => u.user_id === newUserId);
+  assert.equal(abortedUser.credits, 148, "Credit must be retained after tokens emitted");
+
+  // Verify credit_ledger has an entry recording the retention!
+  const abortLedger = store.credit_ledger.find(l => l.detail && l.detail.includes("中途断开连接算力保底扣费"));
+  assert.ok(abortLedger, "Must record compute_cost ledger row for mid-stream abort");
+  assert.equal(abortLedger.amount, -1, "Ledger amount must be -1");
+  console.log("  ✓ Mid-stream abort records compute_cost ledger audit entry: PASSED");
+
+  // -----------------------------------------------------------------------
+  // SCENARIO 7: Account Deletion Cascading Erasure of Private Sessions (ISSUE-05)
+  // -----------------------------------------------------------------------
+  console.log("\n[Scenario 7] Account Deletion & GDPR Private Session Erasure");
+  
+  // Seed a chat session for newUserId
+  store.user_chat_sessions.push({
+    session_id: "sess_private_123",
+    user_id: newUserId,
+    title: "Secret Strategy Conversation",
+    rounds_json: JSON.stringify([{ role: "user", text: "Classified Prompt" }])
+  });
+  assert.equal(store.user_chat_sessions.length, 1);
+
+  // Authenticated user request to delete account
+  const deleteReq = new Request("https://nanomesh.local/api/user/delete", {
+    method: "POST",
+    headers: { "Cookie": `session=${ownerToken}` }
+  });
+  const deleteRes = await handleDeleteAccount(deleteReq, env);
+  assert.equal(deleteRes.status, 200, "handleDeleteAccount must succeed");
+
+  // Verify user_chat_sessions is completely erased
+  const remainingSessions = store.user_chat_sessions.filter(s => s.user_id === newUserId);
+  assert.equal(remainingSessions.length, 0, "All private chat sessions must be physically erased upon deletion");
+  
+  const anonymizedUser = store.users.find(u => u.user_id === newUserId);
+  assert.ok(anonymizedUser.email.startsWith("deleted_"), "User must be anonymized in-place");
+  assert.equal(anonymizedUser.credits, 0, "Credits must be reset to 0");
+  console.log("  ✓ User account deletion cascades physical erasure of chat sessions: PASSED");
+
   console.log("\n==================================================");
-  console.log("   🎉 ALL 6 INTEGRATION SCENARIOS PASSED (100%)!  ");
+  console.log("   🎉 ALL 7 INTEGRATION SCENARIOS PASSED (100%)!  ");
   console.log("==================================================");
 }
 

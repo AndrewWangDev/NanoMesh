@@ -89,8 +89,15 @@ export async function handleUpdateAvatar(req: Request, env: Env) {
   }
 
   const extension = file.name.split('.').pop()?.toLowerCase() || 'png';
-  const validExts = ['png', 'jpg', 'jpeg', 'webp', 'gif'];
-  if (!validExts.includes(extension)) {
+  const EXT_TO_MIME: Record<string, string> = {
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    webp: 'image/webp',
+    gif: 'image/gif'
+  };
+  const safeContentType = EXT_TO_MIME[extension];
+  if (!safeContentType) {
     return Response.json({ error: "error.unsupportedFile" }, { status: 400 });
   }
 
@@ -98,7 +105,7 @@ export async function handleUpdateAvatar(req: Request, env: Env) {
   
   await env.R2.put(objectKey, file.stream(), {
     httpMetadata: {
-      contentType: file.type || 'image/png'
+      contentType: safeContentType
     }
   });
 
@@ -141,22 +148,24 @@ export async function handleDeleteAccount(req: Request, env: Env) {
     }
   }
 
-  // 4. In-place anonymization
-  await env.DB.prepare(`
-    UPDATE users 
-    SET email = 'deleted_' || user_id, 
-        oauth_id = NULL, 
-        oauth_provider = NULL, 
-        username = 'del_' || substr(user_id, 1, 12), 
-        password_hash = NULL, 
-        avatar_url = NULL, 
-        credits = 0,
-        token_version = token_version + 1
-    WHERE user_id = ?
-  `).bind(session.userId).run();
-
-  await env.DB.prepare("DELETE FROM user_oauth_bindings WHERE user_id = ?").bind(session.userId).run();
-  await env.DB.prepare("DELETE FROM user_passkeys WHERE user_id = ?").bind(session.userId).run();
+  // 4. In-place anonymization & private session erasure (GDPR compliance)
+  await env.DB.batch([
+    env.DB.prepare(`
+      UPDATE users 
+      SET email = 'deleted_' || user_id, 
+          oauth_id = NULL, 
+          oauth_provider = NULL, 
+          username = 'del_' || substr(user_id, 1, 12), 
+          password_hash = NULL, 
+          avatar_url = NULL, 
+          credits = 0,
+          token_version = token_version + 1
+      WHERE user_id = ?
+    `).bind(session.userId),
+    env.DB.prepare("DELETE FROM user_chat_sessions WHERE user_id = ?").bind(session.userId),
+    env.DB.prepare("DELETE FROM user_oauth_bindings WHERE user_id = ?").bind(session.userId),
+    env.DB.prepare("DELETE FROM user_passkeys WHERE user_id = ?").bind(session.userId)
+  ]);
 
   // Clear cookie
   const response = Response.json({ success: true });
