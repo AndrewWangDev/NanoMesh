@@ -3,6 +3,7 @@ import { verifyTurnstile } from "../auth/turnstile";
 import { signJWT, verifyJWT } from "../auth/jwt";
 import { getSession } from "../auth/middleware";
 import { getGitHubAuthURL, getGoogleAuthURL, handleGitHubCallback as ghCallback, handleGoogleCallback as goCallback } from "../auth/oauth";
+import { getPersistentSalt } from "./billing";
 import * as bcrypt from "bcryptjs";
 
 const VALID_EMAIL_DOMAINS = ["gmail.com", "outlook.com", "yahoo.com", "protonmail.com", "icloud.com", "hotmail.com"];
@@ -116,7 +117,7 @@ export async function handleRegister(req: Request, env: Env) {
 
   // Check tombstone (90-day cooldown)
   const encoder = new TextEncoder();
-  const emailData = encoder.encode(email + env.JWT_SECRET);
+  const emailData = encoder.encode(email + getPersistentSalt(env));
   const emailHashBuffer = await crypto.subtle.digest('SHA-256', emailData);
   const emailHash = Array.from(new Uint8Array(emailHashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
   
@@ -360,7 +361,7 @@ async function handleOAuthCallback(req: Request, env: Env, provider: 'github' | 
 
     // Check tombstone for OAuth ID
     const encoder = new TextEncoder();
-    const oauthData = encoder.encode(profile.id + env.JWT_SECRET);
+    const oauthData = encoder.encode(profile.id + getPersistentSalt(env));
     const oauthHashBuffer = await crypto.subtle.digest('SHA-256', oauthData);
     const oauthHash = Array.from(new Uint8Array(oauthHashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
     

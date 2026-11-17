@@ -23,6 +23,8 @@ export interface Env {
   RESEND_FROM_EMAIL: string;
   FRONTEND_URL: string;
   HEAVY_JWT_SECRET?: string;
+  PERSISTENT_DATA_SALT?: string;
+  GIFT_CARD_SALT?: string;
 }
 
 export interface User {

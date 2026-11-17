@@ -1,7 +1,7 @@
 import type { Env } from "../types";
 import { signJWT, verifyJWT } from "../auth/jwt";
 import { AwsClient } from "aws4fetch";
-import { hashGiftCode, normalizeGiftCode } from "./billing";
+import { hashGiftCode, normalizeGiftCode, getPersistentSalt } from "./billing";
 import { resolveRoleCompetence } from "../orchestration/competence";
 import { isSafeExternalUrl } from "../orchestration/dispatcher";
 import type { DAGRole, ModelMetadata } from "../orchestration/types";
@@ -555,12 +555,17 @@ export async function handleAdminListTemplates(request: Request, env: Env): Prom
   const rows = await env.DB.prepare("SELECT * FROM dag_templates ORDER BY created_at DESC").all<any>();
   const templates = (rows.results || []).map(r => ({
     template_id: r.template_id,
-    name: r.name,
-    description: r.description,
+    name: r.name_zh || r.name || "",
+    name_zh: r.name_zh || r.name || "",
+    name_en: r.name_en || r.name || "",
+    description: r.desc_zh || r.description || "",
+    desc_zh: r.desc_zh || r.description || "",
+    desc_en: r.desc_en || r.description || "",
     role_sequence: safeJsonParse<string[]>(r.role_sequence, []),
-    in_modalities: safeJsonParse<string[]>(r.in_modalities, []),
-    out_modalities: safeJsonParse<string[]>(r.out_modalities, []),
-    is_active: r.is_active !== 0,
+    in_modalities: safeJsonParse<string[]>(r.head_modalities || r.in_modalities, []),
+    out_modalities: safeJsonParse<string[]>(r.tail_modalities || r.out_modalities, []),
+    status: r.status || (r.is_active !== 0 ? 'active' : 'disabled'),
+    is_active: r.status === 'active' || r.is_active !== 0,
     created_at: r.created_at
   }));
 
@@ -572,12 +577,14 @@ export async function handleAdminCreateOrUpdateTemplate(request: Request, env: E
   if (!session) return new Response("Unauthorized", { status: 401 });
 
   const body = await request.json().catch(() => ({})) as any;
-  const name = (body.name || "").trim();
-  const description = (body.description || "").trim();
+  const nameZh = (body.name_zh || body.name || "").trim();
+  const nameEn = (body.name_en || body.name || nameZh).trim();
+  const descZh = (body.desc_zh || body.description || "").trim();
+  const descEn = (body.desc_en || body.description || descZh).trim();
   const roleSequence: string[] = Array.isArray(body.role_sequence) ? (body.role_sequence as string[]) : [];
   let templateId = (body.template_id || "").trim();
 
-  if (!name || roleSequence.length === 0) {
+  if (!nameZh || roleSequence.length === 0) {
     return Response.json({ error: "Missing required fields: name and non-empty role_sequence" }, { status: 400 });
   }
 
@@ -670,48 +677,49 @@ export async function handleAdminCreateOrUpdateTemplate(request: Request, env: E
     templateId = `tpl-custom-${Date.now().toString(36)}`;
   }
 
-  // 6. Build linear nodes and edges for backward compatibility
-  const nodes = roleSequence.map((rid: string, idx: number) => ({
-    id: `node_${idx + 1}`,
-    role_id: rid
-  }));
-  const edges = [];
-  for (let i = 0; i < roleSequence.length - 1; i++) {
-    edges.push({
-      from: `node_${i + 1}`,
-      to: `node_${i + 2}`
-    });
-  }
+  // 6. Build linear roles snapshot for backward compatibility
+  const fullRoles = roleSequence.map((rid: string, idx: number) => {
+    const roleDef = rolesMap.get(rid);
+    return {
+      ...(roleDef || { role_id: rid, name_zh: rid, name_en: rid, in_modalities: ["text"], out_modalities: ["text"], requisition_tags: ["#general"] }),
+      in_degree: idx === 0 ? 0 : 1,
+      out_degree: idx === roleSequence.length - 1 ? 0 : 1
+    };
+  });
 
-  const isActive = body.is_active === false || body.is_active === 0 ? 0 : 1;
+  const status = body.status ? (body.status === 'active' ? 'active' : 'disabled') : (body.is_active === false || body.is_active === 0 ? 'disabled' : 'active');
 
   await env.DB.prepare(`
     INSERT INTO dag_templates (
-      template_id, name, description, in_modalities, out_modalities,
-      role_sequence, nodes, edges, is_active, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      template_id, name_zh, name_en, desc_zh, desc_en,
+      head_modalities, tail_modalities, roles, role_sequence, priority, status, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     ON CONFLICT(template_id) DO UPDATE SET
-      name = excluded.name,
-      description = excluded.description,
-      in_modalities = excluded.in_modalities,
-      out_modalities = excluded.out_modalities,
+      name_zh = excluded.name_zh,
+      name_en = excluded.name_en,
+      desc_zh = excluded.desc_zh,
+      desc_en = excluded.desc_en,
+      head_modalities = excluded.head_modalities,
+      tail_modalities = excluded.tail_modalities,
+      roles = excluded.roles,
       role_sequence = excluded.role_sequence,
-      nodes = excluded.nodes,
-      edges = excluded.edges,
-      is_active = excluded.is_active
+      priority = excluded.priority,
+      status = excluded.status
   `).bind(
     templateId,
-    name,
-    description,
+    nameZh,
+    nameEn,
+    descZh,
+    descEn,
     JSON.stringify(inModalities),
     JSON.stringify(outModalities),
+    JSON.stringify(fullRoles),
     JSON.stringify(roleSequence),
-    JSON.stringify(nodes),
-    JSON.stringify(edges),
-    isActive
+    body.priority || 1,
+    status
   ).run();
 
-  return Response.json({ success: true, template_id: templateId });
+  return Response.json({ success: true, template_id: templateId, status });
 }
 
 export async function handleAdminToggleTemplate(request: Request, env: Env, templateId: string): Promise<Response> {
@@ -721,11 +729,11 @@ export async function handleAdminToggleTemplate(request: Request, env: Env, temp
   if (!templateId) return Response.json({ error: "Missing template_id" }, { status: 400 });
 
   const body = await request.json().catch(() => ({})) as any;
-  const isActive = body.is_active === false || body.is_active === 0 ? 0 : 1;
+  const newStatus = body.status ? (body.status === 'active' ? 'active' : 'disabled') : (body.is_active === false || body.is_active === 0 ? 'disabled' : 'active');
 
-  await env.DB.prepare("UPDATE dag_templates SET is_active = ? WHERE template_id = ?").bind(isActive, templateId).run();
+  await env.DB.prepare("UPDATE dag_templates SET status = ? WHERE template_id = ?").bind(newStatus, templateId).run();
 
-  return Response.json({ success: true, template_id: templateId, is_active: isActive });
+  return Response.json({ success: true, template_id: templateId, status: newStatus, is_active: newStatus === 'active' });
 }
 
 // ----------------- Model Management -----------------
@@ -973,7 +981,7 @@ export async function handleAdminCreateGiftCodes(request: Request, env: Env): Pr
 
   for (let i = 0; i < count; i++) {
     const { raw, formatted } = generateCrockfordCode();
-    const hash = await hashGiftCode(raw, env.JWT_SECRET);
+    const hash = await hashGiftCode(raw, getPersistentSalt(env));
     generatedCodes.push({
       id: crypto.randomUUID(),
       hash,

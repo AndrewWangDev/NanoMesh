@@ -52,3 +52,24 @@ jobs:
 
       - name: Audit Production Dependencies
         run: npm audit --audit-level=high --omit=dev
+
+  test:
+    name: Local Unit & Integration Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Full Test Suite
+        run: npm test
