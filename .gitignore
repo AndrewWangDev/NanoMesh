@@ -50,3 +50,7 @@ rm_*.js
 test*.js
 tweak_ui.js
 js_bubble*.js
+
+# Private career & resume preparation materials (NEVER commit to public repo)
+RESUME_GUIDE.md
+*RESUME*.md
