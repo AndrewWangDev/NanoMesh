@@ -1,4 +1,4 @@
--- Migration: 0017_fix_topology_and_purge_ghost_models.sql
+-- Migration: 0018_fix_topology_and_purge_ghost_models.sql
 -- 1. Standardize Cloudflare Workers AI models to 'edge' inference_target
 UPDATE models
 SET inference_target = 'edge'

@@ -716,6 +716,12 @@ export async function executeDAGStream(
           });
 
           if (node.selected_model.inference_target === 'browser') {
+            if (!isTailNode) {
+              sendEvent('error', {
+                message: `拓扑约束错误：步骤 ${idx + 1}「${node.role.name_zh || node.role.role_id}」绑定了端侧 WebGPU 模型，但处于多节点工作流的中间节点。端侧轻节点仅支持单步工作流或末端尾节点。`
+              });
+              break;
+            }
             sendEvent('client_exec_request', {
               role_id: node.role.role_id,
               role_name: node.role.name_zh,

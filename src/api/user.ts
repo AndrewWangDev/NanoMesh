@@ -56,7 +56,7 @@ export async function handleUpdatePassword(req: Request, env: Env) {
   await env.DB.prepare("UPDATE users SET password_hash = ?, token_version = ? WHERE user_id = ?").bind(newHash, nextTokenVersion, session.userId).run();
 
   const newToken = await signJWT({ userId: session.userId, tokenVersion: nextTokenVersion }, env.JWT_SECRET, 30 * 24 * 3600);
-  const response = Response.json({ success: true });
+  const response = Response.json({ success: true, token: newToken });
   response.headers.set(
     'Set-Cookie',
     `session=${newToken}; HttpOnly; Path=/; Max-Age=${30 * 24 * 3600}; SameSite=Lax; Secure`
