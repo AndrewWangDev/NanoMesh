@@ -336,14 +336,12 @@ function createMockD1(store: TableStore) {
               name_en: boundArgs[2],
               desc_zh: boundArgs[3],
               desc_en: boundArgs[4],
-              scenario_category: boundArgs[5],
-              scenario_anchor: boundArgs[6],
+              head_modalities: boundArgs[5],
+              tail_modalities: boundArgs[6],
               roles: boundArgs[7],
-              edges: boundArgs[8],
-              head_modalities: boundArgs[9],
-              tail_modalities: boundArgs[10],
-              status: boundArgs[11] || 'active',
-              priority: boundArgs[12] || 1
+              role_sequence: boundArgs[8],
+              priority: boundArgs[9] || 1,
+              status: boundArgs[10] || 'active'
             });
             return { meta: { changes: 1 } };
           }
@@ -385,6 +383,22 @@ function createMockR2() {
           headers.set("content-type", item.metadata?.contentType || "application/octet-stream");
         }
       };
+    },
+    async list(options?: { prefix?: string }) {
+      const prefix = options?.prefix || "";
+      const objects = [];
+      for (const [key, val] of store.entries()) {
+        if (key.startsWith(prefix)) {
+          objects.push({ key, size: val.body.length });
+        }
+      }
+      return { objects };
+    },
+    async delete(keys: string | string[]) {
+      const arr = Array.isArray(keys) ? keys : [keys];
+      for (const k of arr) {
+        store.delete(k);
+      }
     }
   };
 }
@@ -985,7 +999,14 @@ async function runIntegrationTests() {
   const anonymizedUser = store.users.find(u => u.user_id === newUserId);
   assert.ok(anonymizedUser.email.startsWith("deleted_"), "User must be anonymized in-place");
   assert.equal(anonymizedUser.credits, 0, "Credits must be reset to 0");
-  console.log("  ✓ User account deletion cascades physical erasure of chat sessions: PASSED");
+
+  // Verify R2 user assets (tmp/ and avatars/) are completely erased
+  const remainingTmp = await env.R2.list({ prefix: `tmp/${newUserId}/` });
+  assert.equal(remainingTmp.objects.length, 0, "User tmp/ assets must be cascade deleted from R2 upon account deletion");
+  const remainingAvatars = await env.R2.list({ prefix: `avatars/${newUserId}_` });
+  assert.equal(remainingAvatars.objects.length, 0, "User avatars/ must be cascade deleted from R2 upon account deletion");
+
+  console.log("  ✓ User account deletion cascades physical erasure of chat sessions & R2 assets: PASSED");
 
   console.log("\n==================================================");
   console.log("   🎉 ALL 7 INTEGRATION SCENARIOS PASSED (100%)!  ");

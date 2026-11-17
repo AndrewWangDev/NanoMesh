@@ -218,8 +218,15 @@ export default {
         }
 
         // Add CORS headers to API responses
+        const existingOrigin = res.headers.get("access-control-allow-origin") || res.headers.get("Access-Control-Allow-Origin");
         const newRes = new Response(res.body, res);
-        Object.entries(getCorsHeaders(env)).forEach(([k, v]) => newRes.headers.set(k, v));
+        Object.entries(getCorsHeaders(env)).forEach(([k, v]) => {
+          if (k.toLowerCase() === "access-control-allow-origin" && existingOrigin) {
+            newRes.headers.set(k, existingOrigin);
+          } else {
+            newRes.headers.set(k, v);
+          }
+        });
         newRes.headers.set("X-Content-Type-Options", "nosniff");
         newRes.headers.set("X-Frame-Options", "DENY");
         newRes.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");

@@ -530,7 +530,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       tr.innerHTML = `
         <td class="col-desc">
           <div class="billing-desc-row1">${i18nTitle}</div>
-          <div class="billing-desc-row2" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;">${item.detail || ''}</div>
+          <div class="billing-desc-row2" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;">${escapeHtml(item.detail || '')}</div>
         </td>
         <td class="col-category">
           <span class="models-status models-status-published" style="white-space: nowrap;">
@@ -709,7 +709,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       
       // Top header avatar
       if (user.avatar_url) {
-        document.getElementById('user-avatar').innerHTML = `<img src="${user.avatar_url}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">`;
+        document.getElementById('user-avatar').innerHTML = `<img src="${escapeHtml(user.avatar_url)}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">`;
       } else {
         document.getElementById('user-avatar').textContent = user.username.charAt(0).toUpperCase();
       }
@@ -1277,10 +1277,17 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       try {
         const uploadBlob = processedBlob || file;
-        const isLargeFile = uploadBlob.size > 25 * 1024 * 1024;
+        if (uploadBlob.size > 25 * 1024 * 1024) {
+          localToast(isEn ? 'File exceeds maximum 25MB limit.' : '单文件超出 25MB 大小限制，请精简后重试。', 'error');
+          selectedFiles = selectedFiles.filter(f => f.assetId !== fileDesc.assetId);
+          renderFileChips();
+          continue;
+        }
+
+        const isLargeFile = uploadBlob.size > 4 * 1024 * 1024;
 
         if (isLargeFile) {
-          // Tier B: Presigned S3 direct upload for large files (> 25MB)
+          // Tier B: Presigned S3 direct upload for large files (> 4MB and <= 25MB)
           const presignRes = await fetch('/api/upload/presign', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -5250,7 +5257,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
             const headerAvatar = document.getElementById('user-avatar');
             if (headerAvatar) {
-              headerAvatar.innerHTML = `<img src="${data.avatar_url}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">`;
+              headerAvatar.innerHTML = `<img src="${escapeHtml(data.avatar_url)}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">`;
             }
             avatarInput.value = ''; // Reset
             

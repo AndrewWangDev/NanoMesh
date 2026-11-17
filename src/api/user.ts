@@ -1,6 +1,7 @@
 import { Env } from "../types";
 import { getSession } from "../auth/middleware";
 import { signJWT } from "../auth/jwt";
+import { getPersistentSalt } from "./billing";
 import * as bcrypt from "bcryptjs";
 
 export async function handleUpdateProfile(req: Request, env: Env) {
@@ -131,7 +132,8 @@ export async function handleDeleteAccount(req: Request, env: Env) {
 
   // 2. Hash fingerprints (email and oauth_id)
   const encoder = new TextEncoder();
-  const emailData = encoder.encode(user.email + env.JWT_SECRET);
+  const persistentSalt = getPersistentSalt(env);
+  const emailData = encoder.encode(user.email + persistentSalt);
   const emailHashBuffer = await crypto.subtle.digest('SHA-256', emailData);
   const emailHash = Array.from(new Uint8Array(emailHashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
 
@@ -141,7 +143,7 @@ export async function handleDeleteAccount(req: Request, env: Env) {
   const bindings = await env.DB.prepare("SELECT provider_id FROM user_oauth_bindings WHERE user_id = ?").bind(session.userId).all<{provider_id: string}>();
   if (bindings.results && bindings.results.length > 0) {
     for (const b of bindings.results) {
-      const oauthData = encoder.encode(b.provider_id + env.JWT_SECRET);
+      const oauthData = encoder.encode(b.provider_id + persistentSalt);
       const oauthHashBuffer = await crypto.subtle.digest('SHA-256', oauthData);
       const oauthHash = Array.from(new Uint8Array(oauthHashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
       await env.DB.prepare("INSERT INTO account_tombstones (hash_id, type, expires_at) VALUES (?, 'oauth', datetime('now', '+90 days'))").bind(oauthHash).run();
@@ -166,6 +168,22 @@ export async function handleDeleteAccount(req: Request, env: Env) {
     env.DB.prepare("DELETE FROM user_oauth_bindings WHERE user_id = ?").bind(session.userId),
     env.DB.prepare("DELETE FROM user_passkeys WHERE user_id = ?").bind(session.userId)
   ]);
+
+  // 5. Cascade cleanup of user assets in R2 (GDPR right to be forgotten)
+  if (env.R2 && typeof env.R2.list === 'function' && typeof env.R2.delete === 'function') {
+    const prefixes = [`tmp/${session.userId}/`, `avatars/${session.userId}_`];
+    for (const prefix of prefixes) {
+      try {
+        const listed = await env.R2.list({ prefix });
+        if (listed && listed.objects && listed.objects.length > 0) {
+          const keys = listed.objects.map(o => o.key);
+          await env.R2.delete(keys);
+        }
+      } catch (r2Err) {
+        console.warn(`[GDPR] Failed to delete R2 objects for prefix ${prefix}:`, r2Err);
+      }
+    }
+  }
 
   // Clear cookie
   const response = Response.json({ success: true });

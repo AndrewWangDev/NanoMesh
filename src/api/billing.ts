@@ -1,6 +1,10 @@
 import { Env } from "../types";
 import { getSession } from "../auth/middleware";
 
+export function getPersistentSalt(env: Env): string {
+  return env.PERSISTENT_DATA_SALT || env.GIFT_CARD_SALT || env.JWT_SECRET;
+}
+
 export async function hashGiftCode(code: string, secret: string): Promise<string> {
   const encoder = new TextEncoder();
   const data = encoder.encode(code + secret);
@@ -99,7 +103,7 @@ export async function handleRedeem(req: Request, env: Env, ctx?: ExecutionContex
   }
 
   // 2. Hash and query gift code
-  const codeHash = await hashGiftCode(normalized, env.JWT_SECRET);
+  const codeHash = await hashGiftCode(normalized, getPersistentSalt(env));
   const giftCode = await env.DB.prepare(`
     SELECT code_id, amount, status, expires_at, code_hint,
            CASE WHEN expires_at IS NOT NULL AND expires_at <= datetime('now') THEN 1 ELSE 0 END as is_expired

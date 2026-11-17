@@ -17,8 +17,10 @@ export interface ExecutionOptions {
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
   let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
+  const chunkSize = 16384;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode.apply(null, chunk as any);
   }
   return btoa(binary);
 }
@@ -395,15 +397,35 @@ async function parseAIResponse(aiRes: any, onChunk?: (chunk: string) => void): P
   return '';
 }
 
-async function callWithTimeout<T>(fn: () => Promise<T>, timeoutMs: number): Promise<T> {
+async function callWithTimeout<T>(
+  fn: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  parentSignal?: AbortSignal
+): Promise<T> {
+  const childController = new AbortController();
+  const onParentAbort = () => childController.abort();
+  if (parentSignal) {
+    if (parentSignal.aborted) {
+      childController.abort();
+    } else {
+      parentSignal.addEventListener('abort', onParentAbort, { once: true });
+    }
+  }
+
   let timer: any;
   const timeoutPromise = new Promise<T>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`Inference timed out after ${timeoutMs}ms`)), timeoutMs);
+    timer = setTimeout(() => {
+      childController.abort();
+      reject(new Error(`Inference timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
   });
   try {
-    return await Promise.race([fn(), timeoutPromise]);
+    return await Promise.race([fn(childController.signal), timeoutPromise]);
   } finally {
     clearTimeout(timer);
+    if (parentSignal) {
+      parentSignal.removeEventListener('abort', onParentAbort);
+    }
   }
 }
 
@@ -736,7 +758,7 @@ export async function executeDAGStream(
             // Cache Miss: Perform Execution
             // 2. Fetch image from R2 bucket if required
             let imageB64: string | null = null;
-            let imageBytes: number[] | null = null;
+            let imageBytes: Uint8Array | number[] | null = null;
             const imageAsset = nodeCtx.claimed_assets.find(a => a.modality === 'image');
 
             if (imageAsset) {
@@ -751,7 +773,10 @@ export async function executeDAGStream(
                   const r2Obj = await env.R2.get(imageAsset.r2_key);
                   if (r2Obj) {
                     const buf = await r2Obj.arrayBuffer();
-                    imageBytes = Array.from(new Uint8Array(buf));
+                    if (buf.byteLength > 15 * 1024 * 1024) {
+                      throw new Error("图像资产体积超过 15MB 内存安全上限，已拒绝加载以防止 Worker 内存溢出。");
+                    }
+                    imageBytes = new Uint8Array(buf);
                     imageB64 = `data:${imageAsset.mime_type || 'image/jpeg'};base64,${arrayBufferToBase64(buf)}`;
                   } else {
                     console.error(`[Dispatcher] Image object not found in R2 for key: ${imageAsset.r2_key}`);
@@ -875,12 +900,12 @@ export async function executeDAGStream(
                     }
                   );
 
-                  const parsed = await callWithTimeout(async () => {
+                  const parsed = await callWithTimeout(async (callSignal) => {
                     const fRes = await fetch(targetUrl, {
                       method: 'POST',
                       headers: reqHeaders,
                       body: payloadStr,
-                      signal: abortController.signal
+                      signal: callSignal
                     });
 
                     // Fail-fast on authentication/tampering violations (NEVER failover on security errors!)
@@ -910,7 +935,7 @@ export async function executeDAGStream(
                       const jsonRes = await fRes.json();
                       return await parseAIResponse(jsonRes);
                     }
-                  }, 45000);
+                  }, 45000, abortController.signal);
 
                   if (parsed && parsed.length > 5) {
                     nodeOutput = parsed;
@@ -928,7 +953,8 @@ export async function executeDAGStream(
                       prompt: promptContent,
                       image: imageB64
                     }),
-                    35000
+                    35000,
+                    abortController.signal
                   );
                   const parsed = await parseAIResponse(aiRes);
                   if (parsed && parsed.length > 5) {
@@ -947,7 +973,8 @@ export async function executeDAGStream(
                       image: imageBytes,
                       max_tokens: 512
                     }),
-                    40000
+                    40000,
+                    abortController.signal
                   );
                   const parsed = await parseAIResponse(aiRes);
                   if (parsed && parsed.length > 5) {
@@ -966,7 +993,8 @@ export async function executeDAGStream(
                       image: imageBytes,
                       max_tokens: 512
                     }),
-                    40000
+                    40000,
+                    abortController.signal
                   );
                   const parsed = await parseAIResponse(aiRes);
                   if (parsed && parsed.length > 5) {
@@ -990,7 +1018,8 @@ export async function executeDAGStream(
                       max_tokens: 2560,
                       temperature: 0.2
                     }),
-                    timeoutMs
+                    timeoutMs,
+                    abortController.signal
                   );
                   const parsed = await parseAIResponse(aiRes, (chunkText) => {
                     if (isTailNode && chunkText) {
