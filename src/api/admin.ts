@@ -673,8 +673,9 @@ export async function handleAdminCreateOrUpdateTemplate(request: Request, env: E
   for (let i = 0; i < roleSequence.length; i++) {
     const role = rolesMap.get(roleSequence[i])!;
     let hasModels = false;
+    let res: any = null;
     try {
-      const res = resolveRoleCompetence(role, activeModels);
+      res = resolveRoleCompetence(role, activeModels);
       hasModels = res.selectedModels.length > 0;
     } catch {
       hasModels = false;
@@ -683,6 +684,17 @@ export async function handleAdminCreateOrUpdateTemplate(request: Request, env: E
       return Response.json({
         error: `Subsistence Check Failed: Step ${i + 1} Role '${role.name_zh || role.role_id}' currently has 0 active models in the compute pool. An un-executable pipeline cannot be saved.`
       }, { status: 400 });
+    }
+
+    // 4.1 Topology Constraint: Client-side browser (WebGPU) models cannot be intermediate nodes in multi-node workflows
+    if (roleSequence.length > 1 && i < roleSequence.length - 1) {
+      const nonBrowserModels = (res.selectedModels || []).filter((m: ModelMetadata) => m.inference_target !== 'browser');
+      if (nonBrowserModels.length === 0) {
+        return Response.json({
+          error: `Topology Constraint Violation: Step ${i + 1} Role '${role.name_zh || role.role_id}' only resolves to client-side browser (WebGPU) models. WebGPU nodes can only serve as the final (tail) node in a multi-step workflow.`,
+          error_code: "error.browserNodeMustBeTailNode"
+        }, { status: 400 });
+      }
     }
   }
 
@@ -842,7 +854,15 @@ export async function handleAdminUpdateModel(request: Request, env: Env): Promis
     const id = url.pathname.split("/").pop();
     if (!id) return Response.json({ error: "Missing model id" }, { status: 400 });
 
-    const body = (await request.json().catch(() => ({}))) as { status: string; reason?: string };
+    const body = (await request.json().catch(() => ({}))) as {
+      status: string;
+      reason?: string;
+      endpoint?: string;
+      inference_target?: string;
+      auth_mode?: string;
+      api_format?: string;
+      auth_secret?: string;
+    };
     if (!body.status) return Response.json({ error: "Missing status" }, { status: 400 });
 
     const model = await env.DB.prepare("SELECT * FROM user_uploaded_models WHERE upload_id = ?").bind(id).first<any>();
@@ -852,23 +872,65 @@ export async function handleAdminUpdateModel(request: Request, env: Env): Promis
 
     if (body.status === "published" && (model.status === "approved" || model.status === "pending")) {
       const liveModelId = model.live_model_id || ("um-" + id);
+      const existingModel = model.live_model_id
+        ? await env.DB.prepare("SELECT * FROM models WHERE model_id = ?").bind(model.live_model_id).first<any>()
+        : null;
+
+      const targetEndpoint = (body.endpoint || existingModel?.endpoint || "").trim();
+      if (!targetEndpoint || targetEndpoint === "/api/infer") {
+        return Response.json({
+          error: "error.validEndpointRequired",
+          message: "A valid endpoint and inference_target are required to publish this model into the network topology."
+        }, { status: 400 });
+      }
+
+      if (targetEndpoint.startsWith("http://") || targetEndpoint.startsWith("https://")) {
+        if (!isSafeExternalUrl(targetEndpoint)) {
+          return Response.json({
+            error: "非法算力终端地址：禁止绑定本地回环、内网私有地址（RFC1918）或受保护的网络接口"
+          }, { status: 400 });
+        }
+      } else if (!targetEndpoint.startsWith("@cf/") && body.inference_target !== "browser" && existingModel?.inference_target !== "browser") {
+        return Response.json({
+          error: "未知节点协议：必须为合法 HTTP(S) 地址或 Workers AI 标识符（如 @cf/...）"
+        }, { status: 400 });
+      }
+
+      const inferenceTarget = ["browser", "edge", "cloud", "heavy"].includes(body.inference_target || "")
+        ? body.inference_target
+        : (existingModel?.inference_target || (targetEndpoint.startsWith("@cf/") ? "edge" : "heavy"));
+      const authMode = ["none", "bearer_static", "jwt_ephemeral"].includes(body.auth_mode || "")
+        ? body.auth_mode
+        : (existingModel?.auth_mode || "none");
+      const apiFormat = ["workers_ai", "openai_compat", "google_ai"].includes(body.api_format || "")
+        ? body.api_format
+        : (existingModel?.api_format || "workers_ai");
+      const authSecret = body.auth_secret && body.auth_secret !== "••••••••" && body.auth_secret !== "******"
+        ? body.auth_secret.trim()
+        : (existingModel?.auth_secret || null);
+
       // Use ON CONFLICT to gracefully handle re-publishing previously published/taken-down models
       await env.DB.prepare(
         `INSERT INTO models 
-         (model_id, display_name, provider, endpoint, modalities, tags, context_window, max_concurrency, precision, user_rating, usage_count, cost_per_1k_tokens, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         (model_id, display_name, provider, endpoint, modalities, tags, context_window, max_concurrency, precision, user_rating, usage_count, cost_per_1k_tokens, status, auth_mode, auth_secret, api_format, inference_target)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(model_id) DO UPDATE SET 
            display_name = excluded.display_name,
+           endpoint = excluded.endpoint,
            modalities = excluded.modalities,
            tags = excluded.tags,
            context_window = excluded.context_window,
            status = 'active',
+           auth_mode = excluded.auth_mode,
+           auth_secret = COALESCE(excluded.auth_secret, models.auth_secret),
+           api_format = excluded.api_format,
+           inference_target = excluded.inference_target,
            updated_at = datetime('now')`
       ).bind(
         liveModelId,
         model.display_name || "User Model",
         "user-upload",
-        "/api/infer",
+        targetEndpoint,
         model.in_modalities || "[]",
         model.capability_tags || "[]",
         model.context_window || 4096,
@@ -877,7 +939,11 @@ export async function handleAdminUpdateModel(request: Request, env: Env): Promis
         5.0,
         0,
         1.0,
-        "active"
+        "active",
+        authMode,
+        authSecret,
+        apiFormat,
+        inferenceTarget
       ).run();
 
       await env.DB.prepare(

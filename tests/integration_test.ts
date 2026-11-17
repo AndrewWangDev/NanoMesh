@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import worker from "../src/index";
 import { signJWT, verifyJWT } from "../src/auth/jwt";
 import { handleGetAsset } from "../src/api/presign";
-import { handleDeleteAccount } from "../src/api/user";
+import { handleDeleteAccount, handleUpdatePassword } from "../src/api/user";
+import { handleUnbindOAuth } from "../src/api/auth";
 import { 
   handleAdminLogin, 
   handleAdminListNodes, 
@@ -13,12 +14,14 @@ import {
   handleAdminCompetenceMatrix,
   handleAdminListTemplates,
   handleAdminCreateOrUpdateTemplate,
-  handleAdminDeleteTemplate
+  handleAdminDeleteTemplate,
+  handleAdminUpdateModel
 } from "../src/api/admin";
 import { runOrchestrationPipeline } from "../src/orchestration/orchestrator";
 import { executeDAGStream } from "../src/orchestration/dispatcher";
 import type { Env } from "../src/types";
 import type { UnifiedProtocolEnvelope } from "../src/orchestration/types";
+import bcrypt from "bcryptjs";
 
 // =========================================================================
 // In-Memory Mock Cloudflare Edge Runtime
@@ -35,6 +38,8 @@ interface TableStore {
   admin_login_attempts: any[];
   user_chat_sessions: any[];
   user_oauth_bindings: any[];
+  user_passkeys: any[];
+  user_uploaded_models: any[];
   account_tombstones: any[];
 }
 
@@ -124,6 +129,22 @@ function createMockD1(store: TableStore) {
             return { results: res as any };
           }
 
+          // 9. SELECT COUNT(*) as cnt FROM user_passkeys
+          if (cleanSql.includes("FROM user_passkeys")) {
+            const userId = boundArgs[0];
+            const pks = (store.user_passkeys || []).filter(p => p.user_id === userId);
+            return { results: [{ cnt: pks.length }] as any };
+          }
+
+          // 10. SELECT * FROM user_uploaded_models
+          if (cleanSql.includes("FROM user_uploaded_models")) {
+            let res = [...(store.user_uploaded_models || [])];
+            if (cleanSql.includes("WHERE upload_id = ?")) {
+              res = res.filter(m => m.upload_id === boundArgs[0]);
+            }
+            return { results: res as any };
+          }
+
           return { results: [] };
         },
         async run(): Promise<{ meta: { changes: number } }> {
@@ -163,6 +184,28 @@ function createMockD1(store: TableStore) {
               u.username = 'del_' + userId.slice(0, 12);
               u.credits = 0;
               u.token_version = (u.token_version || 1) + 1;
+            }
+            return { meta: { changes: 1 } };
+          }
+
+          // UPDATE users SET password_hash
+          if (cleanSql.startsWith("UPDATE users SET password_hash")) {
+            const userId = boundArgs[2];
+            const u = store.users.find(usr => usr.user_id === userId);
+            if (u) {
+              u.password_hash = boundArgs[0];
+              u.token_version = boundArgs[1];
+            }
+            return { meta: { changes: 1 } };
+          }
+
+          // UPDATE user_uploaded_models
+          if (cleanSql.startsWith("UPDATE user_uploaded_models")) {
+            const uploadId = boundArgs[boundArgs.length - 1];
+            const m = (store.user_uploaded_models || []).find(mod => mod.upload_id === uploadId);
+            if (m) {
+              m.status = boundArgs[0];
+              if (boundArgs.length > 2) m.live_model_id = boundArgs[1];
             }
             return { meta: { changes: 1 } };
           }
@@ -290,14 +333,25 @@ function createMockD1(store: TableStore) {
               tags: typeof boundArgs[5] === 'string' ? boundArgs[5] : JSON.stringify(boundArgs[5]),
               context_window: boundArgs[6],
               max_concurrency: boundArgs[7],
-              precision: boundArgs[8],
-              cost_per_1k_tokens: boundArgs[9],
-              status: boundArgs[10],
-              auth_mode: boundArgs[11],
-              auth_secret: boundArgs[12],
-              api_format: boundArgs[13],
-              inference_target: boundArgs[14]
+              precision: boundArgs[8]
             };
+            if (cleanSql.includes("user_rating")) {
+              modelObj.user_rating = boundArgs[9];
+              modelObj.usage_count = boundArgs[10];
+              modelObj.cost_per_1k_tokens = boundArgs[11];
+              modelObj.status = boundArgs[12];
+              modelObj.auth_mode = boundArgs[13];
+              modelObj.auth_secret = boundArgs[14];
+              modelObj.api_format = boundArgs[15];
+              modelObj.inference_target = boundArgs[16];
+            } else {
+              modelObj.cost_per_1k_tokens = boundArgs[9];
+              modelObj.status = boundArgs[10];
+              modelObj.auth_mode = boundArgs[11];
+              modelObj.auth_secret = boundArgs[12];
+              modelObj.api_format = boundArgs[13];
+              modelObj.inference_target = boundArgs[14];
+            }
             if (existingIdx >= 0) {
               store.models[existingIdx] = modelObj;
             } else {
@@ -563,6 +617,8 @@ function buildMockEnv(): { env: Env; store: TableStore } {
     admin_login_attempts: [],
     user_chat_sessions: [],
     user_oauth_bindings: [],
+    user_passkeys: [],
+    user_uploaded_models: [],
     account_tombstones: []
   };
 
@@ -1060,8 +1116,145 @@ async function runIntegrationTests() {
 
   console.log("  ✓ User account deletion cascades physical erasure of chat sessions & R2 assets: PASSED");
 
+  // -----------------------------------------------------------------------
+  // SCENARIO 8: Audit Report 3 Remediations (BUG-01, BUG-02, BUG-03, BUG-04)
+  // -----------------------------------------------------------------------
+  console.log("\n[Scenario 8] Audit Report 3 Remediations & Architectural Hardening");
+
+  // 8.1 BUG-03: Password Update Token In Body
+  const pwUser = {
+    user_id: "u_pw_test",
+    username: "pw_test_user",
+    email: "pw_test@example.com",
+    password_hash: bcrypt.hashSync("OldPass1234!", 10),
+    token_version: 1,
+    credits: 100
+  };
+  store.users.push(pwUser);
+  const pwUserToken = await signJWT({ userId: pwUser.user_id, tokenVersion: 1 }, env.JWT_SECRET, 3600);
+
+  const updatePwReq = new Request("https://nanomesh.local/api/user/password", {
+    method: "PUT",
+    headers: {
+      "Cookie": `session=${pwUserToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      oldPassword: "OldPass1234!",
+      newPassword: "NewPass5678!"
+    })
+  });
+  const updatePwRes = await handleUpdatePassword(updatePwReq, env);
+  assert.equal(updatePwRes.status, 200, "handleUpdatePassword must succeed");
+  const updatePwData = await updatePwRes.json() as any;
+  assert.equal(updatePwData.success, true);
+  assert.ok(updatePwData.token, "Response JSON body must include the refreshed session token for API clients");
+  const verifiedRefreshed = await verifyJWT(updatePwData.token, env.JWT_SECRET);
+  assert.equal(verifiedRefreshed?.userId, pwUser.user_id);
+  assert.equal(verifiedRefreshed?.tokenVersion, 2, "TokenVersion must increment to 2");
+  console.log("  ✓ Password update issues refreshed token in response body: PASSED");
+
+  // 8.2 BUG-04: OAuth Unbind Passkey Safety Verification
+  const oauthPasskeyUser = {
+    user_id: "u_oauth_pk",
+    username: "oauth_pk_user",
+    email: "oauth_pk@example.com",
+    password_hash: null,
+    token_version: 1,
+    credits: 100
+  };
+  store.users.push(oauthPasskeyUser);
+  store.user_oauth_bindings.push({ user_id: oauthPasskeyUser.user_id, provider: "github" });
+  store.user_passkeys.push({ credential_id: "cred_123", user_id: oauthPasskeyUser.user_id });
+  const oauthPkToken = await signJWT({ userId: oauthPasskeyUser.user_id, tokenVersion: 1 }, env.JWT_SECRET, 3600);
+
+  const unbindReq = new Request("https://nanomesh.local/api/auth/oauth/github", {
+    method: "DELETE",
+    headers: { "Cookie": `session=${oauthPkToken}` }
+  });
+  const unbindRes = await handleUnbindOAuth(unbindReq, env, "github");
+  assert.equal(unbindRes.status, 200, "User with registered passkeys must be permitted to unbind last OAuth provider");
+  console.log("  ✓ OAuth unbinding permits decoupling when Passkey is active: PASSED");
+
+  // 8.3 BUG-01: Admin Model Publishing Endpoint Guard
+  store.user_uploaded_models.push({
+    upload_id: "upload_model_1",
+    user_id: "u_model_author",
+    display_name: "Custom BERT",
+    status: "pending",
+    endpoint: "/api/infer"
+  });
+
+  // Attempt to publish without valid endpoint (or with dummy /api/infer)
+  const pubFailReq = new Request("https://nanomesh.local/api/admin/models/upload_model_1", {
+    method: "PATCH",
+    headers: adminReqHeaders,
+    body: JSON.stringify({
+      status: "published",
+      endpoint: "/api/infer"
+    })
+  });
+  const pubFailRes = await handleAdminUpdateModel(pubFailReq, env);
+  assert.equal(pubFailRes.status, 400, "Publishing model with /api/infer must be rejected");
+  const pubFailData = await pubFailRes.json() as any;
+  assert.equal(pubFailData.error, "error.validEndpointRequired");
+
+  // Attempt to publish with legitimate endpoint succeeds
+  const pubSuccessReq = new Request("https://nanomesh.local/api/admin/models/upload_model_1", {
+    method: "PATCH",
+    headers: adminReqHeaders,
+    body: JSON.stringify({
+      status: "published",
+      endpoint: "https://ai.example.com/v1/chat/completions",
+      inference_target: "heavy"
+    })
+  });
+  const pubSuccessRes = await handleAdminUpdateModel(pubSuccessReq, env);
+  assert.equal(pubSuccessRes.status, 200, "Publishing model with valid external endpoint must succeed");
+  const insertedLiveModel = store.models.find(m => m.model_id === "um-upload_model_1");
+  assert.ok(insertedLiveModel);
+  assert.equal(insertedLiveModel.endpoint, "https://ai.example.com/v1/chat/completions");
+  assert.equal(insertedLiveModel.inference_target, "heavy");
+  console.log("  ✓ Admin model publishing validates endpoint and prevents /api/infer pollution: PASSED");
+
+  // 8.4 BUG-02: Template Multi-step WebGPU Intermediate Node Constraint
+  store.dag_roles.push({
+    role_id: "role_browser_only",
+    name_zh: "端侧独占角色",
+    name_en: "Browser Only Role",
+    in_modalities: JSON.stringify(["text"]),
+    out_modalities: JSON.stringify(["text"]),
+    requisition_tags: JSON.stringify(["#browser_exclusive"]),
+    compensation_prompts: "{}"
+  });
+  store.models.push({
+    model_id: "m_browser_only",
+    display_name: "WebGPU Exclusive Model",
+    provider: "Client",
+    endpoint: "onnx-community/test",
+    modalities: JSON.stringify(["text"]),
+    tags: JSON.stringify(["#browser_exclusive"]),
+    context_window: 2048,
+    status: "active",
+    inference_target: "browser"
+  });
+
+  const invalidMultiStepTemplateReq = new Request("https://nanomesh.local/api/admin/templates", {
+    method: "POST",
+    headers: adminReqHeaders,
+    body: JSON.stringify({
+      name_zh: "非法多步包含中间端侧节点",
+      role_sequence: ["role_browser_only", "role_text_reasoning"]
+    })
+  });
+  const invalidTplRes = await handleAdminCreateOrUpdateTemplate(invalidMultiStepTemplateReq, env);
+  assert.equal(invalidTplRes.status, 400, "Template with intermediate browser node must be rejected");
+  const invalidTplData = await invalidTplRes.json() as any;
+  assert.equal(invalidTplData.error_code, "error.browserNodeMustBeTailNode");
+  console.log("  ✓ DAG template enforces WebGPU tail node constraint on multi-step workflows: PASSED");
+
   console.log("\n==================================================");
-  console.log("   🎉 ALL 7 INTEGRATION SCENARIOS PASSED (100%)!  ");
+  console.log("   🎉 ALL 8 INTEGRATION SCENARIOS PASSED (100%)!  ");
   console.log("==================================================");
 }
 

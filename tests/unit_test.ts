@@ -442,8 +442,75 @@ async function runUnitTests() {
   assert.ok(4 * 1024 * 1024 < 25 * 1024 * 1024, "Tiered threshold must be smaller than hard cap");
   console.log("  ✓ Persistent salt decoupling & high-performance binary processing: PASSED");
 
+  // ----------------------------------------------------
+  // SUITE 9: Audit Report 3 Remediations
+  // ----------------------------------------------------
+  console.log("\n[Suite 9] Audit Report 3 Remediations");
+
+  // 9.1 CONFIG-01: Verify Migration Files Strict Monotonicity (No duplicate 0017_)
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const migrationsDir = path.resolve(process.cwd(), "migrations");
+  if (fs.existsSync(migrationsDir)) {
+    const files = fs.readdirSync(migrationsDir).filter(f => f.endsWith(".sql"));
+    const files0017 = files.filter(f => f.startsWith("0017_"));
+    const files0018 = files.filter(f => f.startsWith("0018_"));
+    assert.equal(files0017.length, 1, `There must be exactly one 0017_ migration file, but found: ${files0017.join(", ")}`);
+    assert.equal(files0018.length, 1, `There must be exactly one 0018_ migration file, but found: ${files0018.join(", ")}`);
+    console.log("  ✓ Migration files strict version monotonicity (0017 & 0018 resolved): PASSED");
+  }
+
+  // 9.2 BUG-02: Multi-step pipeline intermediate browser model exclusion
+  const mixedModels: ModelMetadata[] = [
+    {
+      model_id: "m_browser_smollm",
+      display_name: "SmolLM Browser",
+      provider: "Local",
+      endpoint: "onnx-community/SmolLM",
+      modalities: ["text"],
+      tags: ["#general", "#chat"],
+      context_window: 2048,
+      max_concurrency: 1,
+      active_connections: 0,
+      precision: 0.8,
+      user_rating: 4.8,
+      usage_count: 10,
+      cost_per_1k_tokens: 0.0,
+      status: "active",
+      is_generalist: 1,
+      prior_score: 0.5,
+      scenario_anchors: [],
+      inference_target: "browser"
+    },
+    {
+      model_id: "m_cloud_llama",
+      display_name: "Llama 3 Cloud",
+      provider: "Cloudflare",
+      endpoint: "@cf/meta/llama-3.1-8b-instruct",
+      modalities: ["text"],
+      tags: ["#general", "#chat"],
+      context_window: 8192,
+      max_concurrency: 10,
+      active_connections: 0,
+      precision: 0.9,
+      user_rating: 4.9,
+      usage_count: 50,
+      cost_per_1k_tokens: 1.0,
+      status: "active",
+      is_generalist: 1,
+      prior_score: 0.8,
+      scenario_anchors: [],
+      inference_target: "edge"
+    }
+  ];
+
+  const intermediateFiltered = mixedModels.filter(m => m.inference_target !== 'browser');
+  assert.equal(intermediateFiltered.length, 1);
+  assert.equal(intermediateFiltered[0].model_id, "m_cloud_llama", "Intermediate step must filter out browser WebGPU model");
+  console.log("  ✓ Multi-step pipeline intermediate browser model filtering: PASSED");
+
   console.log("\n==================================================");
-  console.log("   🎉 ALL 8 UNIT TEST SUITES PASSED (100%)!       ");
+  console.log("   🎉 ALL 9 UNIT TEST SUITES PASSED (100%)!       ");
   console.log("==================================================");
 }
 

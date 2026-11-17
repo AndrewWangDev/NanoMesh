@@ -467,8 +467,11 @@ export async function runOrchestrationPipeline(
   if (options.reRouteMode === 'switch_model') {
     // Case 2: Models and/or prompts ALREADY selected by user!
     // Skip Step 3 Prompt Embedding and heavy scoring formulas! Directly instantiate nodes for Step 4.
-    for (const role of selectedTemplate.roles) {
-      const roleResolution = resolveRoleCompetence(role, candidateModels);
+    for (let roleIdx = 0; roleIdx < selectedTemplate.roles.length; roleIdx++) {
+      const role = selectedTemplate.roles[roleIdx];
+      const isIntermediate = selectedTemplate.roles.length > 1 && roleIdx < selectedTemplate.roles.length - 1;
+      const roleCandidateModels = isIntermediate ? candidateModels.filter(m => m.inference_target !== 'browser') : candidateModels;
+      const roleResolution = resolveRoleCompetence(role, roleCandidateModels.length > 0 ? roleCandidateModels : candidateModels);
       if (roleResolution.downgradeEvent) {
         downgradeEvents.push({ role_id: role.role_id, ...roleResolution.downgradeEvent });
       }
@@ -510,8 +513,11 @@ export async function runOrchestrationPipeline(
     // Case 1 & Normal case: Run full Vector Embeddings (bge-m3) & Ultimate Scoring Formula
     const promptEmbedding = await generatePromptEmbedding(env, envelope.instruction_payload);
 
-    for (const role of selectedTemplate.roles) {
-      const roleResolution = resolveRoleCompetence(role, candidateModels);
+    for (let roleIdx = 0; roleIdx < selectedTemplate.roles.length; roleIdx++) {
+      const role = selectedTemplate.roles[roleIdx];
+      const isIntermediate = selectedTemplate.roles.length > 1 && roleIdx < selectedTemplate.roles.length - 1;
+      const roleCandidateModels = isIntermediate ? candidateModels.filter(m => m.inference_target !== 'browser') : candidateModels;
+      const roleResolution = resolveRoleCompetence(role, roleCandidateModels.length > 0 ? roleCandidateModels : candidateModels);
       if (roleResolution.downgradeEvent) {
         downgradeEvents.push({ role_id: role.role_id, ...roleResolution.downgradeEvent });
       }

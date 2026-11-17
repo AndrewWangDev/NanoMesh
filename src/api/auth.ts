@@ -462,12 +462,17 @@ export async function handleUnbindOAuth(req: Request, env: Env, provider: string
   const session = await getSession(req, env);
   if (!session) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
-  // Safety check: don't allow unbinding if they have no password and this is their LAST binding
+  // Safety check: don't allow unbinding if they have no password, no other OAuth, and no passkeys
   const user = await env.DB.prepare("SELECT password_hash FROM users WHERE user_id = ?").bind(session.userId || '').first<any>();
   const bindings = await env.DB.prepare("SELECT provider FROM user_oauth_bindings WHERE user_id = ?").bind(session.userId || '').all();
+  const passkeyCount = await env.DB.prepare("SELECT COUNT(*) as cnt FROM user_passkeys WHERE user_id = ?").bind(session.userId || '').first<{ cnt: number }>();
 
-  if (!user?.password_hash && (!bindings.results || bindings.results.length <= 1)) {
-    return Response.json({ error: "Cannot unbind last login method without a password." }, { status: 400 });
+  const hasPassword = !!(user && user.password_hash);
+  const hasMultipleOAuth = !!(bindings.results && bindings.results.length > 1);
+  const hasPasskey = (passkeyCount?.cnt ?? 0) > 0;
+
+  if (!hasPassword && !hasMultipleOAuth && !hasPasskey) {
+    return Response.json({ error: "Cannot unbind last login method without a password or passkey." }, { status: 400 });
   }
 
   await env.DB.prepare("DELETE FROM user_oauth_bindings WHERE user_id = ? AND provider = ?").bind(session.userId, provider).run();
