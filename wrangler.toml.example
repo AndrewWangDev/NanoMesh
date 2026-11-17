@@ -45,5 +45,6 @@ bucket_name = "nanomesh-assets"
 [vars]
 TURNSTILE_SITE_KEY = "your-turnstile-site-key-here"
 RESEND_FROM_EMAIL = "noreply@yourdomain.com"
-BACKEND_URL = "https://ai.yourdomain.com"
 FRONTEND_URL = "https://nano.yourdomain.com"
+# Optional legacy backend URL (Demo only; in standard deployments, Heavy Nodes are managed via /admin)
+# BACKEND_URL = "https://ai.yourdomain.com"
