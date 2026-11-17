@@ -76,6 +76,9 @@ export default {
              const parts = url.pathname.split("/");
              const templateId = parts[parts.length - 2];
              res = await admin.handleAdminToggleTemplate(request, env, templateId);
+           } else if (url.pathname.startsWith("/api/admin/templates/") && request.method === "DELETE") {
+             const templateId = url.pathname.slice("/api/admin/templates/".length);
+             res = await admin.handleAdminDeleteTemplate(request, env, templateId);
            }
            // Gift codes & notifications & legacy compat
            else if (url.pathname === "/api/admin/models" && request.method === "GET") res = await admin.handleAdminListModels(request, env);
@@ -219,10 +222,15 @@ export default {
 
         // Add CORS headers to API responses
         const existingOrigin = res.headers.get("access-control-allow-origin") || res.headers.get("Access-Control-Allow-Origin");
+        const isWildcardOrigin = existingOrigin === "*";
         const newRes = new Response(res.body, res);
         Object.entries(getCorsHeaders(env)).forEach(([k, v]) => {
-          if (k.toLowerCase() === "access-control-allow-origin" && existingOrigin) {
+          const lowerKey = k.toLowerCase();
+          if (lowerKey === "access-control-allow-origin" && existingOrigin) {
             newRes.headers.set(k, existingOrigin);
+          } else if (lowerKey === "access-control-allow-credentials" && isWildcardOrigin) {
+            // According to W3C Fetch spec, Allow-Credentials cannot be true when Allow-Origin is wildcard '*'
+            newRes.headers.delete(k);
           } else {
             newRes.headers.set(k, v);
           }

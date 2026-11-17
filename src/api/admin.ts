@@ -140,9 +140,9 @@ export async function handleAdminListNodes(request: Request, env: Env): Promise<
   } else if (filter === "browser") {
     whereClause = "WHERE inference_target = 'browser'";
   } else if (filter === "edge") {
-    whereClause = "WHERE inference_target = 'edge' OR provider LIKE '%cloudflare%'";
+    whereClause = "WHERE inference_target = 'edge'";
   } else if (filter === "heavy") {
-    whereClause = "WHERE inference_target = 'heavy' OR inference_target = 'cloud' OR auth_mode != 'none'";
+    whereClause = "WHERE inference_target = 'heavy'";
   }
 
   const query = `SELECT * FROM models ${whereClause} ORDER BY created_at DESC`;
@@ -300,6 +300,25 @@ export async function handleAdminUpdateNode(request: Request, env: Env, nodeId: 
   const authMode = body.auth_mode !== undefined ? body.auth_mode : existing.auth_mode;
   const apiFormat = body.api_format !== undefined ? body.api_format : existing.api_format;
   const inferenceTarget = body.inference_target !== undefined ? body.inference_target : existing.inference_target;
+
+  // Security gate: When activating node, strictly verify endpoint validity!
+  if (status === "active") {
+    if (!endpoint || endpoint === "/api/infer") {
+      return Response.json({
+        error: "无法启用节点：端点无效或为已废弃的占位符 (/api/infer)"
+      }, { status: 400 });
+    }
+    if (
+      !endpoint.startsWith("https://") &&
+      !endpoint.startsWith("http://") &&
+      !endpoint.startsWith("@cf/") &&
+      inferenceTarget !== "browser"
+    ) {
+      return Response.json({
+        error: "无法启用节点：必须具备合法的 HTTP(S) 地址或 Workers AI 标识符（如 @cf/...）"
+      }, { status: 400 });
+    }
+  }
 
   let authSecret = existing.auth_secret;
   if (body.auth_secret !== undefined && body.auth_secret !== "••••••••" && body.auth_secret !== "******") {
@@ -734,6 +753,16 @@ export async function handleAdminToggleTemplate(request: Request, env: Env, temp
   await env.DB.prepare("UPDATE dag_templates SET status = ? WHERE template_id = ?").bind(newStatus, templateId).run();
 
   return Response.json({ success: true, template_id: templateId, status: newStatus, is_active: newStatus === 'active' });
+}
+
+export async function handleAdminDeleteTemplate(request: Request, env: Env, templateId: string): Promise<Response> {
+  const session = await getAdminSession(request, env);
+  if (!session) return new Response("Unauthorized", { status: 401 });
+
+  if (!templateId) return Response.json({ error: "Missing templateId" }, { status: 400 });
+
+  await env.DB.prepare("DELETE FROM dag_templates WHERE template_id = ?").bind(templateId).run();
+  return Response.json({ success: true, template_id: templateId });
 }
 
 // ----------------- Model Management -----------------
