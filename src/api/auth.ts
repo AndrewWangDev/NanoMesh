@@ -221,11 +221,14 @@ export async function handleLogin(req: Request, env: Env) {
   }), { headers: setCookieHeaders(token) });
 }
 
-export async function handleSendCode(req: Request, env: Env) {
+export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionContext) {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
 
   // Opportunistic cleanup of expired verification codes (> 1 day old)
-  env.DB.prepare("DELETE FROM verification_codes WHERE expires_at < datetime('now', '-1 day')").run().catch(() => {});
+  const cleanupPromise = env.DB.prepare("DELETE FROM verification_codes WHERE expires_at < datetime('now', '-1 day')").run().catch(() => {});
+  if (ctx && typeof ctx.waitUntil === 'function') {
+    ctx.waitUntil(cleanupPromise);
+  }
 
   const body: any = await req.json().catch(() => ({}));
   let { email, turnstile_token, lang } = body;

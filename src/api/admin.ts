@@ -38,21 +38,32 @@ function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
   return diff === 0;
 }
 
+export async function getAdminSigningSecret(env: Env): Promise<string> {
+  const enc = new TextEncoder();
+  const salt = `nanomesh_admin_sign_v1:${env.ADMIN_PASSWORD || ''}:${env.JWT_SECRET}`;
+  const digest = await crypto.subtle.digest("SHA-256", enc.encode(salt));
+  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 export async function getAdminSession(request: Request, env: Env) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(/admin_session=([^;]+)/);
   if (!match) return null;
   const token = match[1];
   try {
-    const payload = await verifyJWT(token, env.JWT_SECRET);
+    const adminSecret = await getAdminSigningSecret(env);
+    const payload = await verifyJWT(token, adminSecret);
     if (payload && payload.role === "admin") return payload;
   } catch (e) {}
   return null;
 }
 
-export async function handleAdminLogin(request: Request, env: Env): Promise<Response> {
+export async function handleAdminLogin(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   // Opportunistic cleanup of stale admin login attempts (> 1 day old)
-  env.DB.prepare("DELETE FROM admin_login_attempts WHERE created_at < datetime('now', '-1 day')").run().catch(() => {});
+  const cleanupPromise = env.DB.prepare("DELETE FROM admin_login_attempts WHERE created_at < datetime('now', '-1 day')").run().catch(() => {});
+  if (ctx && typeof ctx.waitUntil === 'function') {
+    ctx.waitUntil(cleanupPromise);
+  }
 
   const adminPass = env.ADMIN_PASSWORD;
   // Security hardening: reject login if ADMIN_PASSWORD secret is not configured
@@ -94,7 +105,8 @@ export async function handleAdminLogin(request: Request, env: Env): Promise<Resp
   // Clear failed attempts on successful authentication
   await env.DB.prepare("DELETE FROM admin_login_attempts WHERE ip = ?").bind(ip).run();
 
-  const token = await signJWT({ role: "admin" }, env.JWT_SECRET, 2 * 3600);
+  const adminSecret = await getAdminSigningSecret(env);
+  const token = await signJWT({ role: "admin" }, adminSecret, 2 * 3600);
   const headers = new Headers();
   headers.set("Set-Cookie", `admin_session=${token}; HttpOnly; Path=/; Max-Age=${2 * 3600}; SameSite=Lax; Secure`);
   headers.set("Content-Type", "application/json");

@@ -5,7 +5,8 @@ import { hashGiftCode, normalizeGiftCode } from "../src/api/billing";
 import { hardFilterModels, filterTemplatesBySubsistence } from "../src/orchestration/subsistence";
 import { resolveRoleCompetence } from "../src/orchestration/competence";
 import { scoreAndRankRoleModels, cosineSimilarity } from "../src/orchestration/scoring";
-import { isSafeExternalUrl, applyContextWindowGuard } from "../src/orchestration/dispatcher";
+import { isSafeExternalUrl, applyContextWindowGuard, buildAuthHeaders } from "../src/orchestration/dispatcher";
+import { getAdminSigningSecret } from "../src/api/admin";
 import type { DAGRole, DAGTemplate, ModelMetadata } from "../src/orchestration/types";
 
 async function runUnitTests() {
@@ -87,6 +88,12 @@ async function runUnitTests() {
   assert.equal(isSafeExternalUrl("http://169.254.169.254/latest"), false);
   assert.equal(isSafeExternalUrl("http://[::1]"), false);
   assert.equal(isSafeExternalUrl("javascript:void(0)"), false);
+  // IPv4-Mapped IPv6 protection
+  assert.equal(isSafeExternalUrl("http://[::ffff:127.0.0.1]:8080"), false, "IPv4-mapped 127.0.0.1 must be rejected");
+  assert.equal(isSafeExternalUrl("http://[::ffff:7f00:1]:8080"), false, "IPv4-mapped hex 7f00:1 must be rejected");
+  assert.equal(isSafeExternalUrl("http://[::ffff:192.168.1.1]:8000"), false, "IPv4-mapped 192.168.1.1 must be rejected");
+  assert.equal(isSafeExternalUrl("http://[::ffff:10.0.0.1]:8000"), false, "IPv4-mapped 10.0.0.1 must be rejected");
+  assert.equal(isSafeExternalUrl("http://[::ffff:169.254.169.254]"), false, "IPv4-mapped cloud metadata must be rejected");
   console.log("  ✓ SSRF IP / Protocol filter: PASSED");
 
   // 3.2 applyContextWindowGuard
@@ -332,8 +339,66 @@ async function runUnitTests() {
   assert.equal(Math.round(cosineSimilarity(vecA, vecC) * 100) / 100, 0.0);
   console.log("  ✓ Serverless tier hierarchy, context fit & hash jitter: PASSED");
 
+  // ----------------------------------------------------
+  // SUITE 7: Audit Remediations & Trust Boundary Isolation
+  // ----------------------------------------------------
+  console.log("\n[Suite 7] Audit Remediations & Trust Boundary Isolation");
+
+  // 7.1 Heavy node rejects falling back to JWT_SECRET
+  const heavyModelWithoutSecret: ModelMetadata = {
+    model_id: "m_heavy_vps",
+    display_name: "Llama 3.1 70B VPS",
+    provider: "SelfHosted",
+    endpoint: "https://vps.example.com/v1/chat/completions",
+    modalities: ["text"],
+    tags: ["#heavy"],
+    context_window: 16384,
+    max_concurrency: 10,
+    precision: 0.95,
+    cost_per_1k_tokens: 0.05,
+    status: "active",
+    auth_mode: "jwt_ephemeral",
+    auth_secret: null,
+    api_format: "openai_compat",
+    inference_target: "heavy"
+  };
+
+  const mockEnvFallback: any = {
+    JWT_SECRET: "global-system-jwt-secret-do-not-leak",
+    HEAVY_JWT_SECRET: undefined
+  };
+
+  await assert.rejects(
+    async () => {
+      await buildAuthHeaders(heavyModelWithoutSecret, mockEnvFallback, "{}", { userId: "u1" });
+    },
+    (err: any) => {
+      assert.ok(err.message.includes("[SECURITY_REJECTED]"), "Must fail-closed when dedicated secret is missing");
+      assert.ok(err.message.includes("禁止回退使用系统核心密钥"), "Must forbid JWT_SECRET fallback");
+      return true;
+    }
+  );
+
+  // 7.2 Dedicated HEAVY_JWT_SECRET or node auth_secret succeeds
+  const mockEnvDedicated: any = {
+    JWT_SECRET: "global-system-jwt-secret-do-not-leak",
+    HEAVY_JWT_SECRET: "dedicated-heavy-jwt-secret-vps-only"
+  };
+  const headersWithDedicated = await buildAuthHeaders(heavyModelWithoutSecret, mockEnvDedicated, "{}", { userId: "u1" });
+  assert.ok(headersWithDedicated['Authorization']?.startsWith("Bearer "), "Must succeed when HEAVY_JWT_SECRET is configured");
+
+  // 7.3 Admin session password-derived signing key
+  const adminEnv1: any = { ADMIN_PASSWORD: "Password123!", JWT_SECRET: "jwt-sec" };
+  const adminEnv2: any = { ADMIN_PASSWORD: "PasswordChanged456!", JWT_SECRET: "jwt-sec" };
+  const adminSecret1 = await getAdminSigningSecret(adminEnv1);
+  const adminSecret2 = await getAdminSigningSecret(adminEnv2);
+  assert.equal(adminSecret1.length, 64, "Derived admin secret must be 64-char sha256 hex");
+  assert.notEqual(adminSecret1, adminSecret2, "Changing ADMIN_PASSWORD must change derived signing key");
+  assert.notEqual(adminSecret1, adminEnv1.JWT_SECRET, "Admin signing secret must never equal bare JWT_SECRET");
+  console.log("  ✓ Trust boundary isolation & derived admin signing keys: PASSED");
+
   console.log("\n==================================================");
-  console.log("   🎉 ALL 6 UNIT TEST SUITES PASSED (100%)!       ");
+  console.log("   🎉 ALL 7 UNIT TEST SUITES PASSED (100%)!       ");
   console.log("==================================================");
 }
 

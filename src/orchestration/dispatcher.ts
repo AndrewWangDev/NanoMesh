@@ -30,6 +30,15 @@ async function computeSha256Hex(data: string): Promise<string> {
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+function isPrivateIPv4Octets(o1: number, o2: number): boolean {
+  if (o1 === 10 || o1 === 127 || (o1 === 169 && o2 === 254)) return true;
+  if (o1 === 172 && (o2 >= 16 && o2 <= 31)) return true;
+  if (o1 === 192 && o2 === 168) return true;
+  if (o1 === 100 && (o2 >= 64 && o2 <= 127)) return true;
+  if (o1 === 0) return true;
+  return false;
+}
+
 export function isSafeExternalUrl(urlStr: string): boolean {
   try {
     const parsed = new URL(urlStr);
@@ -47,15 +56,30 @@ export function isSafeExternalUrl(urlStr: string): boolean {
     // - fe80::/10 (Link-Local)
     if (host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe80:')) return false;
 
+    // IPv4-Mapped IPv6 (e.g. ::ffff:127.0.0.1 or WHATWG hex format ::ffff:7f00:1)
+    if (host.startsWith('::ffff:')) {
+      const remainder = host.slice(7);
+      const dotMatch = remainder.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+      if (dotMatch) {
+        if (isPrivateIPv4Octets(parseInt(dotMatch[1], 10), parseInt(dotMatch[2], 10))) return false;
+      } else {
+        const hexParts = remainder.split(':');
+        if (hexParts.length === 2) {
+          const hi = parseInt(hexParts[0], 16);
+          const o1 = (hi >> 8) & 0xff;
+          const o2 = hi & 0xff;
+          if (isPrivateIPv4Octets(o1, o2)) return false;
+        } else {
+          return false;
+        }
+      }
+    }
+
     // IPv4 Private & Link-Local Ranges:
     const ip = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
     if (ip) {
       const [o1, o2] = [parseInt(ip[1], 10), parseInt(ip[2], 10)];
-      if (o1 === 10 || o1 === 127 || (o1 === 169 && o2 === 254)) return false;
-      if (o1 === 172 && (o2 >= 16 && o2 <= 31)) return false;
-      if (o1 === 192 && o2 === 168) return false;
-      if (o1 === 100 && (o2 >= 64 && o2 <= 127)) return false;
-      if (o1 === 0) return false;
+      if (isPrivateIPv4Octets(o1, o2)) return false;
     }
     return true;
   } catch {
@@ -134,7 +158,7 @@ export function applyContextWindowGuard(
  * - 'bearer_static': Google AI Studio Key / OpenAI API Key (Authorization: Bearer & x-goog-api-key)
  * - 'jwt_ephemeral': Private VPS / llama-server gateway with anti-tamper SHA-256 body digest & anti-replay jti
  */
-async function buildAuthHeaders(
+export async function buildAuthHeaders(
   model: ModelMetadata,
   env: Env,
   requestBodyStr: string,
@@ -165,9 +189,10 @@ async function buildAuthHeaders(
   }
 
   if (authMode === 'jwt_ephemeral') {
-    const heavySecret = model.auth_secret || env.HEAVY_JWT_SECRET || env.JWT_SECRET;
+    // 严禁回退至 env.JWT_SECRET，维护边缘控制面与外部异构算力节点间的严格信任隔离
+    const heavySecret = model.auth_secret || env.HEAVY_JWT_SECRET;
     if (!heavySecret) {
-      throw new Error(`[SECURITY_REJECTED] 算力节点【${model.display_name}】需要 jwt_ephemeral 鉴权，但服务器未配置对应密钥。`);
+      throw new Error(`[SECURITY_REJECTED] 算力节点【${model.display_name}】需要 jwt_ephemeral 鉴权，但节点未配置 auth_secret 且未配置系统全局 HEAVY_JWT_SECRET。禁止回退使用系统核心密钥！`);
     }
     const bodyDigest = await computeSha256Hex(requestBodyStr);
     const heavyToken = await signHeavyNodeToken(
@@ -396,6 +421,7 @@ export async function executeDAGStream(
   let heartbeatTimer: any = null;
   let isStreamCancelled = false;
   let hasEmittedTokens = false;
+  let isLedgerSettled = false;
 
   return new ReadableStream({
     async start(controller) {
@@ -969,6 +995,7 @@ export async function executeDAGStream(
                   const parsed = await parseAIResponse(aiRes, (chunkText) => {
                     if (isTailNode && chunkText) {
                       didStreamChunks = true;
+                      hasEmittedTokens = true;
                       sendEvent('text_chunk', {
                         role_id: node.role.role_id,
                         chunk: chunkText,
@@ -1002,6 +1029,7 @@ export async function executeDAGStream(
 
             // Stream output chunk (only tail node or single-node outputs directly to final answer, if not already streamed)
             if (isTailNode && !didStreamChunks) {
+              hasEmittedTokens = true;
               sendEvent('text_chunk', {
                 role_id: node.role.role_id,
                 chunk: nodeOutput,
@@ -1059,6 +1087,10 @@ export async function executeDAGStream(
           upstreamOutput = nodeOutput;
         }
 
+        if (isStreamCancelled) {
+          return;
+        }
+
         // 3. Settle billing atomically (preventing transaction tearing & race conditions)
         if (options.hasPreDeducted) {
           if (totalCost === 0) {
@@ -1091,6 +1123,8 @@ export async function executeDAGStream(
                 )
               );
               await env.DB.batch(statements);
+              isLedgerSettled = true;
+              options.hasPreDeducted = false;
             } catch (billingErr) {
               console.error("[Dispatcher] Failed to settle credits atomically:", billingErr);
             }
@@ -1114,6 +1148,7 @@ export async function executeDAGStream(
                 `执行模板: ${dag.template.name_zh}`
               )
             ]);
+            isLedgerSettled = true;
           } catch (billingErr) {
             console.error("[Dispatcher] Failed to deduct credits atomically:", billingErr);
           }
@@ -1129,7 +1164,7 @@ export async function executeDAGStream(
 
       } catch (err: any) {
         if (isStreamCancelled || err.name === 'AbortError') {
-          // Client disconnected early, cancel() callback already triggered refund if eligible
+          // Client disconnected early, cancel() callback already triggered refund or ledger if eligible
           return;
         }
         // Unconditionally release pre-deducted reservation if DAG fails to deliver end-to-end (All-or-Nothing delivery)
@@ -1155,6 +1190,24 @@ export async function executeDAGStream(
           ).bind(options.userId).run();
         } catch (refundErr) {
           console.error("[Dispatcher] Failed to refund reserved credit on cancel:", refundErr);
+        }
+      } else if (options.hasPreDeducted && hasEmittedTokens && !isLedgerSettled) {
+        options.hasPreDeducted = false;
+        isLedgerSettled = true;
+        try {
+          const ledgerId = crypto.randomUUID();
+          await env.DB.prepare(`
+            INSERT INTO credit_ledger 
+            (ledger_id, user_id, category, amount, balance, title, detail, created_at)
+            VALUES (?, ?, 'compute_cost', -1, (SELECT credits FROM users WHERE user_id = ?), 'DAG智能编排调用', ?, datetime('now'))
+          `).bind(
+            ledgerId,
+            options.userId,
+            options.userId,
+            `中途断开连接算力保底扣费 (工序: ${dag.template.name_zh})`
+          ).run();
+        } catch (ledgerErr) {
+          console.error("[Dispatcher] Failed to record credit ledger on cancel:", ledgerErr);
         }
       }
     }
