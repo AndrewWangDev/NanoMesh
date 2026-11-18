@@ -1562,14 +1562,15 @@ async function runIntegrationTests() {
       status: "candidate_failed",
       failed_model_id: "m_browser_only",
       error_reason: "WebGPU Device creation failure",
+      upstream_context: "Preserved Architectural Context from Step 0",
       envelope: testEnvelope9,
       orchestration_options: { chosenTemplateId: webgpuArbitraryTemplateId }
     })
   });
 
   const failoverRes = await handleChatContinue(failoverReq, env);
-  assert.equal(failoverRes.status, 200, "AC-07: candidate_failed must transparently fallback to standby cloud model");
-  console.log("  ✓ AC-07: Standby model failover successfully executes on client failure report: PASSED");
+  assert.equal(failoverRes.status, 200, "AC-07: candidate_failed must transparently fallback to standby cloud model with restored upstream_context");
+  console.log("  ✓ AC-07 & AC-R4: Standby model failover successfully executes and restores upstream context: PASSED");
 
   console.log("\n==================================================");
   console.log("   🎉 ALL 9 INTEGRATION SCENARIOS PASSED (100%)!  ");

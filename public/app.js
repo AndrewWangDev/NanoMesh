@@ -1529,6 +1529,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (window.activeChatAbortController) {
       try { window.activeChatAbortController.abort(); } catch (err) {}
     }
+    // BUG-06: Explicitly terminate local worker thread and reset runner promise
+    if (window._localWorker) {
+      try { window._localWorker.terminate(); } catch (err) {}
+      window._localWorker = null;
+    }
+    window._activeLocalRunnerPromise = null;
 
     // 2. Clear conversation messages flow completely so Stage 1 root view is pristine
     const messagesFlow = document.getElementById('messages-flow');
@@ -3660,7 +3666,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         throw new Error(errJson.message || '调度失败');
       }
 
-      async function pumpSSEStream(stream, targetAssistantId, targetUserText) {
+      async function pumpSSEStream(stream, targetAssistantId, targetUserText, streamOptions = {}) {
         const reader = stream.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
@@ -3687,7 +3693,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 } else if (currentEvent === 'dag_complete' && data.final_output) {
                   streamedOutput = data.final_output;
                 }
-                await handleSSEMessage(currentEvent, data, targetAssistantId, targetUserText, pumpSSEStream);
+                await handleSSEMessage(currentEvent, data, targetAssistantId, targetUserText, pumpSSEStream, streamOptions);
               } catch (parseErr) {}
             }
           }
@@ -3818,7 +3824,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Stage 3 & 4: SSE Message Dispatcher & DAG State Synchronization
-  function handleSSEMessage(event, data, assistantId, userPrompt = '', pumpSSEStream = null) {
+  function handleSSEMessage(event, data, assistantId, userPrompt = '', pumpSSEStream = null, streamOptions = {}) {
     const respEl = document.getElementById('response-text-' + assistantId);
     const arbPill = document.getElementById('arbitration-pill');
     const arbText = document.getElementById('arb-text');
@@ -4165,7 +4171,26 @@ document.addEventListener('DOMContentLoaded', async () => {
           }
           const worker = window._localWorker;
 
+          // 4. Dedicated Web Worker Execution & Watchdog (BUG-06)
+          let watchdogTimer = null;
+          const resetWatchdog = () => {
+            if (watchdogTimer) clearTimeout(watchdogTimer);
+            watchdogTimer = setTimeout(() => {
+              console.warn('[LocalRunner] Watchdog timeout: no progress from worker for 45s');
+              if (window._localWorker) {
+                try { window._localWorker.terminate(); } catch (e) {}
+                window._localWorker = null;
+              }
+              const timeoutErr = new Error('Local WebGPU worker timeout (45s silence)');
+              if (worker && typeof worker.onerror === 'function') {
+                worker.onerror(timeoutErr);
+              }
+            }, 45000);
+          };
+          resetWatchdog();
+
           worker.onerror = (err) => {
+            if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
             console.error('[LocalRunner] Worker thread error:', err);
             const meta = document.getElementById('node-meta-' + roleId);
             if (meta) meta.textContent = '❌ 本地推理异常';
@@ -4183,22 +4208,25 @@ document.addEventListener('DOMContentLoaded', async () => {
                       status: 'candidate_failed',
                       failed_model_id: data.model_id,
                       error_reason: err.message || 'Worker thread execution error',
+                      upstream_context: data.user_prompt || '',
                       envelope: window._lastChatEnvelope,
                       orchestration_options: window._lastOrchestrationOptions
                     })
                   });
                   if (failoverRes.ok && pumpSSEStream) {
-                    const failoverOutput = await pumpSSEStream(failoverRes.body, assistantId, userPrompt);
+                    const failoverOutput = await pumpSSEStream(failoverRes.body, assistantId, userPrompt, { isContinuation: true });
                     resolve(failoverOutput);
                     return;
                   }
                 } catch (fErr) {}
+                window._isCurrentTurnRolledBack = true;
                 setWorkflowExecutionLocked(false);
                 const sendBtn = document.getElementById('send-btn');
                 if (sendBtn) sendBtn.disabled = false;
                 reject(new Error(err.message || 'Local worker crashed'));
               })();
             } else {
+              window._isCurrentTurnRolledBack = true;
               setWorkflowExecutionLocked(false);
               const sendBtn = document.getElementById('send-btn');
               if (sendBtn) sendBtn.disabled = false;
@@ -4211,6 +4239,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             const workerDiag = document.getElementById('diag-worker-status-' + currentActiveAssistantId);
 
             if (msg.type === 'DOWNLOAD_PROGRESS') {
+              resetWatchdog();
               if (meta) {
                 meta.textContent = `📥 拉取权重 ${msg.loadedMB}/${msg.totalMB}MB (${msg.speedMBps} MB/s)`;
               }
@@ -4223,6 +4252,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 workerDiag.textContent = `📥 ${isEn ? 'Pulling Weights' : '拉取权重'}: ${msg.loadedMB}/${msg.totalMB}MB (${msg.percent}%) @ ${msg.speedMBps} MB/s`;
               }
             } else if (msg.type === 'COMPILING_PIPELINE') {
+              resetWatchdog();
               const devName = msg.device === 'webgpu' ? 'WebGPU' : 'Wasm CPU';
               if (meta) {
                 meta.textContent = `⚙️ 正在编译 ${devName} 管线... (${msg.duration_ms || 32}ms)`;
@@ -4236,6 +4266,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 workerDiag.textContent = `⚙️ ${isEn ? `Compiling ${devName} Pipeline...` : `正在编译 ${devName} 计算管线...`} (${msg.duration_ms || 32}ms)`;
               }
             } else if (msg.type === 'TEXT_CHUNK') {
+              resetWatchdog();
               // Transition to Local running
               if (nodeCard) {
                 nodeCard.classList.remove('is-downloading');
@@ -4263,6 +4294,7 @@ document.addEventListener('DOMContentLoaded', async () => {
               }
 
             } else if (msg.type === 'GENERATE_COMPLETE') {
+              if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
               // Complete execution
               if (nodeCard) {
                 nodeCard.classList.remove('is-downloading', 'running');
@@ -4308,9 +4340,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                         respEl.innerHTML = `<span style="color:var(--color-danger, #ef4444);font-size:13px;">⚠️ 该任务步骤已被消费或已超时，请刷新重试。</span>`;
                       }
                       setWorkflowExecutionLocked(false);
+                      window._isCurrentTurnRolledBack = true;
                       const sendBtn = document.getElementById('send-btn');
                       if (sendBtn) sendBtn.disabled = false;
-                      resolve(msg.output || '');
+                      resolve('');
                       return;
                     }
 
@@ -4320,13 +4353,14 @@ document.addEventListener('DOMContentLoaded', async () => {
                     }
 
                     if (pumpSSEStream) {
-                      const contOutput = await pumpSSEStream(continueRes.body, assistantId, userPrompt);
+                      const contOutput = await pumpSSEStream(continueRes.body, assistantId, userPrompt, { isContinuation: true });
                       resolve(contOutput);
                     } else {
                       resolve(msg.output || '');
                     }
                   } catch (contErr) {
                     console.error('[Handover] Continuation failed:', contErr);
+                    window._isCurrentTurnRolledBack = true;
                     if (respEl) {
                       respEl.innerHTML = `<span style="color:var(--color-danger, #ef4444);font-size:13px;">❌ 接力调度失败: ${escapeHtml(contErr.message)}</span>`;
                     }
@@ -4367,9 +4401,40 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const sendBtn = document.getElementById('send-btn');
                 if (sendBtn) sendBtn.disabled = false;
 
+                // Save trace to history for tail WebGPU completion (BUG-01 complete)
+                const totalNodes = activeDagNodes?.length || 1;
+                const promptText = window.lastUserPrompt || userPrompt || '';
+                saveTraceToHistory({
+                  sessionId: window.chatSessionId,
+                  title: promptText.slice(0, 30) || '端侧 WebGPU 任务',
+                  cost: '0',
+                  duration: (msg.duration_ms ? (msg.duration_ms / 1000).toFixed(1) + 's' : '1.2s'),
+                  nodesCount: totalNodes,
+                  cached: false,
+                  round: {
+                    runId: currentActiveRunId || ('run-' + Date.now()),
+                    roundIndex: window.chatRoundIndex || 1,
+                    userPrompt: promptText,
+                    assets: window.currentRoundAssets || [],
+                    assistantOutput: fullText,
+                    template: window.currentRunningTemplateObj || null,
+                    candidateTemplates: currentCandidateTemplates || [],
+                    nodes: JSON.parse(JSON.stringify(activeDagNodes || [])),
+                    steps: [],
+                    intentState: window.currentRoundIntentState || null,
+                    branchId: window.activeBranchId,
+                    isFastFailed: false,
+                    cost: '0',
+                    duration: (msg.duration_ms ? (msg.duration_ms / 1000).toFixed(1) + 's' : '1.2s'),
+                    cached: false,
+                    timestamp: Date.now()
+                  }
+                });
+
                 resolve(fullText);
               }
             } else if (msg.type === 'ERROR') {
+              if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
               if (nodeCard) nodeCard.classList.remove('is-downloading', 'running');
               if (meta) meta.textContent = '❌ 本地推理异常';
               if (workerDiag) workerDiag.textContent = `❌ ${escapeHtml(msg.error)}`;
@@ -4386,23 +4451,26 @@ document.addEventListener('DOMContentLoaded', async () => {
                         status: 'candidate_failed',
                         failed_model_id: data.model_id,
                         error_reason: msg.error || 'Local execution failed',
+                        upstream_context: data.user_prompt || '',
                         envelope: window._lastChatEnvelope,
                         orchestration_options: window._lastOrchestrationOptions
                       })
                     });
 
                     if (failoverRes.ok && pumpSSEStream) {
-                      const failoverOutput = await pumpSSEStream(failoverRes.body, assistantId, userPrompt);
+                      const failoverOutput = await pumpSSEStream(failoverRes.body, assistantId, userPrompt, { isContinuation: true });
                       resolve(failoverOutput);
                       return;
                     }
                   } catch (fErr) {}
+                  window._isCurrentTurnRolledBack = true;
                   setWorkflowExecutionLocked(false);
                   const sendBtn = document.getElementById('send-btn');
                   if (sendBtn) sendBtn.disabled = false;
                   reject(new Error(msg.error || 'Local execution failed'));
                 })();
               } else {
+                window._isCurrentTurnRolledBack = true;
                 // Clear partially streamed text buffer if error occurred during generation
                 if (respEl) {
                   streamingTextBuffers.delete(assistantId);
@@ -4641,7 +4709,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (actionsEl) actionsEl.style.display = 'none';
 
     } else if (event === 'dag_complete') {
-      if (data.has_client_exec || window._activeLocalRunnerPromise) {
+      const isContinuation = !!(streamOptions && streamOptions.isContinuation);
+      if (!isContinuation && (data.has_client_exec || window._activeLocalRunnerPromise)) {
         // Handed off to browser local worker; keep workflow executing until local worker finishes!
         return;
       }
