@@ -631,6 +631,19 @@ async function runUnitTests() {
   assert.deepEqual(decodedClaims.mids, testMids, "Decoded claims must faithfully preserve arbitrated model IDs");
   console.log("  ✓ BUG-03: Continuation token carries arbitrated model IDs to lock Phase 2 execution: PASSED");
 
+  // 10.3 FINDING-NEW-01: Downstream Heavy node (VPS / Commercial API) preserves uploaded document content
+  const partsWithDocs = {
+    ...testParts,
+    attachedDocsContent: "【文档材料】\nSecret Architecture Spec v1.0"
+  };
+  const heavyMsgsWithDocs = buildDownstreamMessages(partsWithDocs, heavyTarget);
+  assert.ok(heavyMsgsWithDocs.openaiMessages[1].content.includes("Secret Architecture Spec v1.0"), "OpenAI compatible Heavy node must receive attached docs in first user prompt");
+  assert.ok(heavyMsgsWithDocs.openaiMessages[1].content.includes("Translate the uploaded poster."), "Must retain user query");
+  
+  const geminiMsgsWithDocs = buildDownstreamMessages(partsWithDocs, geminiTarget);
+  assert.ok(geminiMsgsWithDocs.geminiContents[0].parts[0].text.includes("Secret Architecture Spec v1.0"), "Gemini Heavy node must receive attached docs in first user prompt");
+  console.log("  ✓ FINDING-NEW-01: Downstream Heavy node (OpenAI/Gemini) preserves attached document content: PASSED");
+
   console.log("\n==================================================");
   console.log("   🎉 ALL 10 UNIT TEST SUITES PASSED (100%)!      ");
   console.log("==================================================");

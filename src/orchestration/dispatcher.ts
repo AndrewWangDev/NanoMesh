@@ -165,6 +165,7 @@ export interface DownstreamPromptParts {
   sanitizedIntermediateOutput: string;
   currentTaskDirective: string;
   flatPromptContent: string;
+  attachedDocsContent?: string;
 }
 
 /**
@@ -183,15 +184,16 @@ export function buildDownstreamMessages(
   const hasUpstream = !!parts.sanitizedIntermediateOutput && parts.sanitizedIntermediateOutput.trim().length > 0;
 
   if (isHeavy && hasUpstream) {
+    const userPromptWithDocs = [parts.initialUserDirective || '请处理以下输入材料', parts.attachedDocsContent].filter(Boolean).join('\n\n');
     return {
       openaiMessages: [
         { role: 'system', content: parts.systemPrompt },
-        { role: 'user', content: parts.initialUserDirective || '请处理以下输入材料' },
+        { role: 'user', content: userPromptWithDocs },
         { role: 'assistant', content: parts.sanitizedIntermediateOutput },
         { role: 'user', content: parts.currentTaskDirective || '请基于前置产出完成当前岗位的执行任务' }
       ],
       geminiContents: [
-        { role: 'user', parts: [{ text: parts.initialUserDirective || '请处理以下输入材料' }] },
+        { role: 'user', parts: [{ text: userPromptWithDocs }] },
         { role: 'model', parts: [{ text: parts.sanitizedIntermediateOutput }] },
         { role: 'user', parts: [{ text: parts.currentTaskDirective || '请基于前置产出完成当前岗位的执行任务' }] }
       ]
@@ -829,6 +831,46 @@ export async function executeDAGStream(
 
           if (node.selected_model.inference_target === 'browser') {
             if (isTailNode) {
+              let continuationToken: string | undefined = undefined;
+              let handshakeId: string | undefined = undefined;
+
+              // Tail Node Failover Credential (FINDING-NEW-02):
+              // If the tail WebGPU node has available cloud standby models, generate a continuation handshake record
+              // so that if the client crashes or times out on the tail node, it can failover via /api/chat/continue.
+              const hasCloudStandby = (node.standby_models || []).some(m => m.inference_target !== 'browser');
+              if (hasCloudStandby) {
+                handshakeId = crypto.randomUUID();
+                const expiresAt = new Date(Date.now() + 300 * 1000).toISOString();
+                await env.DB.prepare(
+                  `INSERT INTO dag_handshakes 
+                   (handshake_id, user_id, session_id, template_id, next_step, status, expires_at)
+                   VALUES (?, ?, ?, ?, ?, 'ISSUED', ?)`
+                ).bind(
+                  handshakeId,
+                  options.userId,
+                  envelope.session_id,
+                  dag.template.template_id,
+                  idx + 1,
+                  expiresAt
+                ).run();
+
+                const arbitratedRoleModels: Record<string, string> = {};
+                dag.nodes.forEach(n => {
+                  if (n.role?.role_id && n.selected_model?.model_id) {
+                    arbitratedRoleModels[n.role.role_id] = n.selected_model.model_id;
+                  }
+                });
+
+                continuationToken = await signJWT({
+                  jti: handshakeId,
+                  sub: options.userId,
+                  sid: envelope.session_id,
+                  tid: dag.template.template_id,
+                  nxt: idx + 1,
+                  mids: arbitratedRoleModels
+                }, env.JWT_SECRET, 300);
+              }
+
               sendEvent('client_exec_request', {
                 role_id: node.role.role_id,
                 role_name: node.role.name_zh,
@@ -838,7 +880,9 @@ export async function executeDAGStream(
                 endpoint: node.selected_model.endpoint,
                 system_prompt: systemPrompt,
                 user_prompt: promptContent,
-                is_tail_node: true
+                is_tail_node: true,
+                handshake_id: handshakeId,
+                continuation_token: continuationToken
               });
               upstreamOutput = '';
               continue;
@@ -1075,7 +1119,8 @@ export async function executeDAGStream(
                   initialUserDirective,
                   sanitizedIntermediateOutput: compactedUpstream,
                   currentTaskDirective: currentStepDirective,
-                  flatPromptContent: guardedPromptContent
+                  flatPromptContent: guardedPromptContent,
+                  attachedDocsContent: attachedDocsSection || ''
                 };
 
                 const builtMessages = buildDownstreamMessages(downstreamParts, currentCandidate);

@@ -1572,6 +1572,39 @@ async function runIntegrationTests() {
   assert.equal(failoverRes.status, 200, "AC-07: candidate_failed must transparently fallback to standby cloud model with restored upstream_context");
   console.log("  ✓ AC-07 & AC-R4: Standby model failover successfully executes and restores upstream context: PASSED");
 
+  // 9.7 FINDING-NEW-02: Tail WebGPU node issues continuation_token for Standby failover
+  const tailBrowserTemplateReq = new Request("https://nanomesh.local/api/admin/templates", {
+    method: "POST",
+    headers: adminReqHeaders,
+    body: JSON.stringify({
+      name_zh: "尾节点端侧WebGPU模版",
+      role_sequence: ["role_text_reasoning", "role_browser_only"]
+    })
+  });
+  const tailTplRes = await handleAdminCreateOrUpdateTemplate(tailBrowserTemplateReq, env);
+  assert.equal(tailTplRes.status, 200);
+  const tailTplData = await tailTplRes.json() as any;
+
+  const tailChatReq = new Request("https://nanomesh.local/api/chat", {
+    method: "POST",
+    headers: user9ReqHeaders,
+    body: JSON.stringify({
+      envelope: {
+        ...testEnvelope9,
+        instruction_payload: "Tail WebGPU failover test"
+      },
+      reRouteMode: "switch_template",
+      chosenTemplateId: tailTplData.template_id,
+      capabilities: { webgpu_handover_v3: true }
+    })
+  });
+  const tailChatRes = await handleChat(tailChatReq, env);
+  assert.equal(tailChatRes.status, 200);
+  const tailStreamText = await tailChatRes.text();
+  assert.ok(tailStreamText.includes("client_exec_request"), "Tail WebGPU node must emit client_exec_request");
+  assert.ok(tailStreamText.includes("continuation_token"), "Tail WebGPU node with cloud standby MUST include continuation_token for failover (FINDING-NEW-02)");
+  console.log("  ✓ FINDING-NEW-02: Tail WebGPU node issues continuation_token for transparent failover: PASSED");
+
   console.log("\n==================================================");
   console.log("   🎉 ALL 9 INTEGRATION SCENARIOS PASSED (100%)!  ");
   console.log("==================================================");
