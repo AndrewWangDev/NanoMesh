@@ -19,6 +19,7 @@ import {
 } from "../src/api/admin";
 import { runOrchestrationPipeline } from "../src/orchestration/orchestrator";
 import { executeDAGStream } from "../src/orchestration/dispatcher";
+import { handleChat, handleChatContinue, triggerLazyHandshakeSweep } from "../src/api/chat";
 import type { Env } from "../src/types";
 import type { UnifiedProtocolEnvelope } from "../src/orchestration/types";
 import bcrypt from "bcryptjs";
@@ -41,6 +42,7 @@ interface TableStore {
   user_passkeys: any[];
   user_uploaded_models: any[];
   account_tombstones: any[];
+  dag_handshakes: any[];
 }
 
 function createMockD1(store: TableStore) {
@@ -145,6 +147,15 @@ function createMockD1(store: TableStore) {
             return { results: res as any };
           }
 
+          // 11. SELECT * FROM dag_handshakes
+          if (cleanSql.includes("FROM dag_handshakes")) {
+            let res = [...(store.dag_handshakes || [])];
+            if (cleanSql.includes("WHERE handshake_id = ?")) {
+              res = res.filter(h => h.handshake_id === boundArgs[0]);
+            }
+            return { results: res as any };
+          }
+
           return { results: [] };
         },
         async run(): Promise<{ meta: { changes: number } }> {
@@ -208,6 +219,48 @@ function createMockD1(store: TableStore) {
               if (boundArgs.length > 2) m.live_model_id = boundArgs[1];
             }
             return { meta: { changes: 1 } };
+          }
+
+          // INSERT INTO dag_handshakes
+          if (cleanSql.startsWith("INSERT INTO dag_handshakes")) {
+            const [handshakeId, userId, sessionId, templateId, nextStep, expiresAt] = boundArgs;
+            store.dag_handshakes = store.dag_handshakes || [];
+            store.dag_handshakes.push({
+              handshake_id: handshakeId,
+              user_id: userId,
+              session_id: sessionId,
+              template_id: templateId,
+              next_step: nextStep,
+              status: 'ISSUED',
+              expires_at: expiresAt,
+              created_at: new Date().toISOString()
+            });
+            return { meta: { changes: 1 } };
+          }
+
+          // UPDATE dag_handshakes SET status = 'CONSUMED'
+          if (cleanSql.startsWith("UPDATE dag_handshakes") && cleanSql.includes("status = 'CONSUMED'")) {
+            const [handshakeId, userId] = boundArgs;
+            store.dag_handshakes = store.dag_handshakes || [];
+            const item = store.dag_handshakes.find(
+              h => h.handshake_id === handshakeId && h.user_id === userId && h.status === 'ISSUED'
+            );
+            if (item) {
+              item.status = 'CONSUMED';
+              return { meta: { changes: 1 } };
+            }
+            return { meta: { changes: 0 } };
+          }
+
+          // DELETE FROM dag_handshakes
+          if (cleanSql.startsWith("DELETE FROM dag_handshakes")) {
+            store.dag_handshakes = store.dag_handshakes || [];
+            const initialLen = store.dag_handshakes.length;
+            const nowIso = new Date().toISOString();
+            // keep non-expired
+            store.dag_handshakes = store.dag_handshakes.filter(h => h.expires_at >= nowIso);
+            const deleted = initialLen - store.dag_handshakes.length;
+            return { meta: { changes: deleted } };
           }
 
           // DELETE FROM admin_login_attempts
@@ -619,7 +672,8 @@ function buildMockEnv(): { env: Env; store: TableStore } {
     user_oauth_bindings: [],
     user_passkeys: [],
     user_uploaded_models: [],
-    account_tombstones: []
+    account_tombstones: [],
+    dag_handshakes: []
   };
 
   const env = {
@@ -1217,7 +1271,7 @@ async function runIntegrationTests() {
   assert.equal(insertedLiveModel.inference_target, "heavy");
   console.log("  ✓ Admin model publishing validates endpoint and prevents /api/infer pollution: PASSED");
 
-  // 8.4 BUG-02: Template Multi-step WebGPU Intermediate Node Constraint
+  // 8.4 Arbitrary WebGPU Topology: Template Multi-step WebGPU Intermediate Node Allowed
   store.dag_roles.push({
     role_id: "role_browser_only",
     name_zh: "端侧独占角色",
@@ -1235,26 +1289,290 @@ async function runIntegrationTests() {
     modalities: JSON.stringify(["text"]),
     tags: JSON.stringify(["#browser_exclusive"]),
     context_window: 2048,
+    max_concurrency: 10,
+    active_connections: 0,
+    precision: 0.9,
+    user_rating: 4.9,
+    usage_count: 10,
+    is_generalist: 1,
+    prior_score: 0.8,
+    scenario_anchors: '["chat"]',
     status: "active",
+    cost_per_1k_tokens: 0.0,
     inference_target: "browser"
   });
 
-  const invalidMultiStepTemplateReq = new Request("https://nanomesh.local/api/admin/templates", {
+  const validMultiStepTemplateReq = new Request("https://nanomesh.local/api/admin/templates", {
     method: "POST",
     headers: adminReqHeaders,
     body: JSON.stringify({
-      name_zh: "非法多步包含中间端侧节点",
+      name_zh: "自由编排多步包含中间端侧节点",
       role_sequence: ["role_browser_only", "role_text_reasoning"]
     })
   });
-  const invalidTplRes = await handleAdminCreateOrUpdateTemplate(invalidMultiStepTemplateReq, env);
-  assert.equal(invalidTplRes.status, 400, "Template with intermediate browser node must be rejected");
-  const invalidTplData = await invalidTplRes.json() as any;
-  assert.equal(invalidTplData.error_code, "error.browserNodeMustBeTailNode");
-  console.log("  ✓ DAG template enforces WebGPU tail node constraint on multi-step workflows: PASSED");
+  const validTplRes = await handleAdminCreateOrUpdateTemplate(validMultiStepTemplateReq, env);
+  assert.equal(validTplRes.status, 200, "Template with intermediate browser node is now ALLOWED in arbitrary topology");
+  const validTplData = await validTplRes.json() as any;
+  const webgpuArbitraryTemplateId = validTplData.template_id;
+  console.log("  ✓ DAG template allows WebGPU models at intermediate and any pipeline position: PASSED");
+
+  // -----------------------------------------------------------------------
+  // SCENARIO 9: Arbitrary WebGPU Topology, Handshake CAS & Dynamic Billing
+  // -----------------------------------------------------------------------
+  console.log("\n[Scenario 9] Arbitrary WebGPU Topology, Handshake CAS & Dynamic Billing");
+
+  const testUser9Id = "usr_webgpu_tester_99";
+  store.users.push({
+    user_id: testUser9Id,
+    username: "WebGPUTester",
+    email: "webgpu@nanomesh.local",
+    password_hash: "hash",
+    credits: 5,
+    token_version: 1
+  });
+
+  const user9AuthToken = await signJWT({ userId: testUser9Id, role: "user", tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  const user9ReqHeaders = {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${user9AuthToken}`
+  };
+
+  const testEnvelope9: UnifiedProtocolEnvelope = {
+    envelope_id: "env_webgpu_001",
+    session_id: "sess_webgpu_001",
+    user_id: testUser9Id,
+    instruction_payload: "本地快速摘要提取并交由云端深度推理",
+    metadata: {},
+    assets_manifest: []
+  };
+
+  // 9.1 AC-01: Phase 1 Step 0 WebGPU Zero Pre-Deduction & AC-03 Intermediate Plaintext Concealment
+  const phase1Req = new Request("https://nanomesh.local/api/chat", {
+    method: "POST",
+    headers: user9ReqHeaders,
+    body: JSON.stringify({
+      envelope: testEnvelope9,
+      reRouteMode: "switch_template",
+      chosenTemplateId: webgpuArbitraryTemplateId,
+      capabilities: { webgpu_handover_v3: true }
+    })
+  });
+
+  const phase1Res = await handleChat(phase1Req, env);
+  assert.equal(phase1Res.status, 200, "Phase 1 chat request must return 200 SSE stream");
+
+  // Read Phase 1 SSE stream
+  const p1Reader = phase1Res.body!.getReader();
+  const p1Decoder = new TextDecoder();
+  let p1Events = "";
+  let p1Done = false;
+  while (!p1Done) {
+    const chunk = await p1Reader.read();
+    if (chunk.done) {
+      p1Done = true;
+    } else {
+      p1Events += p1Decoder.decode(chunk.value, { stream: true });
+    }
+  }
+
+  assert.ok(p1Events.includes("event: dag_handover"), "Phase 1 must emit dag_handover event");
+  assert.ok(!p1Events.includes("event: text_chunk"), "AC-03: Intermediate WebGPU step must NOT emit text_chunk");
+
+  // Extract handover payload
+  const handoverMatch = p1Events.match(/event: dag_handover\ndata: (\{.*?\})\n\n/);
+  assert.ok(handoverMatch, "Must contain valid dag_handover data block");
+  const handoverData = JSON.parse(handoverMatch[1]);
+  assert.equal(handoverData.current_step, 0);
+  assert.equal(handoverData.next_step, 1);
+  assert.equal(handoverData.is_tail_node, false);
+  assert.ok(handoverData.continuation_token);
+
+  // Assert AC-01: User credits in Phase 1 MUST REMAIN UNTOUCHED (Zero Pre-Deduction)
+  const user9AfterPhase1 = store.users.find(u => u.user_id === testUser9Id);
+  assert.equal(user9AfterPhase1.credits, 5, "AC-01: Phase 1 with Step 0 WebGPU must consume 0 credits! Credits must remain 5.");
+  console.log("  ✓ AC-01 (Part 1): Step 0 WebGPU consumes 0 credits in Phase 1: PASSED");
+  console.log("  ✓ AC-03: Intermediate node does not emit text_chunk to user stream: PASSED");
+
+  // 9.2 AC-01 (Part 2): Phase 2 Continuation Triggers Cloud Pre-Deduction and Execution
+  const phase2Req = new Request("https://nanomesh.local/api/chat/continue", {
+    method: "POST",
+    headers: user9ReqHeaders,
+    body: JSON.stringify({
+      continuation_token: handoverData.continuation_token,
+      status: "success",
+      client_step_output: "WebGPU 本地轻节点完成初始解析与特征提炼",
+      envelope: testEnvelope9,
+      orchestration_options: {
+        chosenTemplateId: webgpuArbitraryTemplateId
+      }
+    })
+  });
+
+  const phase2Res = await handleChatContinue(phase2Req, env);
+  assert.equal(phase2Res.status, 200, "Phase 2 chat continuation must return 200 SSE stream");
+
+  const p2Reader = phase2Res.body!.getReader();
+  const p2Decoder = new TextDecoder();
+  let p2Events = "";
+  let p2Done = false;
+  while (!p2Done) {
+    const chunk = await p2Reader.read();
+    if (chunk.done) {
+      p2Done = true;
+    } else {
+      p2Events += p2Decoder.decode(chunk.value, { stream: true });
+    }
+  }
+
+  assert.ok(p2Events.includes("event: dag_resume"), "Phase 2 must emit dag_resume");
+  assert.ok(p2Events.includes("event: dag_complete"), "Phase 2 must finish with dag_complete");
+
+  // Assert AC-01: Cloud credit is deducted in Phase 2
+  const user9AfterPhase2 = store.users.find(u => u.user_id === testUser9Id);
+  assert.equal(user9AfterPhase2.credits, 4, "AC-01 (Part 2): Phase 2 cloud node execution must accurately deduct 1 credit (5 -> 4)");
+  console.log("  ✓ AC-01 (Part 2): Phase 2 cloud node accurately consumes 1 credit: PASSED");
+
+  // 9.3 AC-02: D1 Atomic CAS Anti-Replay Defense (10 concurrent continuation calls)
+  const replayHandshakeId = "hs_replay_test_001";
+  store.dag_handshakes.push({
+    handshake_id: replayHandshakeId,
+    user_id: testUser9Id,
+    session_id: "sess_replay",
+    template_id: webgpuArbitraryTemplateId,
+    next_step: 1,
+    status: "ISSUED",
+    expires_at: new Date(Date.now() + 300000).toISOString()
+  });
+
+  const replayToken = await signJWT({
+    jti: replayHandshakeId,
+    sub: testUser9Id,
+    sid: "sess_replay",
+    tid: webgpuArbitraryTemplateId,
+    nxt: 1
+  }, env.JWT_SECRET, 300);
+
+  // Send 10 concurrent continuation requests
+  const concurrentRequests = Array.from({ length: 10 }).map(() => {
+    const req = new Request("https://nanomesh.local/api/chat/continue", {
+      method: "POST",
+      headers: user9ReqHeaders,
+      body: JSON.stringify({
+        continuation_token: replayToken,
+        status: "success",
+        client_step_output: "Concurrent payload",
+        envelope: testEnvelope9,
+        orchestration_options: { chosenTemplateId: webgpuArbitraryTemplateId }
+      })
+    });
+    return handleChatContinue(req, env);
+  });
+
+  const responses = await Promise.all(concurrentRequests);
+  const statusCounts = responses.map(r => r.status);
+  const count200 = statusCounts.filter(s => s === 200).length;
+  const count409 = statusCounts.filter(s => s === 409).length;
+
+  assert.equal(count200, 1, `AC-02: Exactly 1 request must succeed with 200, but got ${count200}`);
+  assert.equal(count409, 9, `AC-02: Exactly 9 requests must be blocked with 409 CAS Conflict, but got ${count409}`);
+  console.log("  ✓ AC-02: D1 Atomic CAS anti-replay blocks 9/10 concurrent requests with 409: PASSED");
+
+  // 9.4 AC-06: Lazy sweep for orphan handshakes
+  store.dag_handshakes.push({
+    handshake_id: "hs_expired_1",
+    user_id: testUser9Id,
+    session_id: "s_exp1",
+    template_id: "t1",
+    next_step: 1,
+    status: "ISSUED",
+    expires_at: "2020-01-01T00:00:00.000Z"
+  });
+  store.dag_handshakes.push({
+    handshake_id: "hs_expired_2",
+    user_id: testUser9Id,
+    session_id: "s_exp2",
+    template_id: "t1",
+    next_step: 1,
+    status: "ISSUED",
+    expires_at: "2020-01-01T00:00:00.000Z"
+  });
+
+  let capturedSweepPromise: Promise<any> | null = null;
+  const mockCtx = {
+    waitUntil(promise: Promise<any>) {
+      capturedSweepPromise = promise;
+    }
+  } as any;
+
+  triggerLazyHandshakeSweep(env, mockCtx);
+  assert.ok(capturedSweepPromise, "Lazy sweep must schedule background promise via ctx.waitUntil");
+  await capturedSweepPromise;
+  assert.ok(!store.dag_handshakes.some(h => h.handshake_id.startsWith("hs_expired_")), "AC-06: Expired orphan handshakes must be swept");
+  console.log("  ✓ AC-06: Lazy sweep cleans up expired orphan handshakes asynchronously: PASSED");
+
+  // 9.5 AC-07: Standby Failover on candidate_failed
+  const failoverHandshakeId = "hs_failover_test_001";
+  store.dag_handshakes.push({
+    handshake_id: failoverHandshakeId,
+    user_id: testUser9Id,
+    session_id: "sess_failover",
+    template_id: webgpuArbitraryTemplateId,
+    next_step: 1,
+    status: "ISSUED",
+    expires_at: new Date(Date.now() + 300000).toISOString()
+  });
+
+  const failoverToken = await signJWT({
+    jti: failoverHandshakeId,
+    sub: testUser9Id,
+    sid: "sess_failover",
+    tid: webgpuArbitraryTemplateId,
+    nxt: 1
+  }, env.JWT_SECRET, 300);
+
+  // Add cloud fallback model to role_browser_only's model pool so standby failover has a cloud candidate
+  store.models.push({
+    model_id: "cf_browser_fallback_cloud",
+    display_name: "Cloud Fallback for WebGPU Role",
+    provider: "Cloudflare",
+    endpoint: "@cf/meta/llama-3.2-3b-instruct",
+    modalities: '["text"]',
+    tags: '["#browser_exclusive"]',
+    context_window: 8192,
+    max_concurrency: 50,
+    active_connections: 0,
+    precision: 0.85,
+    user_rating: 4.9,
+    usage_count: 100,
+    cost_per_1k_tokens: 1.0,
+    status: "active",
+    is_generalist: 1,
+    prior_score: 0.7,
+    scenario_anchors: '["chat"]',
+    inference_target: "edge",
+    auth_mode: "none",
+    api_format: "workers_ai"
+  });
+
+  const failoverReq = new Request("https://nanomesh.local/api/chat/continue", {
+    method: "POST",
+    headers: user9ReqHeaders,
+    body: JSON.stringify({
+      continuation_token: failoverToken,
+      status: "candidate_failed",
+      failed_model_id: "m_browser_only",
+      error_reason: "WebGPU Device creation failure",
+      envelope: testEnvelope9,
+      orchestration_options: { chosenTemplateId: webgpuArbitraryTemplateId }
+    })
+  });
+
+  const failoverRes = await handleChatContinue(failoverReq, env);
+  assert.equal(failoverRes.status, 200, "AC-07: candidate_failed must transparently fallback to standby cloud model");
+  console.log("  ✓ AC-07: Standby model failover successfully executes on client failure report: PASSED");
 
   console.log("\n==================================================");
-  console.log("   🎉 ALL 8 INTEGRATION SCENARIOS PASSED (100%)!  ");
+  console.log("   🎉 ALL 9 INTEGRATION SCENARIOS PASSED (100%)!  ");
   console.log("==================================================");
 }
 

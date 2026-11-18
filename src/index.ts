@@ -205,7 +205,11 @@ export default {
             }
             case "/api/chat": {
               const { handleChat } = await import("./api/chat");
-              res = await handleChat(request, env); break;
+              res = await handleChat(request, env, ctx); break;
+            }
+            case "/api/chat/continue": {
+              const { handleChatContinue } = await import("./api/chat");
+              res = await handleChatContinue(request, env, ctx); break;
             }
             case "/api/upload/presign": {
               const { handleChatPresign } = await import("./api/presign");

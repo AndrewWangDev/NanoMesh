@@ -1,9 +1,23 @@
 // src/api/chat.ts
 import { Env } from "../types";
 import { getSession } from "../auth/middleware";
+import { verifyJWT } from "../auth/jwt";
 import { runOrchestrationPipeline, OrchestrationOptions } from "../orchestration/orchestrator";
-import { executeDAGStream } from "../orchestration/dispatcher";
+import { executeDAGStream, sanitizeClientStepOutput } from "../orchestration/dispatcher";
 import { UnifiedProtocolEnvelope } from "../orchestration/types";
+
+/**
+ * Lazy sweep for expired orphan handshake records.
+ * Uses ctx.waitUntil() to execute asynchronously in background without blocking edge response.
+ */
+export function triggerLazyHandshakeSweep(env: Env, ctx?: ExecutionContext) {
+  if (ctx && typeof ctx.waitUntil === 'function') {
+    const sweepPromise = env.DB.prepare(
+      "DELETE FROM dag_handshakes WHERE expires_at < datetime('now', '-1 hour')"
+    ).run().catch((e) => console.warn("[HandshakeSweep] lazy cleanup error:", e));
+    ctx.waitUntil(sweepPromise);
+  }
+}
 
 // --- Rate Limiting: In-Memory Sliding-Window Token Bucket ---
 // Non-aggressive: Allows a burst of up to 3 requests, refills 1 token every 5 seconds (~12 req/min sustained).
@@ -53,7 +67,7 @@ function checkRateLimit(userId: string): { allowed: boolean; retryAfter: number 
   }
 }
 
-export async function handleChat(request: Request, env: Env): Promise<Response> {
+export async function handleChat(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   const session = await getSession(request, env);
   if (!session) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), { 
@@ -112,6 +126,9 @@ export async function handleChat(request: Request, env: Env): Promise<Response> 
       is_active?: boolean;
     }>;
     disableBrowserInference?: boolean;
+    capabilities?: {
+      webgpu_handover_v3?: boolean;
+    };
   };
 
   try {
@@ -152,47 +169,269 @@ export async function handleChat(request: Request, env: Env): Promise<Response> 
     disableBrowserInference: !!body.disableBrowserInference
   };
 
-  // 3. Quota Check & Atomic Reservation: Only reserve after payload validation passes
-  const userRow = await env.DB.prepare(
-    "SELECT credits FROM users WHERE user_id = ?"
-  ).bind(session.userId).first<{ credits: number }>();
-
-  const credits = userRow?.credits ?? 0;
-  if (credits <= 0) {
+  // 3. Run Gateway 3-Step Arbitration & Instantiate DAG FIRST
+  let dag;
+  try {
+    dag = await runOrchestrationPipeline(env, envelope, orchestrationOptions);
+  } catch (err: any) {
+    console.error("Orchestration error:", err);
     return new Response(JSON.stringify({ 
-      error: "insufficient_quota", 
-      message: "当前可用积分余额为 0 ⚡，无法提交任务，请先充值额度。" 
+      error: "orchestration_failed", 
+      message: err.message || "Failed to orchestrate task" 
     }), { 
-      status: 403, 
+      status: 500, 
       headers: { "Content-Type": "application/json" } 
     });
   }
 
-  // Atomically reserve 1 base credit to prevent race conditions across parallel requests
-  const reserveResult = await env.DB.prepare(
-    "UPDATE users SET credits = credits - 1 WHERE user_id = ? AND credits >= 1"
-  ).bind(session.userId).run();
+  // 4. Dynamic Billing Alignment: Blast Radius & WebGPU Step 0 Zero Pre-Deduction
+  let hasReservedCredit = false;
+  if (!dag.is_security_violation && !dag.is_unreachable) {
+    const isFirstNodeBrowser = dag.nodes[0]?.selected_model?.inference_target === 'browser';
+    if (!isFirstNodeBrowser) {
+      // Cloud / Heavy first node: atomic reservation of 1 credit
+      const reserveResult = await env.DB.prepare(
+        "UPDATE users SET credits = credits - 1 WHERE user_id = ? AND credits >= 1"
+      ).bind(session.userId).run();
 
-  if (!reserveResult.meta.changes || reserveResult.meta.changes === 0) {
-    return new Response(JSON.stringify({ 
-      error: "insufficient_quota", 
-      message: "可用积分不足或并发请求额度受限，请稍后重试。" 
-    }), { 
-      status: 403, 
-      headers: { "Content-Type": "application/json" } 
-    });
+      if (!reserveResult.meta.changes || reserveResult.meta.changes === 0) {
+        return new Response(JSON.stringify({ 
+          error: "insufficient_quota", 
+          message: "可用积分不足或并发请求额度受限，请先充值额度。" 
+        }), { 
+          status: 403, 
+          headers: { "Content-Type": "application/json" } 
+        });
+      }
+      hasReservedCredit = true;
+    }
+    // Note: If Step 0 is WebGPU ('browser'), hasReservedCredit remains FALSE! (0 pre-deduction)
   }
-
-  let hasReservedCredit = true;
 
   try {
-    // 4. Run Gateway 3-Step Arbitration & Instantiate DAG
-    const dag = await runOrchestrationPipeline(env, envelope, orchestrationOptions);
-
     // 5. Return SSE Stream (with pre-deduction tracking for atomic billing)
     const stream = await executeDAGStream(env, dag, envelope, { 
       userId: session.userId, 
-      hasPreDeducted: true 
+      hasPreDeducted: hasReservedCredit,
+      ctx,
+      clientCapabilities: {
+        webgpu_handover_v3: body.capabilities?.webgpu_handover_v3 ?? !body.disableBrowserInference
+      }
+    });
+
+    triggerLazyHandshakeSweep(env, ctx);
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive"
+      }
+    });
+  } catch (err: any) {
+    console.error("Execution error:", err);
+    // Refund reserved credit if execution setup failed
+    if (hasReservedCredit) {
+      try {
+        await env.DB.prepare(
+          "UPDATE users SET credits = credits + 1 WHERE user_id = ?"
+        ).bind(session.userId).run();
+      } catch (refundErr) {
+        console.error("[Chat] Failed to refund reserved credit on execution error:", refundErr);
+      }
+    }
+    return new Response(JSON.stringify({ 
+      error: "execution_failed", 
+      message: err.message || "Failed to execute task stream" 
+    }), { 
+      status: 500, 
+      headers: { "Content-Type": "application/json" } 
+    });
+  }
+}
+
+/**
+ * Handles resumption of multi-step DAG after client-side WebGPU execution finishes.
+ * Features D1 Atomic CAS Anti-Replay Defense, Phase 2 Quota Settlement, and Standby Failover.
+ */
+export async function handleChatContinue(
+  request: Request, 
+  env: Env, 
+  ctx?: ExecutionContext
+): Promise<Response> {
+  const session = await getSession(request, env);
+  if (!session) {
+    return new Response(JSON.stringify({ error: "Unauthorized" }), { 
+      status: 401, 
+      headers: { "Content-Type": "application/json" } 
+    });
+  }
+
+  if (request.method !== "POST") {
+    return new Response("Method not allowed", { status: 405 });
+  }
+
+  let body: {
+    continuation_token: string;
+    status: 'success' | 'candidate_failed';
+    client_step_output?: string;
+    failed_model_id?: string;
+    error_reason?: string;
+    envelope: UnifiedProtocolEnvelope;
+    orchestration_options?: OrchestrationOptions;
+  };
+
+  try {
+    body = await request.json();
+  } catch (err) {
+    return new Response(JSON.stringify({ error: "Invalid JSON" }), { 
+      status: 400, 
+      headers: { "Content-Type": "application/json" } 
+    });
+  }
+
+  if (!body.continuation_token || !body.status || !body.envelope) {
+    return new Response(JSON.stringify({ error: "Missing required continuation parameters" }), { 
+      status: 400, 
+      headers: { "Content-Type": "application/json" } 
+    });
+  }
+
+  // 1. Verify continuation JWT token
+  const claims = await verifyJWT(body.continuation_token, env.JWT_SECRET);
+  if (!claims || !claims.jti || !claims.sub || claims.nxt === undefined) {
+    return new Response(JSON.stringify({ 
+      error: "invalid_or_expired_token", 
+      message: "续接令牌无效或已过期，请重新发起会话。" 
+    }), { 
+      status: 401, 
+      headers: { "Content-Type": "application/json" } 
+    });
+  }
+
+  if (claims.sub !== session.userId) {
+    return new Response(JSON.stringify({ 
+      error: "forbidden", 
+      message: "跨用户非法续接访问。" 
+    }), { 
+      status: 403, 
+      headers: { "Content-Type": "application/json" } 
+    });
+  }
+
+  // 2. D1 Atomic CAS Anti-Replay Defense
+  const casResult = await env.DB.prepare(`
+    UPDATE dag_handshakes
+    SET status = 'CONSUMED'
+    WHERE handshake_id = ? AND user_id = ? AND status = 'ISSUED' AND expires_at > datetime('now')
+  `).bind(claims.jti, session.userId).run();
+
+  if (!casResult.meta.changes || casResult.meta.changes === 0) {
+    return new Response(JSON.stringify({ 
+      error: "handshake_already_consumed_or_expired", 
+      message: "该任务接力握手已被消费或已超时，严禁重放执行。" 
+    }), { 
+      status: 409, 
+      headers: { "Content-Type": "application/json" } 
+    });
+  }
+
+  // Trigger lazy sweep for expired orphan records in background
+  triggerLazyHandshakeSweep(env, ctx);
+
+  // 3. Re-instantiate DAG
+  const orchestrationOpts: OrchestrationOptions = {
+    ...(body.orchestration_options || {}),
+    chosenTemplateId: claims.tid,
+    reRouteMode: 'switch_model'
+  };
+
+  let dag;
+  try {
+    dag = await runOrchestrationPipeline(env, body.envelope, orchestrationOpts);
+  } catch (err: any) {
+    console.error("[ChatContinue] Orchestration error:", err);
+    return new Response(JSON.stringify({ 
+      error: "orchestration_failed", 
+      message: err.message || "Failed to re-instantiate continuation pipeline" 
+    }), { 
+      status: 500, 
+      headers: { "Content-Type": "application/json" } 
+    });
+  }
+
+  let startStepIndex = Number(claims.nxt);
+  let injectedUpstreamText = '';
+
+  if (body.status === 'candidate_failed') {
+    // Standby Failover: The node that failed was step (claims.nxt - 1)
+    const failedStepIdx = Math.max(0, startStepIndex - 1);
+    const targetNode = dag.nodes[failedStepIdx];
+    if (!targetNode) {
+      return new Response(JSON.stringify({ error: "invalid_step_index", message: "续接步骤索引越界" }), { status: 400 });
+    }
+
+    const failedModelId = body.failed_model_id || targetNode.selected_model.model_id;
+    const availableStandbys = (targetNode.standby_models || []).filter(
+      m => m.model_id !== failedModelId && m.inference_target !== 'browser'
+    );
+
+    if (availableStandbys.length === 0) {
+      return new Response(JSON.stringify({ 
+        error: "no_standby_models_available", 
+        message: `岗位【${targetNode.role.name_zh}】首选端侧模型异常，且无可用云端备选模型。任务无法容灾。` 
+      }), { 
+        status: 500, 
+        headers: { "Content-Type": "application/json" } 
+      });
+    }
+
+    // Transparently advance to Top Standby cloud model
+    targetNode.selected_model = availableStandbys[0];
+    targetNode.standby_models = availableStandbys.slice(1);
+    targetNode.downgraded = true;
+    startStepIndex = failedStepIdx;
+    injectedUpstreamText = '';
+  } else {
+    // Success path: Sanitize client step output before feeding downstream
+    injectedUpstreamText = sanitizeClientStepOutput(body.client_step_output || '');
+  }
+
+  if (startStepIndex >= dag.nodes.length) {
+    return new Response(JSON.stringify({ error: "step_already_completed", message: "流水线所有步骤已完成" }), { status: 400 });
+  }
+
+  // 4. Cloud Pre-deduction for Phase 2:
+  // If the node starting Phase 2 is Cloud/Heavy, atomically pre-deduct 1 credit!
+  let hasReservedCredit = false;
+  const nextExecutingNode = dag.nodes[startStepIndex];
+  if (nextExecutingNode.selected_model.inference_target !== 'browser') {
+    const reserveResult = await env.DB.prepare(
+      "UPDATE users SET credits = credits - 1 WHERE user_id = ? AND credits >= 1"
+    ).bind(session.userId).run();
+
+    if (!reserveResult.meta.changes || reserveResult.meta.changes === 0) {
+      return new Response(JSON.stringify({ 
+        error: "insufficient_quota", 
+        message: "当前可用积分不足，无法执行后续云端任务，请先充值额度。" 
+      }), { 
+        status: 403, 
+        headers: { "Content-Type": "application/json" } 
+      });
+    }
+    hasReservedCredit = true;
+  }
+
+  // 5. Execute resumed DAG stream
+  try {
+    const stream = await executeDAGStream(env, dag, body.envelope, {
+      userId: session.userId,
+      hasPreDeducted: hasReservedCredit,
+      startStepIndex,
+      injectedUpstreamText,
+      continuationHandshakeId: claims.jti,
+      ctx,
+      clientCapabilities: { webgpu_handover_v3: true }
     });
 
     return new Response(stream, {
@@ -203,20 +442,19 @@ export async function handleChat(request: Request, env: Env): Promise<Response> 
       }
     });
   } catch (err: any) {
-    console.error("Orchestration error:", err);
-    // Refund reserved credit if pipeline failed before SSE stream execution
+    console.error("[ChatContinue] Stream execution error:", err);
     if (hasReservedCredit) {
       try {
         await env.DB.prepare(
           "UPDATE users SET credits = credits + 1 WHERE user_id = ?"
         ).bind(session.userId).run();
       } catch (refundErr) {
-        console.error("[Chat] Failed to refund reserved credit on orchestration error:", refundErr);
+        console.error("[ChatContinue] Failed to refund reserved credit:", refundErr);
       }
     }
     return new Response(JSON.stringify({ 
-      error: "orchestration_failed", 
-      message: err.message || "Failed to orchestrate task" 
+      error: "execution_failed", 
+      message: err.message || "Failed to execute continuation stream" 
     }), { 
       status: 500, 
       headers: { "Content-Type": "application/json" } 
