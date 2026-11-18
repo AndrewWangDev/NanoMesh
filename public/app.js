@@ -3846,6 +3846,22 @@ document.addEventListener('DOMContentLoaded', async () => {
           }
         });
       }
+      // FINDING-NEW-03: Synchronize DAG card model names and activeDagNodes from server resumed state
+      if (Array.isArray(data.nodes)) {
+        data.nodes.forEach(n => {
+          const card = document.getElementById('dag-node-' + n.role_id);
+          if (card && n.selected_model) {
+            const modelNameEl = card.querySelector('.dag-card-model-name');
+            if (modelNameEl) {
+              modelNameEl.textContent = n.selected_model.display_name;
+            }
+          }
+          const activeNode = (activeDagNodes || []).find(an => an.role_id === n.role_id || an.role?.role_id === n.role_id);
+          if (activeNode && n.selected_model) {
+            activeNode.selected_model = n.selected_model;
+          }
+        });
+      }
       requestAnimationFrame(() => renderDagSvgConnectors());
       return;
     }
@@ -4196,7 +4212,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (meta) meta.textContent = '❌ 本地推理异常';
             const workerDiag = document.getElementById('diag-worker-status-' + currentActiveAssistantId);
             if (workerDiag) workerDiag.textContent = `❌ ${escapeHtml(err.message || 'Worker thread execution error')}`;
-            if (!isTailNode && data.continuation_token) {
+            if (data.continuation_token) {
               (async () => {
                 try {
                   const failoverRes = await fetch('/api/chat/continue', {
@@ -4439,7 +4455,7 @@ document.addEventListener('DOMContentLoaded', async () => {
               if (meta) meta.textContent = '❌ 本地推理异常';
               if (workerDiag) workerDiag.textContent = `❌ ${escapeHtml(msg.error)}`;
 
-              if (!isTailNode && data.continuation_token) {
+              if (data.continuation_token) {
                 (async () => {
                   try {
                     const failoverRes = await fetch('/api/chat/continue', {
@@ -6132,7 +6148,7 @@ window.loadMessagesTab = async function(filter = notifState.currentFilter || 'al
 
     listEl.innerHTML = html;
   } catch (err) {
-    listEl.innerHTML = `<div style="text-align:center; padding:2rem; color:var(--error-color);">${err.message}</div>`;
+    listEl.innerHTML = `<div style="text-align:center; padding:2rem; color:var(--error-color);">${escapeHtml(err.message || '加载消息失败')}</div>`;
   }
 };
 
