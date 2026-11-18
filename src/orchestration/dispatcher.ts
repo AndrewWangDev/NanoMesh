@@ -150,8 +150,10 @@ export function applyAttentionSinkCompaction(text: string, maxChars: number = 16
 export function sanitizeClientStepOutput(text: string): string {
   if (!text) return '';
   let cleaned = text;
-  // 1. Strip special token boundaries
-  cleaned = cleaned.replace(/<\|(?:im_start|im_end|endoftext|end|system|user|assistant)\|>/gi, '');
+  // 1. Strip special token boundaries (ChatML, Llama 3/3.1 headers, Gemma turn markers, Mistral/Llama 2 instruction brackets)
+  cleaned = cleaned.replace(/<\|(?:im_start|im_end|endoftext|end|system|user|assistant|start_header_id|end_header_id|eot_id)\|>/gi, '');
+  cleaned = cleaned.replace(/<(?:start|end)_of_turn>/gi, '');
+  cleaned = cleaned.replace(/\[\/?INST\]/gi, '');
   // 2. Strip standard LLM trailing rules / confessions via sanitizeLLMOutput
   cleaned = sanitizeLLMOutput(cleaned);
   return cleaned;
@@ -805,7 +807,7 @@ export async function executeDAGStream(
           ].filter(Boolean).join('\n');
 
           // Deterministic Signature Check
-          const cacheKey = await computeDeterministicSignature(
+          let cacheKey = await computeDeterministicSignature(
             node.role.role_id,
             node.selected_model.model_id,
             inputDigest,
@@ -848,6 +850,13 @@ export async function executeDAGStream(
                 const cloudStandby = node.standby_models.find(m => m.inference_target !== 'browser');
                 if (cloudStandby) {
                   node.selected_model = cloudStandby;
+                  // Recompute deterministic cacheKey under the cloud standby model signature (BUG-07a)
+                  cacheKey = await computeDeterministicSignature(
+                    node.role.role_id,
+                    node.selected_model.model_id,
+                    inputDigest,
+                    fullPrompt
+                  );
                   // fall through to cloud execution logic!
                 } else {
                   sendEvent('error', {
@@ -906,13 +915,22 @@ export async function executeDAGStream(
                   expiresAt
                 ).run();
 
+                // Snapshot arbitrated model IDs across all roles to freeze selections into continuation (BUG-03)
+                const arbitratedRoleModels: Record<string, string> = {};
+                dag.nodes.forEach(n => {
+                  if (n.role?.role_id && n.selected_model?.model_id) {
+                    arbitratedRoleModels[n.role.role_id] = n.selected_model.model_id;
+                  }
+                });
+
                 // Sign continuation token (300s TTL)
                 const continuationToken = await signJWT({
                   jti: handshakeId,
                   sub: options.userId,
                   sid: envelope.session_id,
                   tid: dag.template.template_id,
-                  nxt: idx + 1
+                  nxt: idx + 1,
+                  mids: arbitratedRoleModels
                 }, env.JWT_SECRET, 300);
 
                 sendEvent('dag_handover', {
@@ -1037,36 +1055,37 @@ export async function executeDAGStream(
               }
 
               try {
+                // 1. Common Context Window Guard & Attention-Sink Linear Slice Compaction (BUG-02)
+                const candidateContextWindow = currentCandidate.context_window || 4096;
+                const { systemPrompt: guardedSysPrompt, promptContent: guardedPromptContent } = applyContextWindowGuard(
+                  systemPrompt,
+                  promptContent,
+                  candidateContextWindow,
+                  1024
+                );
+
+                const sanitizedUpstream = sanitizeLLMOutput(upstreamOutput || nodeCtx.upstream_text);
+                const compactedUpstream = applyAttentionSinkCompaction(
+                  sanitizedUpstream,
+                  Math.min(2000, Math.floor(candidateContextWindow * 1.5))
+                );
+
+                const downstreamParts: DownstreamPromptParts = {
+                  systemPrompt: guardedSysPrompt,
+                  initialUserDirective,
+                  sanitizedIntermediateOutput: compactedUpstream,
+                  currentTaskDirective: currentStepDirective,
+                  flatPromptContent: guardedPromptContent
+                };
+
+                const builtMessages = buildDownstreamMessages(downstreamParts, currentCandidate);
+
                 if (endpoint.startsWith('http')) {
                   if (!isSafeExternalUrl(endpoint)) {
                     console.warn(`[Dispatcher Security] Blocked SSRF attempt to unsafe endpoint: ${endpoint}`);
                     candidateErrors.push(`[${currentCandidate.display_name}]: 目标地址不安全或属于受保护的私有网络`);
                     continue;
                   }
-
-                  // 1. Context Window Guard & Attention-Sink Linear Slice Compaction
-                  const { systemPrompt: guardedSysPrompt, promptContent: guardedPromptContent } = applyContextWindowGuard(
-                    systemPrompt,
-                    promptContent,
-                    currentCandidate.context_window || 4096,
-                    1024
-                  );
-
-                  const sanitizedUpstream = sanitizeLLMOutput(upstreamOutput || nodeCtx.upstream_text);
-                  const compactedUpstream = applyAttentionSinkCompaction(
-                    sanitizedUpstream,
-                    Math.min(2000, Math.floor((currentCandidate.context_window || 4096) * 1.5))
-                  );
-
-                  const downstreamParts: DownstreamPromptParts = {
-                    systemPrompt: guardedSysPrompt,
-                    initialUserDirective,
-                    sanitizedIntermediateOutput: compactedUpstream,
-                    currentTaskDirective: currentStepDirective,
-                    flatPromptContent: guardedPromptContent
-                  };
-
-                  const builtMessages = buildDownstreamMessages(downstreamParts, currentCandidate);
 
                   // 2. Protocol Adapter: OpenAI Compatible vs Google AI Studio (Gemini)
                   const apiFormat = currentCandidate.api_format || 'openai_compat';
@@ -1221,14 +1240,11 @@ export async function executeDAGStream(
                     candidateErrors.push(`[${currentCandidate.display_name}]: 解析输出过短或空 (len=${parsed?.length || 0})`);
                   }
                 } else if (!isImageNode && endpoint.startsWith('@cf/')) {
-                  // Text Model Execution with token-by-token streaming on tail node
+                  // Text Model Execution with token-by-token streaming on tail node (guarded against context window overflow)
                   const timeoutMs = endpoint.includes('qwq') ? 45000 : 35000;
                   const aiRes = await callWithTimeout(
                     () => env.AI.run(endpoint as any, {
-                      messages: [
-                        { role: 'system', content: systemPrompt },
-                        { role: 'user', content: promptContent }
-                      ],
+                      messages: builtMessages.openaiMessages,
                       stream: isTailNode,
                       max_tokens: 2560,
                       temperature: 0.2

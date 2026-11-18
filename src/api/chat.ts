@@ -13,7 +13,7 @@ import { UnifiedProtocolEnvelope } from "../orchestration/types";
 export function triggerLazyHandshakeSweep(env: Env, ctx?: ExecutionContext) {
   if (ctx && typeof ctx.waitUntil === 'function') {
     const sweepPromise = env.DB.prepare(
-      "DELETE FROM dag_handshakes WHERE expires_at < datetime('now', '-1 hour')"
+      "DELETE FROM dag_handshakes WHERE datetime(expires_at) < datetime('now', '-1 hour')"
     ).run().catch((e) => console.warn("[HandshakeSweep] lazy cleanup error:", e));
     ctx.waitUntil(sweepPromise);
   }
@@ -277,6 +277,7 @@ export async function handleChatContinue(
     client_step_output?: string;
     failed_model_id?: string;
     error_reason?: string;
+    upstream_context?: string;
     envelope: UnifiedProtocolEnvelope;
     orchestration_options?: OrchestrationOptions;
   };
@@ -323,7 +324,7 @@ export async function handleChatContinue(
   const casResult = await env.DB.prepare(`
     UPDATE dag_handshakes
     SET status = 'CONSUMED'
-    WHERE handshake_id = ? AND user_id = ? AND status = 'ISSUED' AND expires_at > datetime('now')
+    WHERE handshake_id = ? AND user_id = ? AND status = 'ISSUED' AND datetime(expires_at) > datetime('now')
   `).bind(claims.jti, session.userId).run();
 
   if (!casResult.meta.changes || casResult.meta.changes === 0) {
@@ -343,6 +344,7 @@ export async function handleChatContinue(
   const orchestrationOpts: OrchestrationOptions = {
     ...(body.orchestration_options || {}),
     chosenTemplateId: claims.tid,
+    chosenRoleModels: claims.mids || body.orchestration_options?.chosenRoleModels,
     reRouteMode: 'switch_model'
   };
 
@@ -391,7 +393,7 @@ export async function handleChatContinue(
     targetNode.standby_models = availableStandbys.slice(1);
     targetNode.downgraded = true;
     startStepIndex = failedStepIdx;
-    injectedUpstreamText = '';
+    injectedUpstreamText = sanitizeClientStepOutput(body.upstream_context || '');
   } else {
     // Success path: Sanitize client step output before feeding downstream
     injectedUpstreamText = sanitizeClientStepOutput(body.client_step_output || '');
