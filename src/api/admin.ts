@@ -685,17 +685,6 @@ export async function handleAdminCreateOrUpdateTemplate(request: Request, env: E
         error: `Subsistence Check Failed: Step ${i + 1} Role '${role.name_zh || role.role_id}' currently has 0 active models in the compute pool. An un-executable pipeline cannot be saved.`
       }, { status: 400 });
     }
-
-    // 4.1 Topology Constraint: Client-side browser (WebGPU) models cannot be intermediate nodes in multi-node workflows
-    if (roleSequence.length > 1 && i < roleSequence.length - 1) {
-      const nonBrowserModels = (res.selectedModels || []).filter((m: ModelMetadata) => m.inference_target !== 'browser');
-      if (nonBrowserModels.length === 0) {
-        return Response.json({
-          error: `Topology Constraint Violation: Step ${i + 1} Role '${role.name_zh || role.role_id}' only resolves to client-side browser (WebGPU) models. WebGPU nodes can only serve as the final (tail) node in a multi-step workflow.`,
-          error_code: "error.browserNodeMustBeTailNode"
-        }, { status: 400 });
-      }
-    }
   }
 
   // 5. Determine in_modalities & out_modalities

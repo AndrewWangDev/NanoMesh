@@ -3599,9 +3599,35 @@ document.addEventListener('DOMContentLoaded', async () => {
           sessionAssetLedger,
           activeBranchId: window.activeBranchId,
           activeBranchSummary,
-          branchCatalog
+          branchCatalog,
+          capabilities: {
+            webgpu_handover_v3: true
+          }
         })
       });
+
+      // Cache snapshot for potential multi-step WebGPU continuation
+      window._lastChatEnvelope = envelope;
+      window._lastOrchestrationOptions = {
+        reRouteMode: reRouteOptions.reRouteMode || 'normal',
+        chosenTemplateId: reRouteOptions.chosenTemplateId || (reRouteOptions.isSwitch ? window.currentRunningTemplateId : undefined),
+        chosenRoleModels: reRouteOptions.chosenRoleModels || (reRouteOptions.isSwitch ? window.activeChosenRoleModels : undefined),
+        customRolePrompts: reRouteOptions.customRolePrompts || (reRouteOptions.isSwitch ? window.activeCustomRolePrompts : undefined),
+        customNodePrompt: reRouteOptions.customNodePrompt,
+        hasPreviousRound: !!(window.currentDagBaseSummary || window.lastRoundSummary),
+        previousRoundSummary: (window.currentDagBaseSummary || window.lastRoundSummary) || undefined,
+        hadMediaAssets: (window.sessionAssets || []).some(a => {
+          const m = resolveModality(a);
+          return m === 'image' || m === 'audio' || m === 'pdf';
+        }),
+        hasNewUploads,
+        newUploadModalities,
+        sessionAssetLedger,
+        activeBranchId: window.activeBranchId,
+        activeBranchSummary,
+        branchCatalog,
+        disableBrowserInference: !!window.disableLocalInference
+      };
 
       if (res.status === 403) {
         window.showZeroBalanceModal();
@@ -3634,37 +3660,42 @@ document.addEventListener('DOMContentLoaded', async () => {
         throw new Error(errJson.message || '调度失败');
       }
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let fullOutput = '';
+      async function pumpSSEStream(stream, targetAssistantId, targetUserText) {
+        const reader = stream.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let streamedOutput = '';
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop(); // keep last incomplete line
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop(); // keep last incomplete line
 
-        let currentEvent = 'message';
-        for (const line of lines) {
-          if (line.startsWith('event: ')) {
-            currentEvent = line.slice(7).trim();
-          } else if (line.startsWith('data: ')) {
-            const dataStr = line.slice(6).trim();
-            if (!dataStr) continue;
-            try {
-              const data = JSON.parse(dataStr);
-              if (currentEvent === 'text_chunk' && data.chunk) {
-                fullOutput += data.chunk;
-              } else if (currentEvent === 'dag_complete' && data.final_output) {
-                fullOutput = data.final_output;
-              }
-              handleSSEMessage(currentEvent, data, assistantId, userText);
-            } catch (parseErr) {}
+          let currentEvent = 'message';
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              currentEvent = line.slice(7).trim();
+            } else if (line.startsWith('data: ')) {
+              const dataStr = line.slice(6).trim();
+              if (!dataStr) continue;
+              try {
+                const data = JSON.parse(dataStr);
+                if (currentEvent === 'text_chunk' && data.chunk) {
+                  streamedOutput += data.chunk;
+                } else if (currentEvent === 'dag_complete' && data.final_output) {
+                  streamedOutput = data.final_output;
+                }
+                await handleSSEMessage(currentEvent, data, targetAssistantId, targetUserText, pumpSSEStream);
+              } catch (parseErr) {}
+            }
           }
         }
+        return streamedOutput;
       }
+
+      let fullOutput = await pumpSSEStream(res.body, assistantId, userText);
 
       // Await in-browser local execution if dispatched
       if (window._activeLocalRunnerPromise) {
@@ -3787,10 +3818,31 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Stage 3 & 4: SSE Message Dispatcher & DAG State Synchronization
-  function handleSSEMessage(event, data, assistantId, userPrompt = '') {
+  function handleSSEMessage(event, data, assistantId, userPrompt = '', pumpSSEStream = null) {
     const respEl = document.getElementById('response-text-' + assistantId);
     const arbPill = document.getElementById('arbitration-pill');
     const arbText = document.getElementById('arb-text');
+
+    if (event === 'dag_resume') {
+      const resumedStep = Number(data.resumed_step || 0);
+      if (Array.isArray(activeDagNodes)) {
+        activeDagNodes.forEach((n, idx) => {
+          if (idx < resumedStep) {
+            const card = document.getElementById('dag-node-' + n.role_id);
+            if (card) {
+              card.classList.remove('running', 'is-downloading');
+              card.classList.add('completed');
+            }
+            const meta = document.getElementById('node-meta-' + n.role_id);
+            if (meta && !meta.textContent.includes('✓')) {
+              meta.textContent = '✓ 已完成';
+            }
+          }
+        });
+      }
+      requestAnimationFrame(() => renderDagSvgConnectors());
+      return;
+    }
 
     if (event === 'dag_plan') {
       activeDagNodes = (data.nodes || []).map(n => {
@@ -4049,8 +4101,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         stepBadge.innerHTML = `<span class="step-spinner">⠋</span> <span>${escapeHtml(roleName)} ${isEn ? 'Processing...' : '执行中...'}</span>`;
       }
-    } else if (event === 'client_exec_request') {
+    } else if (event === 'client_exec_request' || event === 'dag_handover') {
       const isEn = getLocale() === 'en';
+      const isTailNode = event === 'client_exec_request' || !!data.is_tail_node;
       const roleId = data.role_id;
       const modelName = data.model_name || 'SmolLM2-135M 本地极速';
       const nodeCard = document.getElementById('dag-node-' + roleId);
@@ -4118,10 +4171,39 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (meta) meta.textContent = '❌ 本地推理异常';
             const workerDiag = document.getElementById('diag-worker-status-' + currentActiveAssistantId);
             if (workerDiag) workerDiag.textContent = `❌ ${escapeHtml(err.message || 'Worker thread execution error')}`;
-            setWorkflowExecutionLocked(false);
-            const sendBtn = document.getElementById('send-btn');
-            if (sendBtn) sendBtn.disabled = false;
-            reject(new Error(err.message || 'Local worker crashed'));
+            if (!isTailNode && data.continuation_token) {
+              (async () => {
+                try {
+                  const failoverRes = await fetch('/api/chat/continue', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    signal: window.activeChatAbortController?.signal,
+                    body: JSON.stringify({
+                      continuation_token: data.continuation_token,
+                      status: 'candidate_failed',
+                      failed_model_id: data.model_id,
+                      error_reason: err.message || 'Worker thread execution error',
+                      envelope: window._lastChatEnvelope,
+                      orchestration_options: window._lastOrchestrationOptions
+                    })
+                  });
+                  if (failoverRes.ok && pumpSSEStream) {
+                    const failoverOutput = await pumpSSEStream(failoverRes.body, assistantId, userPrompt);
+                    resolve(failoverOutput);
+                    return;
+                  }
+                } catch (fErr) {}
+                setWorkflowExecutionLocked(false);
+                const sendBtn = document.getElementById('send-btn');
+                if (sendBtn) sendBtn.disabled = false;
+                reject(new Error(err.message || 'Local worker crashed'));
+              })();
+            } else {
+              setWorkflowExecutionLocked(false);
+              const sendBtn = document.getElementById('send-btn');
+              if (sendBtn) sendBtn.disabled = false;
+              reject(new Error(err.message || 'Local worker crashed'));
+            }
           };
 
           worker.onmessage = (e) => {
@@ -4172,11 +4254,13 @@ document.addEventListener('DOMContentLoaded', async () => {
                 workerDiag.textContent = `✓ ${isEn ? `${devName} pipeline ready, streaming...` : `${devName} 管线就绪，正在高速流式推理...`}`;
               }
 
-              // Append streamed chunk
-              const rawChunk = msg.chunk || '';
-              const prev = streamingTextBuffers.get(assistantId) || '';
-              streamingTextBuffers.set(assistantId, prev + rawChunk);
-              scheduleStreamingMarkdownRender(assistantId);
+              // Append streamed chunk ONLY if tail node!
+              if (isTailNode) {
+                const rawChunk = msg.chunk || '';
+                const prev = streamingTextBuffers.get(assistantId) || '';
+                streamingTextBuffers.set(assistantId, prev + rawChunk);
+                scheduleStreamingMarkdownRender(assistantId);
+              }
 
             } else if (msg.type === 'GENERATE_COMPLETE') {
               // Complete execution
@@ -4201,50 +4285,134 @@ document.addEventListener('DOMContentLoaded', async () => {
                 workerDiag.textContent = `✓ ${isEn ? 'Local Inference Completed' : '本地端侧推理完成'} (${msg.duration_ms}ms · ⚡ 0点)`;
               }
 
-              // Mark Sink Anchor completed
-              const sink = document.getElementById('dag-sink-anchor');
-              if (sink) {
-                sink.classList.remove('is-executing');
-                sink.classList.add('completed');
-              }
-              requestAnimationFrame(() => renderDagSvgConnectors());
+              if (!isTailNode) {
+                requestAnimationFrame(() => renderDagSvgConnectors());
+                // Intermediate node: Call /api/chat/continue
+                (async () => {
+                  try {
+                    const continueRes = await fetch('/api/chat/continue', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      signal: window.activeChatAbortController?.signal,
+                      body: JSON.stringify({
+                        continuation_token: data.continuation_token,
+                        status: 'success',
+                        client_step_output: msg.output || '',
+                        envelope: window._lastChatEnvelope,
+                        orchestration_options: window._lastOrchestrationOptions
+                      })
+                    });
 
-              // Finalize markdown render
-              const fullText = msg.output || streamingTextBuffers.get(assistantId) || '';
-              if (respEl) {
-                respEl.innerHTML = safeRenderMarkdown(fullText);
-              }
-              if (streamingRafMap.has(assistantId)) {
-                cancelAnimationFrame(streamingRafMap.get(assistantId));
-                streamingRafMap.delete(assistantId);
-              }
-              streamingTextBuffers.delete(assistantId);
+                    if (continueRes.status === 409) {
+                      if (respEl) {
+                        respEl.innerHTML = `<span style="color:var(--color-danger, #ef4444);font-size:13px;">⚠️ 该任务步骤已被消费或已超时，请刷新重试。</span>`;
+                      }
+                      setWorkflowExecutionLocked(false);
+                      const sendBtn = document.getElementById('send-btn');
+                      if (sendBtn) sendBtn.disabled = false;
+                      resolve(msg.output || '');
+                      return;
+                    }
 
-              // Reveal copy and action buttons
-              const actionsEl = document.getElementById('actions-' + assistantId);
-              if (actionsEl) {
-                actionsEl.style.display = 'flex';
-                actionsEl.classList.add('is-visible');
+                    if (!continueRes.ok) {
+                      const errJson = await continueRes.json().catch(() => ({}));
+                      throw new Error(errJson.message || '接力调度失败');
+                    }
+
+                    if (pumpSSEStream) {
+                      const contOutput = await pumpSSEStream(continueRes.body, assistantId, userPrompt);
+                      resolve(contOutput);
+                    } else {
+                      resolve(msg.output || '');
+                    }
+                  } catch (contErr) {
+                    console.error('[Handover] Continuation failed:', contErr);
+                    if (respEl) {
+                      respEl.innerHTML = `<span style="color:var(--color-danger, #ef4444);font-size:13px;">❌ 接力调度失败: ${escapeHtml(contErr.message)}</span>`;
+                    }
+                    setWorkflowExecutionLocked(false);
+                    const sendBtn = document.getElementById('send-btn');
+                    if (sendBtn) sendBtn.disabled = false;
+                    reject(contErr);
+                  }
+                })();
+              } else {
+                // Mark Sink Anchor completed
+                const sink = document.getElementById('dag-sink-anchor');
+                if (sink) {
+                  sink.classList.remove('is-executing');
+                  sink.classList.add('completed');
+                }
+                requestAnimationFrame(() => renderDagSvgConnectors());
+
+                // Finalize markdown render
+                const fullText = msg.output || streamingTextBuffers.get(assistantId) || '';
+                if (respEl) {
+                  respEl.innerHTML = safeRenderMarkdown(fullText);
+                }
+                if (streamingRafMap.has(assistantId)) {
+                  cancelAnimationFrame(streamingRafMap.get(assistantId));
+                  streamingRafMap.delete(assistantId);
+                }
+                streamingTextBuffers.delete(assistantId);
+
+                // Reveal copy and action buttons
+                const actionsEl = document.getElementById('actions-' + assistantId);
+                if (actionsEl) {
+                  actionsEl.style.display = 'flex';
+                  actionsEl.classList.add('is-visible');
+                }
+
+                setWorkflowExecutionLocked(false);
+                const sendBtn = document.getElementById('send-btn');
+                if (sendBtn) sendBtn.disabled = false;
+
+                resolve(fullText);
               }
-
-              setWorkflowExecutionLocked(false);
-              const sendBtn = document.getElementById('send-btn');
-              if (sendBtn) sendBtn.disabled = false;
-
-              resolve(fullText);
             } else if (msg.type === 'ERROR') {
               if (nodeCard) nodeCard.classList.remove('is-downloading', 'running');
               if (meta) meta.textContent = '❌ 本地推理异常';
               if (workerDiag) workerDiag.textContent = `❌ ${escapeHtml(msg.error)}`;
-              // Clear partially streamed text buffer if error occurred during generation
-              if (respEl) {
-                streamingTextBuffers.delete(assistantId);
-                respEl.innerHTML = `<span style="color:var(--color-danger, #ef4444);font-size:13px;">❌ ${escapeHtml(msg.error)}</span>`;
+
+              if (!isTailNode && data.continuation_token) {
+                (async () => {
+                  try {
+                    const failoverRes = await fetch('/api/chat/continue', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      signal: window.activeChatAbortController?.signal,
+                      body: JSON.stringify({
+                        continuation_token: data.continuation_token,
+                        status: 'candidate_failed',
+                        failed_model_id: data.model_id,
+                        error_reason: msg.error || 'Local execution failed',
+                        envelope: window._lastChatEnvelope,
+                        orchestration_options: window._lastOrchestrationOptions
+                      })
+                    });
+
+                    if (failoverRes.ok && pumpSSEStream) {
+                      const failoverOutput = await pumpSSEStream(failoverRes.body, assistantId, userPrompt);
+                      resolve(failoverOutput);
+                      return;
+                    }
+                  } catch (fErr) {}
+                  setWorkflowExecutionLocked(false);
+                  const sendBtn = document.getElementById('send-btn');
+                  if (sendBtn) sendBtn.disabled = false;
+                  reject(new Error(msg.error || 'Local execution failed'));
+                })();
+              } else {
+                // Clear partially streamed text buffer if error occurred during generation
+                if (respEl) {
+                  streamingTextBuffers.delete(assistantId);
+                  respEl.innerHTML = `<span style="color:var(--color-danger, #ef4444);font-size:13px;">❌ ${escapeHtml(msg.error)}</span>`;
+                }
+                setWorkflowExecutionLocked(false);
+                const sendBtn = document.getElementById('send-btn');
+                if (sendBtn) sendBtn.disabled = false;
+                reject(new Error(msg.error || 'Local execution failed'));
               }
-              setWorkflowExecutionLocked(false);
-              const sendBtn = document.getElementById('send-btn');
-              if (sendBtn) sendBtn.disabled = false;
-              reject(new Error(msg.error || 'Local execution failed'));
             }
           };
 
