@@ -1090,7 +1090,7 @@ export async function executeDAGStream(
             if (imageAsset) {
               if (imageAsset.r2_key && env.R2) {
                 // Security check (IDOR/BOLA prevention): Only allow access to current session's assets
-                const userSafePrefix = `tmp/${options.userId}/`;
+                const userSafePrefix = `tmp/${options.userId || envelope.user_id || 'anonymous'}/`;
                 if (!imageAsset.r2_key.startsWith(userSafePrefix)) {
                   console.error(`[Security IDOR] User ${options.userId} attempted to access unauthorized R2 key: ${imageAsset.r2_key}`);
                   throw new Error(`安全违规：拒绝访问未经授权的资产对象`);
@@ -1119,7 +1119,7 @@ export async function executeDAGStream(
 
             if (audioAsset) {
               if (audioAsset.r2_key && env.R2) {
-                const userSafePrefix = `tmp/${options.userId}/`;
+                const userSafePrefix = `tmp/${options.userId || envelope.user_id || 'anonymous'}/`;
                 if (!audioAsset.r2_key.startsWith(userSafePrefix)) {
                   console.error(`[Security IDOR] User ${options.userId} attempted to access unauthorized R2 key: ${audioAsset.r2_key}`);
                   throw new Error(`安全违规：拒绝访问未经授权的资产对象`);
@@ -1304,7 +1304,61 @@ export async function executeDAGStream(
                         }
                       });
                     } else {
-                      const jsonRes = await fRes.json();
+                      const jsonRes: any = await fRes.json().catch(() => ({}));
+                      if (currentCandidate.out_modalities?.includes('image')) {
+                        let b64Str = jsonRes.data?.[0]?.b64_json;
+                        let imgBuffer: ArrayBuffer | null = null;
+                        if (b64Str) {
+                          const binStr = atob(b64Str);
+                          const len = binStr.length;
+                          const u8 = new Uint8Array(len);
+                          for (let i = 0; i < len; i++) u8[i] = binStr.charCodeAt(i);
+                          imgBuffer = u8.buffer as ArrayBuffer;
+                        } else if (jsonRes.data?.[0]?.url) {
+                          const fetched = await fetch(jsonRes.data[0].url);
+                          if (fetched.ok) imgBuffer = await fetched.arrayBuffer();
+                        }
+
+                        if (imgBuffer && imgBuffer.byteLength > 0) {
+                          const generatedAssetId = crypto.randomUUID();
+                          const safeUserId = options.userId || envelope.user_id || 'anonymous';
+                          const newAssetKey = `tmp/${safeUserId}/${envelope.session_id}/${generatedAssetId}.png`;
+                          if (env.R2) {
+                            await env.R2.put(newAssetKey, imgBuffer, {
+                              httpMetadata: { contentType: 'image/png' },
+                              customMetadata: {
+                                userId: safeUserId,
+                                sessionId: envelope.session_id,
+                                assetId: generatedAssetId,
+                                roleId: node.role.role_id
+                              }
+                            });
+                          }
+
+                          const mediaArtifact: MediaArtifact = {
+                            asset_id: generatedAssetId,
+                            modality: 'image',
+                            mime_type: 'image/png',
+                            file_size: imgBuffer.byteLength,
+                            r2_key: newAssetKey,
+                            source_digest: `${generatedAssetId}-${imgBuffer.byteLength}`
+                          };
+                          currentBundle.generated_media.push(mediaArtifact);
+
+                          sendEvent('asset_chunk', {
+                            role_id: node.role.role_id,
+                            role_name: node.role.name_zh,
+                            asset_id: generatedAssetId,
+                            modality: 'image',
+                            mime_type: 'image/png',
+                            file_size: imgBuffer.byteLength,
+                            r2_key: newAssetKey,
+                            preview_url: `/api/assets/${generatedAssetId}?key=${encodeURIComponent(newAssetKey)}`
+                          });
+
+                          return `[外部商业生图模型已存入账本: ${generatedAssetId}.png (体积: ${(imgBuffer.byteLength / 1024).toFixed(1)} KB)]\n提示词: ${promptContent}`;
+                        }
+                      }
                       return await parseAIResponse(jsonRes);
                     }
                   }, 45000, abortController.signal);
@@ -1409,8 +1463,9 @@ export async function executeDAGStream(
                   );
                   if (aiRes) {
                     const generatedAssetId = crypto.randomUUID();
-                    const newAssetKey = `tmp/${options.userId}/${envelope.session_id}/${generatedAssetId}.png`;
-                    let imageBuffer: ArrayBuffer;
+                    const safeUserId = options.userId || envelope.user_id || 'anonymous';
+                    const newAssetKey = `tmp/${safeUserId}/${envelope.session_id}/${generatedAssetId}.png`;
+                    let imageBuffer: ArrayBuffer | null = null;
                     if (aiRes instanceof ReadableStream || typeof aiRes.getReader === 'function') {
                       const resp = new Response(aiRes);
                       imageBuffer = await resp.arrayBuffer();
@@ -1429,44 +1484,48 @@ export async function executeDAGStream(
                       imageBuffer = await resp.arrayBuffer();
                     }
 
-                    if (env.R2 && imageBuffer.byteLength > 0) {
-                      await env.R2.put(newAssetKey, imageBuffer, {
-                        httpMetadata: { contentType: 'image/png' },
-                        customMetadata: {
-                          userId: options.userId,
-                          sessionId: envelope.session_id,
-                          assetId: generatedAssetId,
-                          roleId: node.role.role_id
-                        }
+                    if (imageBuffer && imageBuffer.byteLength > 0) {
+                      if (env.R2) {
+                        await env.R2.put(newAssetKey, imageBuffer, {
+                          httpMetadata: { contentType: 'image/png' },
+                          customMetadata: {
+                            userId: safeUserId,
+                            sessionId: envelope.session_id,
+                            assetId: generatedAssetId,
+                            roleId: node.role.role_id
+                          }
+                        });
+                      }
+
+                      const mediaArtifact: MediaArtifact = {
+                        asset_id: generatedAssetId,
+                        modality: 'image',
+                        mime_type: 'image/png',
+                        file_size: imageBuffer.byteLength,
+                        r2_key: newAssetKey,
+                        source_digest: `${generatedAssetId}-${imageBuffer.byteLength}`
+                      };
+
+                      currentBundle.generated_media.push(mediaArtifact);
+
+                      sendEvent('asset_chunk', {
+                        role_id: node.role.role_id,
+                        role_name: node.role.name_zh,
+                        asset_id: generatedAssetId,
+                        modality: 'image',
+                        mime_type: 'image/png',
+                        file_size: imageBuffer.byteLength,
+                        r2_key: newAssetKey,
+                        preview_url: `/api/assets/${generatedAssetId}?key=${encodeURIComponent(newAssetKey)}`
                       });
+
+                      nodeOutput = `[系统生成图像资产已存入会话账本: ${generatedAssetId}.png (体积: ${(imageBuffer.byteLength / 1024).toFixed(1)} KB)]\n提示词: ${promptContent}`;
+                      actualExecutingModel = currentCandidate;
+                      isExecutionSuccess = true;
+                      break;
+                    } else {
+                      candidateErrors.push(`[${currentCandidate.display_name}]: 图像生成数据流为空 (byteLength=0)`);
                     }
-
-                    const mediaArtifact: MediaArtifact = {
-                      asset_id: generatedAssetId,
-                      modality: 'image',
-                      mime_type: 'image/png',
-                      file_size: imageBuffer.byteLength,
-                      r2_key: newAssetKey,
-                      source_digest: `${generatedAssetId}-${imageBuffer.byteLength}`
-                    };
-
-                    currentBundle.generated_media.push(mediaArtifact);
-
-                    sendEvent('asset_chunk', {
-                      role_id: node.role.role_id,
-                      role_name: node.role.name_zh,
-                      asset_id: generatedAssetId,
-                      modality: 'image',
-                      mime_type: 'image/png',
-                      file_size: imageBuffer.byteLength,
-                      r2_key: newAssetKey,
-                      preview_url: `/api/assets/${generatedAssetId}?key=${encodeURIComponent(newAssetKey)}`
-                    });
-
-                    nodeOutput = `[系统生成图像资产已存入会话账本: ${generatedAssetId}.png (体积: ${(imageBuffer.byteLength / 1024).toFixed(1)} KB)]\n提示词: ${promptContent}`;
-                    actualExecutingModel = currentCandidate;
-                    isExecutionSuccess = true;
-                    break;
                   } else {
                     candidateErrors.push(`[${currentCandidate.display_name}]: 图像生成接口未返回有效数据`);
                   }

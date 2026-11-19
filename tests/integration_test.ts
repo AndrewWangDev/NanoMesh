@@ -552,6 +552,9 @@ function createMockAI() {
       if (model === "@cf/black-forest-labs/flux-1-schnell") {
         return new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137]);
       }
+      if (model === "@cf/black-forest-labs/flux-broken-zero") {
+        return new Uint8Array([]);
+      }
       if (model.includes("llama")) {
         // Realistic simulated generation latency (allows testing race conditions and client abort)
         await new Promise(r => setTimeout(r, 60));
@@ -1875,22 +1878,16 @@ async function runIntegrationTests() {
     httpMetadata: { contentType: "image/png" }
   });
 
+  // 10.4 P1 Penetrating Claiming & Reverse Pipeline (AUDIT-MM-01):
+  // User uploads ONLY physical image and writes text prompt (NO manual virtual_text_asset in manifest).
+  // Generalized Subsistence Law must automatically satisfy text-first reverse pipeline!
   const p1Envelope: UnifiedProtocolEnvelope = {
     envelope_id: "env_p1_001",
     session_id: "sess_p1_001",
     user_id: testUser10Id,
-    instruction_payload: "请结合用户提供的图像进行分析",
+    instruction_payload: "请先根据宏观经济背景推导分析，再核验我上传的走势图图片",
     metadata: { estimated_input_tokens: 150 },
     assets_manifest: [
-      {
-        asset_id: "virtual_text_asset",
-        modality: "text",
-        mime_type: "text/plain",
-        file_size: 30,
-        in_memory_text: "请结合用户提供的图像进行分析",
-        consumed: false,
-        source_digest: "digest_p1_text"
-      },
       {
         asset_id: "user_photo_asset",
         modality: "image",
@@ -1916,12 +1913,103 @@ async function runIntegrationTests() {
   const p1ChatRes = await handleChat(p1ChatReq, env);
   assert.equal(p1ChatRes.status, 200, "P1 chat request must return 200 SSE stream");
   const p1StreamText = await p1ChatRes.text();
-  assert.ok(p1StreamText.includes("dag_complete"), "P1 penetrating claiming pipeline must complete");
+  assert.ok(p1StreamText.includes("dag_complete"), "P1 penetrating claiming reverse pipeline must complete");
 
   // Step 0 text (1 credit) + Step 1 vision (1 credit) = 2 credits (16 -> 14)
   const user10AfterP1 = store.users.find(u => u.user_id === testUser10Id);
   assert.equal(user10AfterP1.credits, 14, "P1 pipeline must deduct 2 credits (16 -> 14)");
-  console.log("  ✓ P1 Penetrating Claiming Law (downstream node claims unconsumed user asset): PASSED");
+  console.log("  ✓ AUDIT-MM-01: Reverse multimodal pipeline (text -> image) successfully passes subsistence & executes: PASSED");
+
+  // 10.5 AUDIT-MM-02: FLUX 0-byte generation failover to Standby model
+  // Register a separate user to avoid in-memory burst rate limit (capacity=3)
+  const testUser10bId = "usr_multimodal_002_failover";
+  store.users.push({
+    user_id: testUser10bId,
+    username: "FluxFailoverTester",
+    email: "failover@nanomesh.local",
+    password_hash: "hash",
+    credits: 10,
+    referral_code: "REF-MM-FAILOVER",
+    referred_by: null,
+    token_version: 1
+  });
+
+  const user10bAuthToken = await signJWT({ userId: testUser10bId, role: "user", tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  const user10bReqHeaders = {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${user10bAuthToken}`
+  };
+
+  // Register a broken FLUX model returning 0 bytes with higher precision, and normal FLUX as standby
+  store.models.push({
+    model_id: "cf_flux_broken_zero",
+    display_name: "FLUX Broken (0-byte)",
+    provider: "Cloudflare",
+    endpoint: "@cf/black-forest-labs/flux-broken-zero",
+    modalities: '["text", "image"]',
+    in_modalities: '["text"]',
+    out_modalities: '["image"]',
+    tags: '["#image_generation"]',
+    context_window: 2048,
+    max_concurrency: 20,
+    active_connections: 0,
+    precision: 0.999, // higher precision so it ranks as primary
+    user_rating: 4.99,
+    usage_count: 10,
+    cost_per_1k_tokens: 0.0,
+    cost_per_invocation: 2.0,
+    status: "active",
+    is_generalist: 0,
+    prior_score: 0.99,
+    scenario_anchors: '["image_gen"]',
+    inference_target: "edge",
+    auth_mode: "none",
+    api_format: "workers_ai"
+  });
+
+  store.dag_templates.push({
+    template_id: "tpl_flux_failover_test",
+    name_zh: "FLUX 0字节容灾测试流水线",
+    name_en: "FLUX Zero Byte Failover Pipeline",
+    desc_zh: "测试首选FLUX返回0字节时透明故障转移到备选",
+    desc_en: "Test transparent failover when primary FLUX returns 0 bytes",
+    scenario_category: "multimodal",
+    scenario_anchor: "image_gen",
+    roles: JSON.stringify(["role_flux_draw"]),
+    role_sequence: JSON.stringify(["role_flux_draw"]),
+    edges: JSON.stringify([]),
+    head_modalities: JSON.stringify(["text"]),
+    tail_modalities: JSON.stringify(["image"]),
+    status: "active",
+    priority: 5
+  });
+
+  const zeroByteEnvelope: UnifiedProtocolEnvelope = {
+    envelope_id: "env_flux_zero_001",
+    session_id: "sess_flux_zero_001",
+    user_id: testUser10bId,
+    instruction_payload: "生成赛博朋克光影图",
+    metadata: { estimated_input_tokens: 100 },
+    assets_manifest: []
+  };
+
+  const zeroByteChatReq = new Request("https://nanomesh.local/api/chat", {
+    method: "POST",
+    headers: user10bReqHeaders,
+    body: JSON.stringify({
+      envelope: zeroByteEnvelope,
+      reRouteMode: "switch_template",
+      chosenTemplateId: "tpl_flux_failover_test"
+    })
+  });
+
+  const zeroByteChatRes = await handleChat(zeroByteChatReq, env);
+  assert.equal(zeroByteChatRes.status, 200, "FLUX failover chat request must return 200 SSE stream");
+  const zeroByteStreamText = await zeroByteChatRes.text();
+  assert.ok(zeroByteStreamText.includes("event: node_failover"), "Must emit node_failover event when primary FLUX produces 0 bytes");
+  assert.ok(zeroByteStreamText.includes("event: asset_chunk"), "Must emit asset_chunk after standby FLUX succeeds");
+  assert.ok(zeroByteStreamText.includes("dag_complete"), "Must complete successfully after transparent failover");
+  console.log("  ✓ AUDIT-MM-02: FLUX 0-byte generation cleanly triggers node_failover and completes with standby model: PASSED");
 
   console.log("\n==================================================");
   console.log("   🎉 ALL 10 INTEGRATION SCENARIOS PASSED (100%)! ");

@@ -27,20 +27,43 @@ export function hardFilterModels(
   });
 }
 
+export interface SubsistenceModalityContext {
+  mediaModalities?: string[];
+  hasUserText?: boolean;
+}
+
 /**
  * Step 1: Generalized Subsistence Law (广义温饱定律) for DAG Templates
  * 
  * Axioms:
- * 1. Single-Node DAG: Exact Equivalence A_user ≡ N_in
+ * 1. Single-Node DAG: Exact Equivalence for Physical Media Assets:
+ *    M(A_user) ≡ M(N_in) and (text ∈ N_in => hasUserText)
  * 2. Multi-Node DAG:
  *    - No-Starvation Axiom: For every node R_i, R_i.in ⊆ Ω_i, where Ω_i = A_user ∪ ⋃_{j < i} R_j.out
- *    - No-Orphan Axiom: A_user ⊆ ⋃_{k=0}^{n-1} R_k.in
+ *    - No-Orphan Media Axiom: All user physical media assets must be claimed by at least one node:
+ *      M(A_user) ⊆ ⋃_{k=0}^{n-1} R_k.in
  */
 export function filterTemplatesBySubsistence(
   templates: DAGTemplate[],
-  userModalities: string[]
+  userModalities: string[] | SubsistenceModalityContext
 ): DAGTemplate[] {
-  const userModalitySet = new Set(userModalities.length ? userModalities : ['text']);
+  let mediaModalities: string[];
+  let hasUserText: boolean;
+  let userModalitySet: Set<string>;
+
+  if (Array.isArray(userModalities)) {
+    const rawList = userModalities.length ? userModalities : ['text'];
+    mediaModalities = rawList.filter(m => m !== 'text' && m !== 'text_doc');
+    hasUserText = rawList.includes('text') || rawList.includes('text_doc');
+    userModalitySet = new Set(rawList);
+    if (hasUserText) userModalitySet.add('text');
+  } else {
+    mediaModalities = userModalities.mediaModalities || [];
+    hasUserText = userModalities.hasUserText !== undefined ? userModalities.hasUserText : true;
+    userModalitySet = new Set(mediaModalities);
+    if (hasUserText) userModalitySet.add('text');
+    if (userModalitySet.size === 0) userModalitySet.add('text');
+  }
 
   return templates.filter(tpl => {
     if (tpl.status !== 'active') return false;
@@ -48,12 +71,24 @@ export function filterTemplatesBySubsistence(
     // Check single-node DAG case
     const isSingleNode = tpl.roles.length === 1 && tpl.roles[0].in_degree === 0 && tpl.roles[0].out_degree === 0;
     if (isSingleNode) {
-      const singleInSet = new Set(tpl.roles[0].in_modalities);
-      // Must be exact equivalence: A_user ≡ N_in
-      if (userModalitySet.size !== singleInSet.size) return false;
-      for (const m of userModalitySet) {
-        if (!singleInSet.has(m)) return false;
+      const role = tpl.roles[0];
+      const roleInSet = new Set(role.in_modalities);
+      const roleMedia = (role.in_modalities || []).filter(m => m !== 'text' && m !== 'text_doc');
+      const roleRequiresText = roleInSet.has('text') || roleInSet.has('text_doc');
+
+      // 1. Physical Media Equivalence: user uploaded media must match role's physical requirements exactly
+      const userMediaSet = new Set(mediaModalities);
+      const roleMediaSet = new Set(roleMedia);
+      if (userMediaSet.size !== roleMediaSet.size) return false;
+      for (const m of userMediaSet) {
+        if (!roleMediaSet.has(m)) return false;
       }
+
+      // 2. Text Requirement: If role requires text, user must supply text
+      if (roleRequiresText && !hasUserText) {
+        return false;
+      }
+
       return true;
     }
 
@@ -64,7 +99,7 @@ export function filterTemplatesBySubsistence(
       for (const m of headSet) {
         if (!userModalitySet.has(m)) return false;
       }
-      for (const m of userModalitySet) {
+      for (const m of mediaModalities) {
         if (!combinedSet.has(m)) return false;
       }
       return true;
@@ -86,15 +121,22 @@ export function filterTemplatesBySubsistence(
       }
     }
 
-    // 2. Axiom 2: No-Orphan (User assets cannot contain orphan modalities unconsumed by any node)
+    // 2. Axiom 2: No-Orphan (User physical media assets cannot contain orphan modalities unconsumed by any node)
     const allClaimableInputs = new Set<string>();
     for (const role of tpl.roles) {
       for (const inM of role.in_modalities) {
         allClaimableInputs.add(inM);
       }
     }
-    for (const m of userModalitySet) {
+    // All physical media assets must be claimable by at least one node
+    for (const m of mediaModalities) {
       if (!allClaimableInputs.has(m)) {
+        return false;
+      }
+    }
+    // If user provided ONLY text (no media), the pipeline must consume text
+    if (mediaModalities.length === 0 && hasUserText) {
+      if (!allClaimableInputs.has('text') && !allClaimableInputs.has('text_doc')) {
         return false;
       }
     }
