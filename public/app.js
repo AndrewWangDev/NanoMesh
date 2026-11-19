@@ -3432,7 +3432,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const resolveModality = (f) => {
       let modality = f.inMemoryText ? 'text' : f.modality;
       if (!modality) {
-        const mime = (f.type || '').toLowerCase();
+        const mime = (f.type || f.mime_type || '').toLowerCase();
         if (mime.startsWith('image/')) modality = 'image';
         else if (mime.startsWith('audio/')) modality = 'audio';
         else if ((f.name || '').toLowerCase().endsWith('.pdf') || mime.includes('pdf')) modality = 'pdf';
@@ -3481,12 +3481,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Snapshot assets for current dialogue round persistence
     window.currentRoundAssets = currentAssets.map(f => ({
       name: f.name || 'attachment',
-      size: f.size || 0,
-      type: f.type || '',
+      size: f.size ?? f.file_size ?? 0,
+      type: f.type || f.mime_type || '',
       modality: f.modality,
-      assetId: f.assetId,
-      r2Key: f.r2Key,
-      previewUrl: f.previewUrl || '',
+      assetId: f.assetId || f.id,
+      r2Key: f.r2Key || f.r2_key,
+      previewUrl: f.previewUrl || f.url || '',
       inMemoryText: f.inMemoryText,
       isNew: !!f.isNew
     }));
@@ -3511,7 +3511,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       mime_type: a.mime_type || a.type,
       introduced_round: a.introducedRound || 1,
       branch_id: a.branchId || 'main',
-      r2_key: a.r2_key,
+      r2_key: a.r2_key || a.r2Key,
       origin: a.origin || 'upload'
     }));
 
@@ -3549,15 +3549,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       round_index: ++window.chatRoundIndex,
       instruction_payload: userText,
       assets_manifest: currentAssets.map(f => ({
-        asset_id: f.assetId || crypto.randomUUID(),
+        asset_id: f.assetId || f.id || crypto.randomUUID(),
         modality: f.modality,
-        mime_type: f.type || 'text/plain',
-        file_size: f.size || 0,
-        r2_key: f.r2Key || null,
+        mime_type: f.type || f.mime_type || 'text/plain',
+        file_size: f.size ?? f.file_size ?? 0,
+        r2_key: f.r2Key || f.r2_key || null,
         in_memory_text: f.inMemoryText || null,
         in_memory_data: null,
         consumed: false,
-        source_digest: f.r2Key || (f.name + '-' + (f.inMemoryText ? f.inMemoryText.length : f.size)),
+        source_digest: f.r2Key || f.r2_key || (f.name + '-' + (f.inMemoryText ? f.inMemoryText.length : (f.size ?? f.file_size ?? 0))),
         is_new: !!f.isNew,
         filename: f.name || 'attachment'
       })),
@@ -4536,8 +4536,13 @@ document.addEventListener('DOMContentLoaded', async () => {
           assetId: assetId,
           name: data.role_name ? `${data.role_name}_产物.png` : (isEn ? `Generated_${assetId.slice(0, 8)}.png` : `生成资产_${assetId.slice(0, 8)}.png`),
           modality: modality || 'image',
+          type: data.mime_type || (modality === 'image' ? 'image/png' : 'audio/wav'),
           mime_type: data.mime_type || (modality === 'image' ? 'image/png' : 'audio/wav'),
+          size: data.file_size || 0,
+          file_size: data.file_size || 0,
           url: previewUrl,
+          previewUrl: previewUrl,
+          r2Key: r2Key,
           r2_key: r2Key,
           origin: 'generated',
           introducedRound: window.currentChatTurn || 1,
