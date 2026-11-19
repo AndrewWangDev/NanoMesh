@@ -97,7 +97,7 @@ export default {
              const notif = await import("./api/notifications");
              res = await notif.handleAdminRevokeNotification(request, env);
            }
-           else if (request.method === "PATCH") res = await admin.handleAdminUpdateModel(request, env);
+           else if ((url.pathname.startsWith("/api/admin/models/") || url.pathname.startsWith("/api/admin/nodes/")) && request.method === "PATCH") res = await admin.handleAdminUpdateModel(request, env);
            else res = new Response("Not Found", { status: 404 });
         } else if (url.pathname === "/api/notifications" && request.method === "GET") {
            const { handleGetNotifications } = await import("./api/notifications");

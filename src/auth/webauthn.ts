@@ -32,7 +32,12 @@ export function isOriginAllowed(origin: string, request: Request, env: Env): boo
   const reqOrigin = new URL(request.url).origin;
   if (origin === reqOrigin) return true;
   if (env.FRONTEND_URL && origin === env.FRONTEND_URL) return true;
-  if (origin.startsWith("http://localhost:") || origin.startsWith("https://localhost:")) return true;
+  
+  // 仅在本地开发测试环境下允许 localhost origin
+  const isLocalRequest = reqOrigin.includes("://localhost") || reqOrigin.includes("://127.0.0.1");
+  if (isLocalRequest && (origin.startsWith("http://localhost:") || origin.startsWith("https://localhost:") || origin.startsWith("http://127.0.0.1:") || origin === "http://localhost" || origin === "https://localhost")) {
+    return true;
+  }
   return false;
 }
 
@@ -206,7 +211,7 @@ export function decodeCbor(buffer: Uint8Array): { value: any; bytesRead: number 
   return { value, bytesRead: offset };
 }
 
-export function parseAttestationObject(attestationObjectBytes: Uint8Array): {
+export async function parseAttestationObject(attestationObjectBytes: Uint8Array): Promise<{
   authData: Uint8Array;
   rpIdHash: Uint8Array;
   flags: number;
@@ -215,7 +220,7 @@ export function parseAttestationObject(attestationObjectBytes: Uint8Array): {
   credentialId: Uint8Array;
   publicKeySpki: Uint8Array;
   alg: number;
-} {
+}> {
   const decoded = decodeCbor(attestationObjectBytes).value;
   if (!(decoded instanceof Map)) {
     throw new Error("Invalid attestation object format");
@@ -252,7 +257,7 @@ export function parseAttestationObject(attestationObjectBytes: Uint8Array): {
   }
 
   const kty = coseMap.get(1); // 2 = EC2, 3 = RSA
-  const alg = coseMap.get(3) || -7; // -7 = ES256, -257 = RS256
+  const alg = coseMap.get(3) || (kty === 3 ? -257 : -7); // -7 = ES256, -257 = RS256
 
   let publicKeySpki: Uint8Array;
 
@@ -270,6 +275,28 @@ export function parseAttestationObject(attestationObjectBytes: Uint8Array): {
     publicKeySpki.set(spkiPrefix, 0);
     publicKeySpki.set(x, spkiPrefix.length);
     publicKeySpki.set(y, spkiPrefix.length + 32);
+  } else if (kty === 3 && (alg === -257 || !alg)) {
+    const n = coseMap.get(-1);
+    const e = coseMap.get(-2);
+    if (!n || !e || !(n instanceof Uint8Array) || !(e instanceof Uint8Array)) {
+      throw new Error("Invalid RSA key parameters: modulus n or exponent e missing");
+    }
+    const jwk = {
+      kty: "RSA",
+      n: bufferToBase64Url(n),
+      e: bufferToBase64Url(e),
+      alg: "RS256",
+      ext: true
+    };
+    const cryptoKey = await crypto.subtle.importKey(
+      "jwk",
+      jwk,
+      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+      true,
+      ["verify"]
+    );
+    const spkiBuffer = await crypto.subtle.exportKey("spki", cryptoKey);
+    publicKeySpki = new Uint8Array(spkiBuffer);
   } else {
     throw new Error(`Unsupported COSE key algorithm: kty=${kty}, alg=${alg}`);
   }

@@ -2311,8 +2311,325 @@ async function runIntegrationTests() {
   assert.equal(continueReplayRes.status, 409, "Anti-replay must reject consumed handshake with 409 Conflict");
   console.log("  ✓ BUG-05: Handshake 2PC preserves ISSUED on 403, succeeds on top-up, and rejects replay: PASSED");
 
+  // -----------------------------------------------------------------------
+  // SCENARIO 12: Audit Report 9 Remediations (BUG-02, BUG-04, BUG-05)
+  // -----------------------------------------------------------------------
+  console.log("\n[Scenario 12] Audit Report 9 Remediations (BUG-02, BUG-04, BUG-05)");
+
+  // 12.1 BUG-02: Symmetrical Heterogeneous Standby Failover (Cloud -> Browser WebGPU)
+  const roleFailoverTest = {
+    role_id: "role_failover_test",
+    name_zh: "异构容灾测试岗",
+    name_en: "Heterogeneous Failover Worker",
+    in_modalities: JSON.stringify(["text"]),
+    out_modalities: JSON.stringify(["text"]),
+    in_degree: 0,
+    out_degree: 0,
+    requisition_tags: JSON.stringify(["#chat"]),
+    compensation_prompts: "{}"
+  };
+  store.dag_roles.push(roleFailoverTest);
+
+  // Add primary cloud model (destined to fail via simulated network drop)
+  store.models.push({
+    model_id: "m_failing_cloud_01",
+    display_name: "Primary Failing Cloud",
+    provider: "OpenAI Compatible",
+    endpoint: "https://api.mock-failing-cloud.com/v1/chat/completions",
+    modalities: JSON.stringify(["text"]),
+    tags: JSON.stringify(["#chat"]),
+    context_window: 4096,
+    max_concurrency: 10,
+    active_connections: 0,
+    precision: 0.9,
+    user_rating: 4.8,
+    usage_count: 50,
+    is_generalist: 1,
+    prior_score: 0.95, // High prior score -> Top 1 Primary
+    scenario_anchors: '["chat"]',
+    status: "active",
+    cost_per_1k_tokens: 1.0,
+    inference_target: "cloud",
+    api_format: "openai_compat"
+  });
+
+  // Add standby browser WebGPU model
+  store.models.push({
+    model_id: "m_standby_browser_01",
+    display_name: "Standby Browser WebGPU",
+    provider: "Client",
+    endpoint: "onnx-community/Qwen2.5-0.5B-Instruct",
+    modalities: JSON.stringify(["text"]),
+    tags: JSON.stringify(["#chat"]),
+    context_window: 2048,
+    max_concurrency: 10,
+    active_connections: 0,
+    precision: 0.85,
+    user_rating: 4.5,
+    usage_count: 20,
+    is_generalist: 1,
+    prior_score: 0.80, // Standby candidate
+    scenario_anchors: '["chat"]',
+    status: "active",
+    cost_per_1k_tokens: 0.0,
+    inference_target: "browser"
+  });
+
+  store.dag_templates.push({
+    template_id: "tpl_failover_cloud_to_browser",
+    name_zh: "云端切端侧单步容灾测试",
+    name_en: "Cloud to Browser Standby Failover Test",
+    desc_zh: "测试云端主节点失败后对称流转至端侧",
+    desc_en: "Test symmetrical dynamic failover from cloud to browser",
+    role_sequence: JSON.stringify(["role_failover_test"]),
+    head_modalities: JSON.stringify(["text"]),
+    tail_modalities: JSON.stringify(["text"]),
+    status: "active",
+    priority: 10
+  });
+
+  const testUser12Id = "usr_failover_tester_12";
+  store.users.push({
+    user_id: testUser12Id,
+    username: "FailoverTester",
+    email: "failover@nanomesh.local",
+    password_hash: "hash",
+    credits: 5,
+    token_version: 1
+  });
+
+  const user12AuthToken = await signJWT({ userId: testUser12Id, role: "user", tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  const user12ReqHeaders = {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${user12AuthToken}`
+  };
+
+  const origFetch12 = globalThis.fetch;
+  try {
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const urlStr = typeof input === "string" ? input : (input instanceof URL ? input.toString() : input.url);
+      if (urlStr.includes("api.mock-failing-cloud.com")) {
+        // Simulate cloud model timeout / connection drop
+        throw new Error("Connection dropped by cloud gateway (Simulated 504 Gateway Timeout)");
+      }
+      return origFetch12(input, init);
+    };
+
+    const failoverEnvelope: UnifiedProtocolEnvelope = {
+      envelope_id: "env_failover_001",
+      session_id: "sess_failover_001",
+      user_id: testUser12Id,
+      round_index: 1,
+      instruction_payload: "测试云端宕机对称流转至本地算力",
+      metadata: { estimated_input_tokens: 50 },
+      assets_manifest: []
+    };
+
+    const failoverReq = new Request("https://nanomesh.local/api/chat", {
+      method: "POST",
+      headers: user12ReqHeaders,
+      body: JSON.stringify({
+        envelope: failoverEnvelope,
+        reRouteMode: "switch_template",
+        chosenTemplateId: "tpl_failover_cloud_to_browser",
+        capabilities: { webgpu_handover_v3: true }
+      })
+    });
+
+    const failoverRes = await handleChat(failoverReq, env);
+    assert.equal(failoverRes.status, 200, "Failover request must return 200 SSE stream");
+
+    const reader12 = failoverRes.body!.getReader();
+    const decoder12 = new TextDecoder();
+    let streamEvents12 = "";
+    while (true) {
+      const chunk = await reader12.read();
+      if (chunk.done) break;
+      streamEvents12 += decoder12.decode(chunk.value, { stream: true });
+    }
+
+    // 1. Assert node_failover emitted with dynamic handover notice
+    assert.ok(streamEvents12.includes("event: node_failover"), "Must emit node_failover event when cloud model fails");
+    assert.ok(streamEvents12.includes("全对称自由流转至端侧 WebGPU 备用模型"), "Failover event must cite symmetrical handover to client WebGPU");
+    assert.ok(streamEvents12.includes("Standby Browser WebGPU"), "Fallback model must be Standby Browser WebGPU");
+
+    // 2. Assert client_exec_request emitted for client execution
+    assert.ok(streamEvents12.includes("event: client_exec_request"), "Must emit client_exec_request for client WebGPU execution");
+
+    // 3. Assert dag_complete emitted
+    assert.ok(streamEvents12.includes("event: dag_complete"), "Must emit dag_complete on tail node handover");
+
+    // 4. Assert Conservation of Credits: User balance MUST BE EXACTLY 5 (1 pre-deducted credit was refunded!)
+    const user12InDb = store.users.find(u => u.user_id === testUser12Id);
+    assert.equal(user12InDb?.credits, 5, "Conservation of Credits: pre-deducted credit must be refunded when failing over to free WebGPU browser model!");
+    console.log("  ✓ BUG-02: Cloud -> Browser WebGPU symmetrical dynamic handover with refund & zero crash: PASSED");
+  } finally {
+    globalThis.fetch = origFetch12;
+  }
+
+  // 12.2 BUG-04: Intermediate WebGPU Downgrade Interruption (Zero Credits, No dag_complete)
+  const testUser12bId = "usr_downgrade_zero_credits";
+  store.users.push({
+    user_id: testUser12bId,
+    username: "ZeroCreditsDowngrade",
+    email: "zero@nanomesh.local",
+    password_hash: "hash",
+    credits: 0, // Zero credits!
+    token_version: 1
+  });
+
+  const testDag12b = {
+    template: {
+      template_id: "tpl_downgrade_test",
+      name_zh: "降级失败测试",
+      name_en: "Downgrade Fail Test",
+      desc_zh: "测试降级中断",
+      desc_en: "Test downgrade abort",
+      roles: [],
+      head_modalities: ["text"],
+      tail_modalities: ["text"],
+      priority: 1,
+      status: "active"
+    },
+    nodes: [
+      {
+        role: {
+          role_id: "role_browser_intermediate",
+          name_zh: "中间端侧岗",
+          name_en: "Browser Intermediate",
+          in_modalities: ["text"],
+          out_modalities: ["text"],
+          in_degree: 0,
+          out_degree: 1,
+          requisition_tags: []
+        },
+        selected_model: {
+          model_id: "m_browser_inter",
+          display_name: "Intermediate WebGPU",
+          provider: "Client",
+          endpoint: "onnx-community/model",
+          modalities: ["text"],
+          tags: [],
+          context_window: 2048,
+          max_concurrency: 10,
+          active_connections: 0,
+          precision: 0.9,
+          user_rating: 4.5,
+          usage_count: 0,
+          status: "active",
+          is_generalist: 1,
+          prior_score: 0.8,
+          scenario_anchors: [],
+          cost_per_1k_tokens: 0,
+          inference_target: "browser" as const
+        },
+        standby_models: [
+          {
+            model_id: "m_cloud_standby",
+            display_name: "Cloud Standby Model",
+            provider: "Cloud",
+            endpoint: "https://api.cloud-standby.com",
+            modalities: ["text"],
+            tags: [],
+            context_window: 2048,
+            max_concurrency: 10,
+            active_connections: 0,
+            precision: 0.9,
+            user_rating: 4.5,
+            usage_count: 0,
+            status: "active",
+            is_generalist: 1,
+            prior_score: 0.7,
+            scenario_anchors: [],
+            cost_per_1k_tokens: 1,
+            inference_target: "cloud" as const
+          }
+        ]
+      },
+      {
+        role: {
+          role_id: "role_tail_worker",
+          name_zh: "末端岗",
+          name_en: "Tail Worker",
+          in_modalities: ["text"],
+          out_modalities: ["text"],
+          in_degree: 1,
+          out_degree: 0,
+          requisition_tags: []
+        },
+        selected_model: {
+          model_id: "m_tail_worker",
+          display_name: "Tail Worker",
+          provider: "Cloud",
+          endpoint: "https://api.tail-worker.com",
+          modalities: ["text"],
+          tags: [],
+          context_window: 2048,
+          max_concurrency: 10,
+          active_connections: 0,
+          precision: 0.9,
+          user_rating: 4.5,
+          usage_count: 0,
+          status: "active",
+          is_generalist: 1,
+          prior_score: 0.7,
+          scenario_anchors: [],
+          cost_per_1k_tokens: 1,
+          inference_target: "cloud" as const
+        },
+        standby_models: []
+      }
+    ],
+    execution_order: ["role_browser_intermediate", "role_tail_worker"],
+    candidate_templates: [],
+    is_incremental_refinement: false,
+    is_security_violation: false,
+    is_unreachable: false
+  };
+
+  const downgradeStream = await executeDAGStream(env, testDag12b as any, {
+    envelope_id: "env_downgrade_001",
+    session_id: "sess_downgrade_001",
+    user_id: testUser12bId,
+    round_index: 1,
+    instruction_payload: "测试中间节点降级失败中断",
+    metadata: { estimated_input_tokens: 50 },
+    assets_manifest: []
+  }, {
+    userId: testUser12bId,
+    hasPreDeducted: false,
+    clientCapabilities: { webgpu_handover_v3: false }
+  });
+
+  const reader12b = downgradeStream.getReader();
+  const decoder12b = new TextDecoder();
+  let streamEvents12b = "";
+  while (true) {
+    const chunk = await reader12b.read();
+    if (chunk.done) break;
+    streamEvents12b += decoder12b.decode(chunk.value, { stream: true });
+  }
+
+  // Assert error event emitted
+  assert.ok(streamEvents12b.includes("event: error"), "Must emit error event when user has insufficient credits for downgrade");
+  assert.ok(streamEvents12b.includes("当前可用积分不足，无法降级调用云端备用模型"), "Error message must state insufficient credits for downgrade");
+
+  // Assert BUG-04 fix: dag_complete MUST NOT be emitted!
+  assert.ok(!streamEvents12b.includes("event: dag_complete"), "BUG-04: Terminated downgrade stream MUST NOT emit contradictory dag_complete event!");
+  console.log("  ✓ BUG-04: Intermediate WebGPU downgrade failure immediately aborts and avoids contradictory dag_complete: PASSED");
+
+  // 12.3 BUG-05: Admin Route Precise PATCH Matching (Reject Catch-All)
+  const patchAdminUnknownReq = new Request("https://nanomesh.local/api/admin/arbitrary_nonexistent_route", {
+    method: "PATCH",
+    headers: adminReqHeaders,
+    body: JSON.stringify({ dummy: true })
+  });
+  const patchAdminRes = await worker.fetch(patchAdminUnknownReq, env);
+  assert.equal(patchAdminRes.status, 404, "BUG-05: Unmatched PATCH route under /api/admin must return 404 Not Found");
+  console.log("  ✓ BUG-05: Admin PATCH route guard strictly returns 404 on unmapped subpaths: PASSED");
+
   console.log("\n==================================================");
-  console.log("   🎉 ALL 11 INTEGRATION SCENARIOS PASSED (100%)! ");
+  console.log("   🎉 ALL 12 INTEGRATION SCENARIOS PASSED (100%)! ");
   console.log("==================================================");
 }
 
