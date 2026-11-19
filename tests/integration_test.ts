@@ -547,6 +547,9 @@ function createMockAI() {
         return { answers };
       }
       if (model === "@cf/openai/whisper") {
+        if (!(input.audio instanceof Uint8Array)) {
+          throw new Error("DEFECT-03 Violation: Workers AI Whisper input.audio must be a compact Uint8Array, not Array<number>!");
+        }
         return { text: "Mock Whisper transcription from voice audio stream." };
       }
       if (model === "@cf/black-forest-labs/flux-1-schnell") {
@@ -2010,6 +2013,131 @@ async function runIntegrationTests() {
   assert.ok(zeroByteStreamText.includes("event: asset_chunk"), "Must emit asset_chunk after standby FLUX succeeds");
   assert.ok(zeroByteStreamText.includes("dag_complete"), "Must complete successfully after transparent failover");
   console.log("  ✓ AUDIT-MM-02: FLUX 0-byte generation cleanly triggers node_failover and completes with standby model: PASSED");
+
+  // 10.6 DEFECT-02: Tail Heavy Image Node Streaming Bypass & JSON Recovery
+  const testUser10cId = "usr_multimodal_003_heavytail";
+  store.users.push({
+    user_id: testUser10cId,
+    username: "HeavyTailTester",
+    email: "heavytail@test.local",
+    password_hash: "hash_test",
+    credits: 20,
+    referral_code: "HEAVYTAIL",
+    referred_by: null,
+    token_version: 1
+  });
+  const user10cToken = await signJWT({ userId: testUser10cId, role: "user", tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  const user10cReqHeaders = {
+    "Authorization": `Bearer ${user10cToken}`,
+    "Content-Type": "application/json"
+  };
+
+  // Register a Heavy Commercial Image Model (e.g. DALL-E endpoint returning JSON)
+  const heavyDalleEndpoint = "https://mock-heavy-dalle.internal/v1/images/generations";
+  store.models.push({
+    model_id: "heavy_dalle_3",
+    display_name: "DALL-E 3 Heavy Commercial",
+    provider: "OpenAI Compatible",
+    endpoint: heavyDalleEndpoint,
+    modalities: '["text", "image"]',
+    in_modalities: '["text"]',
+    out_modalities: '["image"]',
+    tags: '["#image_generation", "#commercial"]',
+    context_window: 4096,
+    max_concurrency: 10,
+    active_connections: 0,
+    precision: 0.99,
+    user_rating: 4.99,
+    usage_count: 50,
+    cost_per_1k_tokens: 0.0,
+    cost_per_invocation: 5.0,
+    status: "active",
+    is_generalist: 0,
+    prior_score: 1.0,
+    scenario_anchors: '["image_gen"]',
+    inference_target: "heavy",
+    auth_mode: "none",
+    api_format: "openai_compat"
+  });
+
+  store.dag_templates.push({
+    template_id: "tpl_heavy_dalle_tail",
+    name_zh: "商用大模型生图单节点",
+    name_en: "Heavy DALL-E Tail Gen",
+    desc_zh: "商用生图单节点作为末端",
+    desc_en: "Commercial image generation at tail",
+    scenario_category: "multimodal",
+    scenario_anchor: "image_gen",
+    roles: JSON.stringify(["role_flux_draw"]),
+    role_sequence: JSON.stringify(["role_flux_draw"]),
+    edges: JSON.stringify([]),
+    head_modalities: JSON.stringify(["text"]),
+    tail_modalities: JSON.stringify(["image"]),
+    status: "active",
+    priority: 10
+  });
+
+  const origFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const urlStr = typeof input === "string" ? input : (input instanceof URL ? input.toString() : input.url);
+      if (urlStr.includes("mock-heavy-dalle.internal")) {
+        // Return standard commercial JSON response format (b64_json)
+        return new Response(JSON.stringify({
+          data: [
+            { b64_json: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" }
+          ]
+        }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      return origFetch(input, init);
+    };
+
+    const heavyTailEnvelope: UnifiedProtocolEnvelope = {
+      envelope_id: "env_heavytail_001",
+      session_id: "sess_heavytail_001",
+      user_id: testUser10cId,
+      round_index: 1,
+      instruction_payload: "Draw a commercial poster of neon cyberpunk city",
+      metadata: { estimated_input_tokens: 100 },
+      assets_manifest: [],
+      constraint_context: { target_language: "zh", output_style: "vibrant" }
+    };
+
+    const heavyTailReq = new Request("https://nanomesh.local/api/chat", {
+      method: "POST",
+      headers: user10cReqHeaders,
+      body: JSON.stringify({
+        envelope: heavyTailEnvelope,
+        reRouteMode: "switch_template",
+        chosenTemplateId: "tpl_heavy_dalle_tail"
+      })
+    });
+
+    const heavyTailRes = await handleChat(heavyTailReq, env);
+    assert.equal(heavyTailRes.status, 200, "Heavy tail image node request must return 200 SSE stream");
+    const heavyStreamText = await heavyTailRes.text();
+    assert.ok(heavyStreamText.includes("event: asset_chunk"), "DEFECT-02 Verified: Heavy tail node must bypass SSE parseAIResponse and emit asset_chunk");
+    assert.ok(heavyStreamText.includes("dag_complete"), "Must complete successfully without parseAIResponse empty stream failure");
+    console.log("  ✓ DEFECT-02: Commercial Heavy Image Generation at tail node correctly executes and emits asset_chunk: PASSED");
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+
+  // 10.7 DEFECT-04: D1 0021 Image Generation Seed Migration Verification
+  const fsMod = await import("node:fs");
+  const pathMod = await import("node:path");
+  const migration0021Path = pathMod.resolve(process.cwd(), "migrations", "0021_add_image_generation_seed.sql");
+  assert.ok(fsMod.existsSync(migration0021Path), "0021 migration file must exist on disk");
+  const sql0021 = fsMod.readFileSync(migration0021Path, "utf-8");
+  assert.ok(sql0021.includes("role_flux_draw"), "0021 migration must seed role_flux_draw");
+  assert.ok(sql0021.includes("tpl-text-to-image"), "0021 migration must seed tpl-text-to-image");
+  assert.ok(sql0021.includes("in_modalities") && sql0021.includes("out_modalities"), "Must match real dag_roles and dag_templates schema");
+  assert.ok(!sql0021.includes("topology"), "Must NOT contain fake topology column");
+  assert.ok(!sql0021.includes("required_capabilities"), "Must NOT contain fake required_capabilities column");
+  console.log("  ✓ DEFECT-04: D1 0021 migration file verified with valid table schema: PASSED");
 
   console.log("\n==================================================");
   console.log("   🎉 ALL 10 INTEGRATION SCENARIOS PASSED (100%)! ");

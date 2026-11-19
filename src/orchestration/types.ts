@@ -129,6 +129,8 @@ export interface SessionAssetLedgerItem {
   file_size?: number;
   introduced_round?: number;
   branch_id?: string;
+  r2_key?: string;
+  origin?: 'upload' | 'generated';
 }
 
 export interface MediaArtifact {

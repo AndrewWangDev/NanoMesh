@@ -22,6 +22,8 @@ export interface MultiRoundIntentAssetOptions {
     modality: string;
     introduced_round?: number;
     branch_id?: string;
+    r2_key?: string;
+    origin?: string;
   }>;
   activeBranchSummary?: string;
   activeBranchId?: string;

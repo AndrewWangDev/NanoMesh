@@ -1291,7 +1291,8 @@ export async function executeDAGStream(
                       throw new Error(`HTTP ${fRes.status}: ${errText || fRes.statusText}`);
                     }
 
-                    if (isTailNode && fRes.body) {
+                    const isMediaOut = currentCandidate.out_modalities?.some(m => m === 'image' || m === 'audio');
+                    if (isTailNode && fRes.body && !isMediaOut) {
                       return await parseAIResponse(fRes.body, (chunkText) => {
                         if (chunkText) {
                           didStreamChunks = true;
@@ -1435,7 +1436,7 @@ export async function executeDAGStream(
                   // Workers AI Whisper ASR Model
                   const aiRes: any = await callWithTimeout(
                     () => env.AI.run(endpoint as any, {
-                      audio: [...audioBytes]
+                      audio: audioBytes
                     }),
                     45000,
                     abortController.signal

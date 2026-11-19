@@ -457,10 +457,14 @@ async function runUnitTests() {
     const files0017 = files.filter(f => f.startsWith("0017_"));
     const files0018 = files.filter(f => f.startsWith("0018_"));
     const files0019 = files.filter(f => f.startsWith("0019_"));
+    const files0020 = files.filter(f => f.startsWith("0020_"));
+    const files0021 = files.filter(f => f.startsWith("0021_"));
     assert.equal(files0017.length, 1, `There must be exactly one 0017_ migration file, but found: ${files0017.join(", ")}`);
     assert.equal(files0018.length, 1, `There must be exactly one 0018_ migration file, but found: ${files0018.join(", ")}`);
     assert.equal(files0019.length, 1, `There must be exactly one 0019_ migration file, but found: ${files0019.join(", ")}`);
-    console.log("  ✓ Migration files strict version monotonicity (0017, 0018, 0019 resolved): PASSED");
+    assert.equal(files0020.length, 1, `There must be exactly one 0020_ migration file, but found: ${files0020.join(", ")}`);
+    assert.equal(files0021.length, 1, `There must be exactly one 0021_ migration file, but found: ${files0021.join(", ")}`);
+    console.log("  ✓ Migration files strict version monotonicity (0017~0021 resolved): PASSED");
   }
 
   // 9.2 AC-05: Attention Sink Linear Slicing Compaction Benchmark & Accuracy
@@ -827,6 +831,33 @@ async function runUnitTests() {
   const p0Ctx = sliceEnvelopeForNode(intermediateNode, testEnvelope, "Step 0 finished", "Step0Role", upstreamBundle);
   assert.equal(p0Ctx.claimed_assets.length, 1, "Intermediate node must claim P0 generated media");
   assert.equal(p0Ctx.claimed_assets[0].asset_id, "gen-img-0", "Must claim the directly generated asset from previous step");
+
+  // DEFECT-06: Reverse Chronological Slicing (Latest First)
+  const multiMediaBundle: any = {
+    text_context: "Step 1 finished enhancing.",
+    generated_media: [
+      {
+        asset_id: "gen-img-draft",
+        modality: "image",
+        mime_type: "image/png",
+        file_size: 1024,
+        r2_key: "tmp/usr/sess/gen-img-draft.png",
+        source_digest: "digest-draft"
+      },
+      {
+        asset_id: "gen-img-refined-latest",
+        modality: "image",
+        mime_type: "image/png",
+        file_size: 4096,
+        r2_key: "tmp/usr/sess/gen-img-refined.png",
+        source_digest: "digest-refined"
+      }
+    ],
+    inherited_assets: []
+  };
+  const p0LatestCtx = sliceEnvelopeForNode(intermediateNode, testEnvelope, "Step 1 finished", "Step1Role", multiMediaBundle);
+  assert.equal(p0LatestCtx.claimed_assets.length, 1, "Intermediate node must claim exactly one matching media");
+  assert.equal(p0LatestCtx.claimed_assets[0].asset_id, "gen-img-refined-latest", "DEFECT-06: Must reverse-search to claim the latest generated asset instead of older draft");
 
   // P1: When previous step produced NO media, intermediate node penetrates to unconsumed user initial asset
   const upstreamTextOnlyBundle: any = {

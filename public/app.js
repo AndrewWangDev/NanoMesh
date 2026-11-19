@@ -3505,11 +3505,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Build Session Asset Ledger
     const sessionAssetLedger = (window.sessionAssets || []).map(a => ({
-      asset_id: a.assetId || a.name,
+      asset_id: a.assetId || a.id || a.name,
       filename: a.name || 'attachment',
       modality: a.modality || resolveModality(a),
+      mime_type: a.mime_type || a.type,
       introduced_round: a.introducedRound || 1,
-      branch_id: a.branchId || 'main'
+      branch_id: a.branchId || 'main',
+      r2_key: a.r2_key,
+      origin: a.origin || 'upload'
     }));
 
     // Retrieve active branch context & construct Branch Catalog
@@ -4524,18 +4527,51 @@ document.addEventListener('DOMContentLoaded', async () => {
       const r2Key = data.r2_key;
       const previewUrl = data.preview_url || `/api/assets/${assetId}?key=${encodeURIComponent(r2Key || '')}`;
 
-      const respEl = document.getElementById(assistantId);
-      if (respEl) {
-        let mediaGallery = respEl.querySelector('.chat-multimodal-gallery');
+      // Register generated media artifact into client session assets ledger for multi-turn continuity
+      window.sessionAssets = window.sessionAssets || [];
+      const existingAsset = window.sessionAssets.find(a => (a.assetId || a.id) === assetId);
+      if (!existingAsset) {
+        window.sessionAssets.push({
+          id: assetId,
+          assetId: assetId,
+          name: data.role_name ? `${data.role_name}_产物.png` : (isEn ? `Generated_${assetId.slice(0, 8)}.png` : `生成资产_${assetId.slice(0, 8)}.png`),
+          modality: modality || 'image',
+          mime_type: data.mime_type || (modality === 'image' ? 'image/png' : 'audio/wav'),
+          url: previewUrl,
+          r2_key: r2Key,
+          origin: 'generated',
+          introducedRound: window.currentChatTurn || 1,
+          branchId: window.activeBranchId || 'main',
+          isNew: false
+        });
+      }
+
+      // 1. Locate the text container and find its enclosing response wrapper / assistant bubble
+      const textEl = document.getElementById('response-text-' + assistantId);
+      const outerRow = document.getElementById(assistantId);
+      const responseWrapper = textEl?.closest('.chat-response-wrapper') || 
+                              outerRow?.querySelector('.chat-response-wrapper') || 
+                              outerRow;
+
+      if (responseWrapper) {
+        let mediaGallery = responseWrapper.querySelector('.chat-multimodal-gallery');
         if (!mediaGallery) {
           mediaGallery = document.createElement('div');
           mediaGallery.className = 'chat-multimodal-gallery';
+          mediaGallery.id = `gallery-${assistantId}`;
           mediaGallery.style.marginTop = '12px';
           mediaGallery.style.marginBottom = '12px';
           mediaGallery.style.display = 'flex';
           mediaGallery.style.flexWrap = 'wrap';
           mediaGallery.style.gap = '8px';
-          respEl.appendChild(mediaGallery);
+
+          // Insert gallery right after the text container (before the action buttons) to protect from markdown innerHTML rewrites
+          const actionsEl = responseWrapper.querySelector('.chat-response-actions');
+          if (actionsEl) {
+            responseWrapper.insertBefore(mediaGallery, actionsEl);
+          } else {
+            responseWrapper.appendChild(mediaGallery);
+          }
         }
 
         if (modality === 'image') {
