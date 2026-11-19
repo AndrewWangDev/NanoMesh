@@ -999,8 +999,151 @@ async function runUnitTests() {
   assert.ok(appJsContent.includes("r2_key: a.r2_key || a.r2Key"), "sessionAssetLedger must support dual-key r2_key");
   console.log("  ✓ FINDING-NEW-01: Client payload dual-key serialization compatibility: PASSED");
 
+  // ----------------------------------------------------
+  // SUITE 12: Audit Report 8 Remediations (BUG-02, BUG-03, BUG-06)
+  // ----------------------------------------------------
+  console.log("\n[Suite 12] Audit Report 8 Remediations (BUG-02, BUG-03, BUG-06)");
+
+  // 12.1 BUG-02: Multi-Node Masked Head Node does NOT swallow cognitive documents
+  const roleVLMHead: DAGRole = {
+    role_id: "role_vlm_perception",
+    name_zh: "视觉全景感知",
+    name_en: "VLM Perception",
+    in_modalities: ["image", "text"],
+    out_modalities: ["text"],
+    in_degree: 0,
+    out_degree: 1, // multi-node head node -> is_head_masked = true
+    requisition_tags: ["vlm"]
+  };
+  const modelVLM: ModelMetadata = {
+    model_id: "cf_vlm_head",
+    display_name: "Llama 3.2 Vision",
+    provider: "Workers AI",
+    endpoint: "cf://vlm",
+    modalities: ["image", "text"],
+    in_modalities: ["image", "text"],
+    out_modalities: ["text"],
+    tags: ["vlm"],
+    context_window: 8192,
+    max_concurrency: 10,
+    active_connections: 0,
+    precision: 0.9,
+    user_rating: 4.8,
+    usage_count: 100,
+    cost_per_1k_tokens: 0.1,
+    status: "active",
+    is_generalist: 0,
+    prior_score: 1.0,
+    scenario_anchors: []
+  };
+  const nodeVLM = {
+    role: roleVLMHead,
+    selected_model: modelVLM,
+    standby_models: [],
+    score_details: { model: modelVLM, score: 1, sim: 1, concurrency_penalty: 0, specialist_score: 1 },
+    downgraded: false,
+    claimed_assets: []
+  };
+
+  const mixedEnvelope = {
+    envelope_id: "env_mixed_01",
+    session_id: "sess_mixed_01",
+    user_id: "usr_test",
+    round_index: 1,
+    instruction_payload: "请分析此海报并结合文档给出策略",
+    metadata: { estimated_input_tokens: 50 },
+    assets_manifest: [
+      {
+        asset_id: "asset_img_01",
+        modality: "image" as const,
+        mime_type: "image/png",
+        file_size: 1024,
+        r2_key: "tmp/usr_test/sess_mixed_01/img1.png",
+        consumed: false
+      },
+      {
+        asset_id: "asset_doc_01",
+        modality: "text_doc" as const,
+        mime_type: "text/plain",
+        file_size: 2048,
+        in_memory_text: "重要财务与营销规划战略内容：2027年实现全面盈利目标",
+        consumed: false
+      }
+    ]
+  };
+
+  // Node 0 (VLM head node) executes sliceEnvelopeForNode
+  const node0Ctx = sliceEnvelopeForNode(nodeVLM, mixedEnvelope);
+  assert.equal(node0Ctx.is_head_masked, true, "Node 0 must have instruction masking");
+  assert.equal(node0Ctx.claimed_assets.length, 1, "Node 0 must ONLY claim physical sensory media (image)");
+  assert.equal(node0Ctx.claimed_assets[0].asset_id, "asset_img_01");
+  assert.equal(mixedEnvelope.assets_manifest[0].consumed, true, "Image asset must be marked consumed");
+  assert.equal(mixedEnvelope.assets_manifest[1].consumed, false, "Document asset must NOT be consumed by masked head node!");
+
+  // Node 1 (Downstream reasoning node) executes sliceEnvelopeForNode
+  const roleDownstreamReasoner: DAGRole = {
+    role_id: "role_synthesizer",
+    name_zh: "综合推理",
+    name_en: "Synthesizer",
+    in_modalities: ["text"],
+    out_modalities: ["text"],
+    in_degree: 1,
+    out_degree: 0,
+    requisition_tags: ["reasoning"]
+  };
+  const nodeDownstream = {
+    role: roleDownstreamReasoner,
+    selected_model: { ...modelVLM, in_modalities: ["text"], modalities: ["text"] },
+    standby_models: [],
+    score_details: { model: modelVLM, score: 1, sim: 1, concurrency_penalty: 0, specialist_score: 1 },
+    downgraded: false,
+    claimed_assets: []
+  };
+
+  const node1Ctx = sliceEnvelopeForNode(nodeDownstream, mixedEnvelope, "上游视觉感知：画面显示海报有科技感蓝紫光斑。");
+  assert.equal(node1Ctx.is_downstream, true, "Node 1 is downstream");
+  assert.equal(node1Ctx.claimed_assets.length, 1, "Node 1 must claim the unconsumed document asset");
+  assert.equal(node1Ctx.claimed_assets[0].asset_id, "asset_doc_01");
+  assert.equal(mixedEnvelope.assets_manifest[1].consumed, true, "Document asset is now consumed by downstream node");
+  console.log("  ✓ BUG-02: Head node leaves cognitive document unconsumed and downstream node claims it: PASSED");
+
+  // 12.2 BUG-03: isSafeExternalUrl blocks SSRF addresses
+  assert.equal(isSafeExternalUrl("http://169.254.169.254/latest/meta-data"), false, "Must block AWS/Cloud metadata IP");
+  assert.equal(isSafeExternalUrl("http://127.0.0.1:8080/secret.png"), false, "Must block loopback IPv4");
+  assert.equal(isSafeExternalUrl("http://localhost:3000/image.png"), false, "Must block localhost");
+  assert.equal(isSafeExternalUrl("https://internal.service.local/image.png"), false, "Must block .local domains");
+  assert.equal(isSafeExternalUrl("https://cluster.internal/image.png"), false, "Must block .internal domains");
+  assert.equal(isSafeExternalUrl("https://images.unsplash.com/photo-123.jpg"), true, "Must permit safe public image CDN");
+  console.log("  ✓ BUG-03: SSRF firewall strictly blocks metadata, loopback and internal hosts: PASSED");
+
+  // 12.3 BUG-06: Subsistence Law normalizes 'pdf' modality and avoids 400 starvation
+  const tplText: DAGTemplate = {
+    template_id: "tpl_doc_analysis",
+    name_zh: "单节点文本分析",
+    name_en: "Text Analysis",
+    desc_zh: "单节点处理纯文本与文档",
+    desc_en: "Single node text",
+    head_modalities: ["text"],
+    tail_modalities: ["text"],
+    roles: [{
+      role_id: "role_text_doc",
+      name_zh: "文本分析员",
+      name_en: "Text Analyst",
+      in_modalities: ["text"],
+      out_modalities: ["text"],
+      in_degree: 0,
+      out_degree: 0,
+      requisition_tags: []
+    }],
+    priority: 1,
+    status: "active"
+  };
+  const matchedPdfTemplates = filterTemplatesBySubsistence([tplText], ["pdf"]);
+  assert.equal(matchedPdfTemplates.length, 1, "Raw 'pdf' modality must be normalized to 'text_doc' without crashing template subsistence");
+  console.log("  ✓ BUG-06: Raw 'pdf' modality normalized to 'text_doc' and passes subsistence: PASSED");
+
   console.log("\n==================================================");
-  console.log("   🎉 ALL 11 UNIT TEST SUITES PASSED (100%)!      ");
+  console.log("   🎉 ALL 12 UNIT TEST SUITES PASSED (100%)!      ");
   console.log("==================================================");
 }
 

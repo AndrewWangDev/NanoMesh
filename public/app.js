@@ -1227,7 +1227,12 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
           } catch (pdfErr) {
             console.error('PDF parsing error:', pdfErr);
-            localToast(isEn ? 'PDF parse failed, falling back to raw upload' : 'PDF 解析失败，降级为原始上传', 'warning');
+            localToast(isEn ? 'PDF parse failed (encrypted or corrupted)' : '该 PDF 文档解析失败（可能受密码保护或文件损坏），已忽略', 'warning');
+            continue;
+          }
+          if (!inMemoryText) {
+            localToast(isEn ? 'PDF contains no readable text or scanned pages' : '该 PDF 未包含可提取的文本或页面，已忽略', 'warning');
+            continue;
           }
         } else if (fileNameLower.endsWith('.csv')) {
           const rawText = await file.text();
@@ -3435,8 +3440,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const mime = (f.type || f.mime_type || '').toLowerCase();
         if (mime.startsWith('image/')) modality = 'image';
         else if (mime.startsWith('audio/')) modality = 'audio';
-        else if ((f.name || '').toLowerCase().endsWith('.pdf') || mime.includes('pdf')) modality = 'pdf';
-        else modality = 'text';
+        else modality = 'text_doc';
       }
       return modality;
     };

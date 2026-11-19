@@ -2033,7 +2033,7 @@ async function runIntegrationTests() {
   };
 
   // Register a Heavy Commercial Image Model (e.g. DALL-E endpoint returning JSON)
-  const heavyDalleEndpoint = "https://mock-heavy-dalle.internal/v1/images/generations";
+  const heavyDalleEndpoint = "https://api.mock-heavy-dalle.com/v1/images/generations";
   store.models.push({
     model_id: "heavy_dalle_3",
     display_name: "DALL-E 3 Heavy Commercial",
@@ -2081,7 +2081,14 @@ async function runIntegrationTests() {
   try {
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const urlStr = typeof input === "string" ? input : (input instanceof URL ? input.toString() : input.url);
-      if (urlStr.includes("mock-heavy-dalle.internal")) {
+      if (urlStr.includes("api.mock-heavy-dalle.com")) {
+        // Verify payload contract for OpenAI Images API (BUG-04)
+        if (init?.body) {
+          const parsedBody = JSON.parse(init.body as string);
+          if (!parsedBody.prompt || !parsedBody.response_format) {
+            throw new Error("Mock received invalid Image API payload: missing prompt or response_format");
+          }
+        }
         // Return standard commercial JSON response format (b64_json)
         return new Response(JSON.stringify({
           data: [
@@ -2139,8 +2146,173 @@ async function runIntegrationTests() {
   assert.ok(!sql0021.includes("required_capabilities"), "Must NOT contain fake required_capabilities column");
   console.log("  ✓ DEFECT-04: D1 0021 migration file verified with valid table schema: PASSED");
 
+  // -----------------------------------------------------------------------
+  // SCENARIO 11: Audit Report 8 Integration Remediations (BUG-01, BUG-05)
+  // -----------------------------------------------------------------------
+  console.log("\n[Scenario 11] Audit Report 8 Integration Remediations (BUG-01, BUG-05)");
+
+  // 11.1 BUG-01: Zero-credit billing bypass prevention via WebGPU fallback
+  const testUserZeroCreditId = "usr_zero_billing_01";
+  store.users.push({
+    user_id: testUserZeroCreditId,
+    username: "ZeroCreditUser",
+    email: "zero@nanomesh.local",
+    password_hash: "hash",
+    credits: 0,
+    referral_code: "REF-ZERO-001",
+    referred_by: null,
+    token_version: 1
+  });
+  const userZeroToken = await signJWT({ userId: testUserZeroCreditId, role: "user", tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  const userZeroReqHeaders = {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${userZeroToken}`
+  };
+
+  // User with 0 credits requests chat where client explicitly declares no WebGPU support (forces cloud standby)
+  const zeroCreditReq = new Request("https://nanomesh.local/api/chat", {
+    method: "POST",
+    headers: userZeroReqHeaders,
+    body: JSON.stringify({
+      envelope: {
+        envelope_id: "env_zero_001",
+        session_id: "sess_zero_001",
+        user_id: testUserZeroCreditId,
+        round_index: 1,
+        instruction_payload: "Test zero credit cloud execution",
+        metadata: { estimated_input_tokens: 50 },
+        assets_manifest: []
+      },
+      capabilities: { webgpu_handover_v3: false } // Explicitly disabled WebGPU
+    })
+  });
+  const zeroCreditRes = await handleChat(zeroCreditReq, env);
+  assert.equal(zeroCreditRes.status, 403, "BUG-01: Zero-credit user attempting cloud fallback must be blocked with HTTP 403");
+  const zeroCreditErrJson = await zeroCreditRes.json() as any;
+  assert.equal(zeroCreditErrJson.error, "insufficient_quota");
+  const userInDb = store.users.find(u => u.user_id === testUserZeroCreditId);
+  assert.equal(userInDb?.credits, 0, "User balance must remain 0 and not penetrated into negative");
+  console.log("  ✓ BUG-01: Zero-credit WebGPU fallback exploit successfully blocked with HTTP 403: PASSED");
+
+  // 11.2 BUG-05: Phase 2 Handshake 2PC & Non-destructive Recharging
+  const testUserHandshakeId = "usr_handshake_2pc_01";
+  store.users.push({
+    user_id: testUserHandshakeId,
+    username: "HandshakeUser",
+    email: "hs@nanomesh.local",
+    password_hash: "hash",
+    credits: 0, // Starts with 0 credits
+    referral_code: "REF-HS-001",
+    referred_by: null,
+    token_version: 1
+  });
+  const userHsToken = await signJWT({ userId: testUserHandshakeId, role: "user", tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  const userHsReqHeaders = {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${userHsToken}`
+  };
+
+  const testHandshakeId = "hs_2pc_test_001";
+  const handshakeExpiresAt = new Date(Date.now() + 300 * 1000).toISOString();
+  store.dag_handshakes.push({
+    handshake_id: testHandshakeId,
+    user_id: testUserHandshakeId,
+    session_id: "sess_hs_001",
+    template_id: webgpuArbitraryTemplateId,
+    next_step: 1,
+    status: "ISSUED",
+    expires_at: handshakeExpiresAt
+  });
+
+  const continuationToken = await signJWT({
+    jti: testHandshakeId,
+    sub: testUserHandshakeId,
+    sid: "sess_hs_001",
+    tid: webgpuArbitraryTemplateId,
+    nxt: 1
+  }, env.JWT_SECRET, 300);
+
+  // Attempt continuation with 0 credits
+  const continueWithZeroReq = new Request("https://nanomesh.local/api/chat/continue", {
+    method: "POST",
+    headers: userHsReqHeaders,
+    body: JSON.stringify({
+      continuation_token: continuationToken,
+      status: "success",
+      client_step_output: "Client WebGPU step 0 completed",
+      envelope: {
+        envelope_id: "env_hs_001",
+        session_id: "sess_hs_001",
+        user_id: testUserHandshakeId,
+        round_index: 1,
+        instruction_payload: "Continuation test",
+        metadata: { estimated_input_tokens: 50 },
+        assets_manifest: []
+      },
+      orchestration_options: { chosenTemplateId: webgpuArbitraryTemplateId }
+    })
+  });
+
+  const continueZeroRes = await handleChatContinue(continueWithZeroReq, env);
+  assert.equal(continueZeroRes.status, 403, "BUG-05: Zero-credit continue request must return 403 insufficient_quota");
+  const hsInDb = store.dag_handshakes.find(h => h.handshake_id === testHandshakeId);
+  assert.equal(hsInDb?.status, "ISSUED", "BUG-05: Handshake record must REMAIN 'ISSUED' (not prematurely burned to CONSUMED)");
+
+  // Top up user balance
+  const hsUserInDb = store.users.find(u => u.user_id === testUserHandshakeId);
+  if (hsUserInDb) hsUserInDb.credits = 5;
+
+  // Retry with the EXACT same continuation token!
+  const continueAfterTopupReq = new Request("https://nanomesh.local/api/chat/continue", {
+    method: "POST",
+    headers: userHsReqHeaders,
+    body: JSON.stringify({
+      continuation_token: continuationToken,
+      status: "success",
+      client_step_output: "Client WebGPU step 0 completed",
+      envelope: {
+        envelope_id: "env_hs_001",
+        session_id: "sess_hs_001",
+        user_id: testUserHandshakeId,
+        round_index: 1,
+        instruction_payload: "Continuation test",
+        metadata: { estimated_input_tokens: 50 },
+        assets_manifest: []
+      },
+      orchestration_options: { chosenTemplateId: webgpuArbitraryTemplateId }
+    })
+  });
+
+  const continueTopupRes = await handleChatContinue(continueAfterTopupReq, env);
+  assert.equal(continueTopupRes.status, 200, "BUG-05: Retried continuation after credit top-up must succeed with 200");
+  assert.equal(hsInDb?.status, "CONSUMED", "BUG-05: Handshake record must now be updated to 'CONSUMED'");
+
+  // Replay attempt with same consumed token
+  const continueReplayReq = new Request("https://nanomesh.local/api/chat/continue", {
+    method: "POST",
+    headers: userHsReqHeaders,
+    body: JSON.stringify({
+      continuation_token: continuationToken,
+      status: "success",
+      client_step_output: "Client WebGPU step 0 completed",
+      envelope: {
+        envelope_id: "env_hs_001",
+        session_id: "sess_hs_001",
+        user_id: testUserHandshakeId,
+        round_index: 1,
+        instruction_payload: "Continuation test",
+        metadata: { estimated_input_tokens: 50 },
+        assets_manifest: []
+      },
+      orchestration_options: { chosenTemplateId: webgpuArbitraryTemplateId }
+    })
+  });
+  const continueReplayRes = await handleChatContinue(continueReplayReq, env);
+  assert.equal(continueReplayRes.status, 409, "Anti-replay must reject consumed handshake with 409 Conflict");
+  console.log("  ✓ BUG-05: Handshake 2PC preserves ISSUED on 403, succeeds on top-up, and rejects replay: PASSED");
+
   console.log("\n==================================================");
-  console.log("   🎉 ALL 10 INTEGRATION SCENARIOS PASSED (100%)! ");
+  console.log("   🎉 ALL 11 INTEGRATION SCENARIOS PASSED (100%)! ");
   console.log("==================================================");
 }
 

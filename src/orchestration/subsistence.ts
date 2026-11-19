@@ -51,14 +51,17 @@ export function filterTemplatesBySubsistence(
   let hasUserText: boolean;
   let userModalitySet: Set<string>;
 
+  // BUG-06 Fix: Normalize legacy or non-standard document modalities ('pdf' -> 'text_doc')
+  const normalizeModality = (m: string) => (m === 'pdf' ? 'text_doc' : m);
+
   if (Array.isArray(userModalities)) {
-    const rawList = userModalities.length ? userModalities : ['text'];
+    const rawList = (userModalities.length ? userModalities : ['text']).map(normalizeModality);
     mediaModalities = rawList.filter(m => m !== 'text' && m !== 'text_doc');
     hasUserText = rawList.includes('text') || rawList.includes('text_doc');
     userModalitySet = new Set(rawList);
     if (hasUserText) userModalitySet.add('text');
   } else {
-    mediaModalities = userModalities.mediaModalities || [];
+    mediaModalities = (userModalities.mediaModalities || []).map(normalizeModality).filter(m => m !== 'text' && m !== 'text_doc');
     hasUserText = userModalities.hasUserText !== undefined ? userModalities.hasUserText : true;
     userModalitySet = new Set(mediaModalities);
     if (hasUserText) userModalitySet.add('text');
