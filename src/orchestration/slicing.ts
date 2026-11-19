@@ -37,9 +37,10 @@ export function sliceEnvelopeForNode(
   const requiredInModalities = new Set(node.role.in_modalities);
   const modelInModalities = new Set(node.selected_model.in_modalities || node.selected_model.modalities);
 
-  // 1. P0 Priority: Claim matching media generated directly by the preceding node
+  // 1. P0 Priority: Claim matching media generated directly by preceding nodes (Reverse Chronological: Latest First)
   if (previousBundle && previousBundle.generated_media && previousBundle.generated_media.length > 0) {
-    for (const media of previousBundle.generated_media) {
+    for (let i = previousBundle.generated_media.length - 1; i >= 0; i--) {
+      const media = previousBundle.generated_media[i];
       if (requiredInModalities.has(media.modality) && modelInModalities.has(media.modality)) {
         claimedAssets.push({
           asset_id: media.asset_id,

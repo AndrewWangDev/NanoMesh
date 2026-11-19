@@ -115,6 +115,8 @@ export async function handleChat(request: Request, env: Env, ctx?: ExecutionCont
       modality: string;
       introduced_round?: number;
       branch_id?: string;
+      r2_key?: string;
+      origin?: string;
     }>;
     activeBranchId?: string;
     activeBranchSummary?: string;
