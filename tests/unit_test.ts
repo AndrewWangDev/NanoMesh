@@ -855,6 +855,102 @@ async function runUnitTests() {
   assert.equal(geminiMultimodal.geminiContents[0].parts[1].inlineData.mimeType, "image/png", "Gemini inlineData mimeType must match");
   console.log("  ✓ Heavy Node Multimodal Message Assembly (OpenAI image_url & Gemini inlineData): PASSED");
 
+  // 11.5 AUDIT-MM-01: Generalized Subsistence Law for Reverse Multimodal Pipelines & Physical Invariance
+  const roleTextReasoner: DAGRole = {
+    role_id: "role_text_reasoner",
+    name_zh: "文本推导",
+    name_en: "Text Reasoner",
+    in_modalities: ["text"],
+    out_modalities: ["text"],
+    in_degree: 0,
+    out_degree: 1,
+    requisition_tags: ["#reasoning"]
+  };
+  const roleVisionVerifier: DAGRole = {
+    role_id: "role_vision_verifier",
+    name_zh: "视觉核验",
+    name_en: "Vision Verifier",
+    in_modalities: ["image"],
+    out_modalities: ["text"],
+    in_degree: 1,
+    out_degree: 0,
+    requisition_tags: ["#vision"]
+  };
+
+  // Reverse Pipeline: Step 0 text reasoning -> Step 1 vision verification
+  const tplReversePipeline: DAGTemplate = {
+    template_id: "tpl_reverse_pipeline",
+    name_zh: "先文后图反向流水线",
+    name_en: "Text-First Vision Pipeline",
+    desc_zh: "先由文本模型分析背景，再由视觉模型核验图片",
+    desc_en: "Text analysis followed by vision inspection",
+    head_modalities: ["text"],
+    tail_modalities: ["text"],
+    roles: [roleTextReasoner, roleVisionVerifier],
+    priority: 10,
+    status: "active"
+  };
+
+  // Single-node Vision Pipeline: exactly 1 role requiring image
+  const tplSingleVision: DAGTemplate = {
+    template_id: "tpl_single_vision",
+    name_zh: "单工序视觉质检",
+    name_en: "Single Vision Inspection",
+    desc_zh: "单工序直接解析图片",
+    desc_en: "Single stage vision inspection",
+    head_modalities: ["image"],
+    tail_modalities: ["text"],
+    roles: [{ ...roleVisionVerifier, in_degree: 0, out_degree: 0 }],
+    priority: 5,
+    status: "active"
+  };
+
+  // Single-node Pure Text Pipeline: exactly 1 role requiring text
+  const tplSingleText: DAGTemplate = {
+    template_id: "tpl_single_text",
+    name_zh: "单工序文本对话",
+    name_en: "Single Text Chat",
+    desc_zh: "单工序纯文本",
+    desc_en: "Single stage text",
+    head_modalities: ["text"],
+    tail_modalities: ["text"],
+    roles: [{ ...roleTextReasoner, in_degree: 0, out_degree: 0 }],
+    priority: 5,
+    status: "active"
+  };
+
+  // Context: User typed text ("请先推导再看图") AND uploaded an image
+  const mixedContext = { mediaModalities: ["image"], hasUserText: true };
+
+  // 1. Reverse pipeline MUST pass Generalized Subsistence Law!
+  const reversePassed = filterTemplatesBySubsistence([tplReversePipeline], mixedContext);
+  assert.equal(reversePassed.length, 1, "Reverse pipeline (text -> image) must pass when user supplies text + image");
+
+  // 2. Single-node Vision pipeline MUST pass! (Physical media exact equivalence M(A_user) ≡ M(N_in) is satisfied)
+  const singleVisionPassed = filterTemplatesBySubsistence([tplSingleVision], mixedContext);
+  assert.equal(singleVisionPassed.length, 1, "Single-node vision pipeline must pass when user uploaded image (with prompt)");
+
+  // 3. Single-node Pure Text pipeline MUST FAIL! (Cannot drop user's uploaded physical image)
+  const singleTextPassed = filterTemplatesBySubsistence([tplSingleText], mixedContext);
+  assert.equal(singleTextPassed.length, 0, "Single-node text pipeline must be rejected when user uploaded an image");
+
+  // 4. Orphan test: Pipeline without image consumption must FAIL when image is uploaded
+  const tplTwoStageTextOnly: DAGTemplate = {
+    template_id: "tpl_two_stage_text",
+    name_zh: "两阶段纯文本",
+    name_en: "Two-stage text",
+    desc_zh: "两阶段纯文本",
+    desc_en: "Two-stage text",
+    head_modalities: ["text"],
+    tail_modalities: ["text"],
+    roles: [roleTextReasoner, { ...roleTextReasoner, in_degree: 1, out_degree: 0 }],
+    priority: 5,
+    status: "active"
+  };
+  const orphanRejected = filterTemplatesBySubsistence([tplTwoStageTextOnly], mixedContext);
+  assert.equal(orphanRejected.length, 0, "Pipeline ignoring user's physical image must be rejected by No-Orphan Axiom");
+  console.log("  ✓ AUDIT-MM-01: Generalized Subsistence Law for Reverse Multimodal Pipelines & Physical Invariance: PASSED");
+
   console.log("\n==================================================");
   console.log("   🎉 ALL 11 UNIT TEST SUITES PASSED (100%)!      ");
   console.log("==================================================");

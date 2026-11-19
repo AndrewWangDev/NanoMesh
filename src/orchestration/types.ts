@@ -24,6 +24,7 @@ export interface ConstraintContext {
 export interface UnifiedProtocolEnvelope {
   envelope_id: string;
   session_id: string;
+  user_id?: string;
   round_index: number;
   instruction_payload: string;
   assets_manifest: AssetDescriptor[];

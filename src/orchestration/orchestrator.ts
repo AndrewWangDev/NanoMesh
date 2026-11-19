@@ -245,6 +245,15 @@ export async function runOrchestrationPipeline(
     }
   }
 
+  // Extract physical media modalities and user text presence (AUDIT-MM-01)
+  const mediaModalities = Array.from(new Set(
+    envelope.assets_manifest
+      .filter(a => a.modality && a.modality !== 'text' && a.modality !== 'text_doc')
+      .map(a => a.modality)
+  ));
+  const hasUserText = !!(envelope.instruction_payload && envelope.instruction_payload.trim().length > 0) ||
+    envelope.assets_manifest.some(a => a.modality === 'text' || a.modality === 'text_doc');
+
   // Ensure empty assets manifest has a virtual text asset
   if (envelope.assets_manifest.length === 0) {
     envelope.assets_manifest.push({
@@ -259,6 +268,9 @@ export async function runOrchestrationPipeline(
   }
 
   const userModalities = Array.from(new Set(envelope.assets_manifest.map(a => a.modality)));
+  if (hasUserText && !userModalities.includes('text')) {
+    userModalities.push('text');
+  }
 
   // ----------------------------------------------------
   // Step 1: Load DB metadata & Hard Filter & Subsistence Law
@@ -366,8 +378,8 @@ export async function runOrchestrationPipeline(
     !!options.disableBrowserInference
   );
 
-  // Subsistence Law (温饱定律) for templates
-  const subsistenceTemplates = filterTemplatesBySubsistence(allTemplates, userModalities);
+  // Subsistence Law (广义温饱定律) for templates
+  const subsistenceTemplates = filterTemplatesBySubsistence(allTemplates, { mediaModalities, hasUserText });
   if (subsistenceTemplates.length === 0) {
     throw new Error(`当前没有适合处理 [${userModalities.join(', ')}] 输入模态的可用模板。`);
   }
