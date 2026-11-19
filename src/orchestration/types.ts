@@ -70,6 +70,8 @@ export interface ModelMetadata {
   provider: string;
   endpoint: string;
   modalities: string[];
+  in_modalities?: string[];
+  out_modalities?: string[];
   tags: string[];
   context_window: number;
   max_concurrency: number;
@@ -78,6 +80,7 @@ export interface ModelMetadata {
   user_rating: number;
   usage_count: number;
   cost_per_1k_tokens: number;
+  cost_per_invocation?: number;
   status: string;
   is_generalist: number;
   prior_score: number;
@@ -114,6 +117,7 @@ export interface InstantiatedDAGNode {
   upstream_output?: string;
   final_prompt?: string;
   cache_hit?: boolean;
+  artifact_bundle?: ArtifactBundle;
 }
 
 export interface SessionAssetLedgerItem {
@@ -124,6 +128,29 @@ export interface SessionAssetLedgerItem {
   file_size?: number;
   introduced_round?: number;
   branch_id?: string;
+}
+
+export interface MediaArtifact {
+  asset_id: string;
+  modality: 'image' | 'audio';
+  mime_type: string;
+  file_size: number;
+  r2_key: string;
+  source_digest: string;
+  url?: string;
+  metadata?: Record<string, any>;
+}
+
+export interface ArtifactBundle {
+  text_context: string;                   // Text reasoning context from parent
+  generated_media: MediaArtifact[];       // Media directly produced by parent step
+  inherited_assets: AssetDescriptor[];    // Cumulative available assets in execution space S
+  execution_trace?: {
+    role_id: string;
+    model_id: string;
+    cost: number;
+    duration_ms: number;
+  };
 }
 
 export interface InstantiatedDAG {

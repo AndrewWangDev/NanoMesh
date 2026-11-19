@@ -5,7 +5,8 @@ import { hashGiftCode, normalizeGiftCode, getPersistentSalt } from "../src/api/b
 import { hardFilterModels, filterTemplatesBySubsistence } from "../src/orchestration/subsistence";
 import { resolveRoleCompetence } from "../src/orchestration/competence";
 import { scoreAndRankRoleModels, cosineSimilarity } from "../src/orchestration/scoring";
-import { isSafeExternalUrl, applyContextWindowGuard, buildAuthHeaders } from "../src/orchestration/dispatcher";
+import { isSafeExternalUrl, applyContextWindowGuard, buildAuthHeaders, buildDownstreamMessages } from "../src/orchestration/dispatcher";
+import { sliceEnvelopeForNode } from "../src/orchestration/slicing";
 import { getAdminSigningSecret } from "../src/api/admin";
 import type { DAGRole, DAGTemplate, ModelMetadata } from "../src/orchestration/types";
 
@@ -644,8 +645,218 @@ async function runUnitTests() {
   assert.ok(geminiMsgsWithDocs.geminiContents[0].parts[0].text.includes("Secret Architecture Spec v1.0"), "Gemini Heavy node must receive attached docs in first user prompt");
   console.log("  ✓ FINDING-NEW-01: Downstream Heavy node (OpenAI/Gemini) preserves attached document content: PASSED");
 
+  // ----------------------------------------------------
+  // SUITE 11: Arbitrary Multimodal Orchestration, Decoupled Competence & Targeted Claiming
+  // ----------------------------------------------------
+  console.log("\n[Suite 11] Multimodal Orchestration, Decoupled Competence & Targeted Claiming");
+
+  // 11.1 Generalized Subsistence Law (广义温饱定律)
+  const roleGen: DAGRole = {
+    role_id: "role_flux_gen",
+    name_zh: "概念生图",
+    name_en: "Image Generation",
+    in_modalities: ["text"],
+    out_modalities: ["image"],
+    in_degree: 0,
+    out_degree: 1,
+    requisition_tags: ["#image_generation"]
+  };
+  const roleAnalyze: DAGRole = {
+    role_id: "role_vision_inspect",
+    name_zh: "视觉审校",
+    name_en: "Vision Inspection",
+    in_modalities: ["image"],
+    out_modalities: ["text"],
+    in_degree: 1,
+    out_degree: 0,
+    requisition_tags: ["#vision"]
+  };
+  const tplGenAndAnalyze: DAGTemplate = {
+    template_id: "tpl_gen_and_analyze",
+    name_zh: "生图与视觉质检流水线",
+    name_en: "Generation & Inspection Pipeline",
+    desc_zh: "首工序文本生图，次工序视觉质检",
+    desc_en: "Text to image followed by vision inspection",
+    head_modalities: ["text"],
+    tail_modalities: ["text"],
+    roles: [roleGen, roleAnalyze],
+    priority: 10,
+    status: "active"
+  };
+
+  // User supplies only "text". Under Generalized Subsistence Law:
+  // Step 0 requires "text" (satisfied by user). Step 0 produces "image".
+  // Step 1 requires "image" (satisfied by Step 0 cumulative supply Ω_1).
+  const passedSubsistence = filterTemplatesBySubsistence([tplGenAndAnalyze], ["text"]);
+  assert.equal(passedSubsistence.length, 1, "Multi-node template with intermediate generated image input must pass Generalized Subsistence Law");
+  
+  // Orphan modality: user supplies "audio", but template does not consume audio
+  const rejectedOrphan = filterTemplatesBySubsistence([tplGenAndAnalyze], ["text", "audio"]);
+  assert.equal(rejectedOrphan.length, 0, "Template must reject orphan user modality not declared by any node");
+  console.log("  ✓ Generalized Subsistence Law (Ω_i cumulative supply & No-Orphan Axiom): PASSED");
+
+  // 11.2 Decoupled Competence Matching (双向胜任定律)
+  const fluxModel: ModelMetadata = {
+    model_id: "cf_flux_schnell",
+    display_name: "Flux 1 Schnell",
+    provider: "Cloudflare Workers AI",
+    endpoint: "@cf/black-forest-labs/flux-1-schnell",
+    modalities: ["text", "image"],
+    in_modalities: ["text"],
+    out_modalities: ["image"],
+    tags: ["#image_generation", "#general"],
+    context_window: 2048,
+    max_concurrency: 20,
+    active_connections: 0,
+    precision: 0.98,
+    user_rating: 4.95,
+    usage_count: 50,
+    cost_per_1k_tokens: 0.0,
+    cost_per_invocation: 2.0,
+    status: "active",
+    is_generalist: 0,
+    prior_score: 0.0,
+    scenario_anchors: ["image_gen"]
+  };
+  const textModel: ModelMetadata = {
+    model_id: "cf_llama3_text",
+    display_name: "Llama 3.1 8B",
+    provider: "Cloudflare Workers AI",
+    endpoint: "@cf/meta/llama-3.1-8b-instruct",
+    modalities: ["text"],
+    in_modalities: ["text"],
+    out_modalities: ["text"],
+    tags: ["#chat", "#general"],
+    context_window: 8192,
+    max_concurrency: 50,
+    active_connections: 0,
+    precision: 0.9,
+    user_rating: 4.8,
+    usage_count: 200,
+    cost_per_1k_tokens: 1.0,
+    status: "active",
+    is_generalist: 1,
+    prior_score: 0.0,
+    scenario_anchors: ["chat"]
+  };
+  const whisperModel: ModelMetadata = {
+    model_id: "cf_whisper_asr",
+    display_name: "Whisper ASR",
+    provider: "Cloudflare Workers AI",
+    endpoint: "@cf/openai/whisper",
+    modalities: ["audio"],
+    in_modalities: ["audio"],
+    out_modalities: ["text"],
+    tags: ["#asr", "#audio_processing", "#general"],
+    context_window: 4096,
+    max_concurrency: 30,
+    active_connections: 0,
+    precision: 0.96,
+    user_rating: 4.9,
+    usage_count: 100,
+    cost_per_1k_tokens: 1.0,
+    status: "active",
+    is_generalist: 0,
+    prior_score: 0.0,
+    scenario_anchors: ["asr"]
+  };
+
+  // Role requiring image output must select Flux and reject pure text model
+  const fluxResolution = resolveRoleCompetence(roleGen, [textModel, fluxModel]);
+  assert.equal(fluxResolution.selectedModels[0].model_id, "cf_flux_schnell", "Image-output role must resolve to Flux model");
+
+  // Role requiring audio input must select Whisper
+  const asrRole: DAGRole = {
+    role_id: "role_asr",
+    name_zh: "语音听写",
+    name_en: "Audio ASR",
+    in_modalities: ["audio"],
+    out_modalities: ["text"],
+    in_degree: 0,
+    out_degree: 1,
+    requisition_tags: ["#asr"]
+  };
+  const asrResolution = resolveRoleCompetence(asrRole, [textModel, whisperModel]);
+  assert.equal(asrResolution.selectedModels[0].model_id, "cf_whisper_asr", "Audio-input role must resolve to Whisper model");
+  console.log("  ✓ Decoupled Competence Law (in_modalities ⊆ M.in & out_modalities ⊆ M.out): PASSED");
+
+  // 11.3 Targeted Claiming Law (定向认领与工序流转)
+  const testEnvelope: any = {
+    envelope_id: "env-unit-1",
+    session_id: "sess-unit-1",
+    round_index: 1,
+    instruction_payload: "User high-level request",
+    assets_manifest: [
+      {
+        asset_id: "user-img-1",
+        modality: "image",
+        mime_type: "image/png",
+        file_size: 1024,
+        consumed: false,
+        source_digest: "digest-user-img"
+      }
+    ],
+    constraint_context: { target_language: "zh", output_style: "concise" }
+  };
+
+  // P0: Intermediate node claims media generated by previous step
+  const intermediateNode: any = {
+    role: { ...roleAnalyze, in_degree: 1, out_degree: 1 },
+    selected_model: {
+      model_id: "cf_llava",
+      modalities: ["image", "text"],
+      in_modalities: ["image", "text"],
+      out_modalities: ["text"]
+    }
+  };
+  const upstreamBundle: any = {
+    text_context: "Step 0 finished generating.",
+    generated_media: [
+      {
+        asset_id: "gen-img-0",
+        modality: "image",
+        mime_type: "image/png",
+        file_size: 2048,
+        r2_key: "tmp/usr/sess/gen-img-0.png",
+        source_digest: "digest-gen-0"
+      }
+    ],
+    inherited_assets: []
+  };
+
+  const p0Ctx = sliceEnvelopeForNode(intermediateNode, testEnvelope, "Step 0 finished", "Step0Role", upstreamBundle);
+  assert.equal(p0Ctx.claimed_assets.length, 1, "Intermediate node must claim P0 generated media");
+  assert.equal(p0Ctx.claimed_assets[0].asset_id, "gen-img-0", "Must claim the directly generated asset from previous step");
+
+  // P1: When previous step produced NO media, intermediate node penetrates to unconsumed user initial asset
+  const upstreamTextOnlyBundle: any = {
+    text_context: "Step 0 text analysis complete.",
+    generated_media: [],
+    inherited_assets: []
+  };
+  const p1Ctx = sliceEnvelopeForNode(intermediateNode, testEnvelope, "Step 0 text analysis complete.", "Step0Role", upstreamTextOnlyBundle);
+  assert.equal(p1Ctx.claimed_assets.length, 1, "Intermediate node must penetrate to claim user initial asset when P0 empty");
+  assert.equal(p1Ctx.claimed_assets[0].asset_id, "user-img-1", "Must claim user-img-1 from envelope manifest");
+  console.log("  ✓ Targeted Claiming Law (P0 upstream media & P1 user asset penetration): PASSED");
+
+  // 11.4 Multimodal Downstream Message Formatting (OpenAI & Gemini Vision payload)
+  const partsWithImage: any = {
+    ...testParts,
+    imageB64: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    imageMimeType: "image/png"
+  };
+  const heavyOpenAIMultimodal = buildDownstreamMessages(partsWithImage, heavyTarget);
+  assert.ok(Array.isArray(heavyOpenAIMultimodal.openaiMessages[1].content), "OpenAI multimodal user message content must be an array of blocks");
+  assert.equal(heavyOpenAIMultimodal.openaiMessages[1].content[1].type, "image_url", "OpenAI block must contain image_url");
+  assert.ok(heavyOpenAIMultimodal.openaiMessages[1].content[1].image_url.url.startsWith("data:image/png;base64,"), "OpenAI block must carry image data URI");
+
+  const geminiMultimodal = buildDownstreamMessages(partsWithImage, geminiTarget);
+  assert.equal(geminiMultimodal.geminiContents[0].parts.length, 2, "Gemini content must contain text part and inlineData part");
+  assert.equal(geminiMultimodal.geminiContents[0].parts[1].inlineData.mimeType, "image/png", "Gemini inlineData mimeType must match");
+  console.log("  ✓ Heavy Node Multimodal Message Assembly (OpenAI image_url & Gemini inlineData): PASSED");
+
   console.log("\n==================================================");
-  console.log("   🎉 ALL 10 UNIT TEST SUITES PASSED (100%)!      ");
+  console.log("   🎉 ALL 11 UNIT TEST SUITES PASSED (100%)!      ");
   console.log("==================================================");
 }
 
