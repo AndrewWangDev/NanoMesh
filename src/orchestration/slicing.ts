@@ -26,6 +26,13 @@ export interface NodeExecutionContext {
  *     so perception is purely driven by role requisition prompt without downstream contamination.
  *   - Single-Node & Downstream Nodes: Receives user prompt.
  */
+function supportsModality(set: Set<string>, modality: string): boolean {
+  if (set.has(modality)) return true;
+  if (modality === 'text_doc' && set.has('text')) return true;
+  if (modality === 'text' && set.has('text_doc')) return true;
+  return false;
+}
+
 export function sliceEnvelopeForNode(
   node: InstantiatedDAGNode,
   envelope: UnifiedProtocolEnvelope,
@@ -57,23 +64,33 @@ export function sliceEnvelopeForNode(
   }
 
   // 2. P1 Priority: Claim unconsumed matching user initial assets from envelope
-  // Head nodes claim all unconsumed assets matching their input modalities.
-  // Intermediate nodes claim assets if their required modalities were not satisfied by P0.
-  // Tail nodes claim remaining unconsumed matching assets.
+  // Head nodes claim unconsumed sensory media assets matching their input modalities.
+  // Masked head nodes (in_degree === 0 && out_degree > 0) must NEVER greedily harvest
+  // cognitive document assets (text, text_doc), reserving them for downstream reasoning nodes.
   const isHeadNode = node.role.in_degree === 0;
   const isTailNode = node.role.out_degree === 0;
+  const isMaskedHeadNode = isHeadNode && !isTailNode;
 
   for (const asset of envelope.assets_manifest) {
     if (asset.consumed) continue;
 
-    const isExplicitlyNeeded = requiredInModalities.has(asset.modality) && modelInModalities.has(asset.modality);
-    const isTailHarvest = isTailNode && modelInModalities.has(asset.modality);
-    const isHeadHarvest = isHeadNode && modelInModalities.has(asset.modality);
+    const isSensoryModality = asset.modality === 'image' || asset.modality === 'audio';
+
+    // BUG-02 Fix: Masked head nodes must focus purely on sensory feature extraction
+    // and must never consume cognitive documents (text, text_doc).
+    if (isMaskedHeadNode && !isSensoryModality) {
+      continue;
+    }
+
+    const isExplicitlyNeeded = supportsModality(requiredInModalities, asset.modality) && supportsModality(modelInModalities, asset.modality);
+    const isTailHarvest = isTailNode && supportsModality(modelInModalities, asset.modality);
+    const isHeadHarvest = isHeadNode && supportsModality(modelInModalities, asset.modality);
 
     if (isExplicitlyNeeded || isTailHarvest || isHeadHarvest) {
       asset.consumed = true;
       claimedAssets.push(asset);
       requiredInModalities.delete(asset.modality);
+      if (asset.modality === 'text_doc') requiredInModalities.delete('text');
     }
   }
 

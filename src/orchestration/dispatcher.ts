@@ -740,10 +740,26 @@ export async function executeDAGStream(
           let currentStepDirective = '';
 
           // Extract attached text/document content from claimed assets if present
+          // BUG-02 Guard: If this node is a generative media node (e.g. image/audio generation tail),
+          // strictly isolate attached raw documents to prevent prompt dilution and context length overflow!
+          const isGenerativeMediaNode = node.role.out_modalities?.some(m => m === 'image' || m === 'audio')
+            || node.selected_model.out_modalities?.some(m => m === 'image' || m === 'audio');
+
           const docTextBlocks = nodeCtx.claimed_assets
             .filter(a => a.in_memory_text && a.in_memory_text.trim())
             .map(a => a.in_memory_text!.trim());
-          const attachedDocsSection = docTextBlocks.length > 0 ? `【文档材料】\n${docTextBlocks.join('\n\n')}` : '';
+
+          let attachedDocsSection = (!isGenerativeMediaNode && docTextBlocks.length > 0) 
+            ? `【文档材料】\n${docTextBlocks.join('\n\n')}` 
+            : '';
+
+          // Sliding window token budget guard: cap attached docs to 50% of model context window
+          if (attachedDocsSection && node.selected_model?.context_window) {
+            const maxDocChars = Math.floor(node.selected_model.context_window * 2);
+            if (attachedDocsSection.length > maxDocChars) {
+              attachedDocsSection = attachedDocsSection.slice(0, maxDocChars) + '\n\n[提示：附带文档材料过长，已根据模型上下文预算自动截断]';
+            }
+          }
 
           // Check if this run is an incremental refinement on previous round output (ANCHOR_TAIL)
           let isIncrementalRefinement = false;
@@ -940,6 +956,21 @@ export async function executeDAGStream(
                 // AC-08: Legacy client without webgpu_handover_v3 fallback
                 const cloudStandby = node.standby_models.find(m => m.inference_target !== 'browser');
                 if (cloudStandby) {
+                  // BUG-01 Fix: Check and atomically pre-deduct 1 credit if not already pre-deducted!
+                  if (!options.hasPreDeducted) {
+                    const reserveResult = await env.DB.prepare(
+                      "UPDATE users SET credits = credits - 1 WHERE user_id = ? AND credits >= 1"
+                    ).bind(options.userId).run();
+
+                    if (!reserveResult.meta.changes || reserveResult.meta.changes === 0) {
+                      sendEvent('error', {
+                        message: `当前可用积分不足，无法降级调用云端备用模型【${cloudStandby.display_name}】，请先充值。`
+                      });
+                      break;
+                    }
+                    options.hasPreDeducted = true;
+                  }
+
                   node.selected_model = cloudStandby;
                   // Recompute deterministic cacheKey under the cloud standby model signature (BUG-07a)
                   cacheKey = await computeDeterministicSignature(
@@ -1249,6 +1280,14 @@ export async function executeDAGStream(
                         maxOutputTokens: 2048
                       }
                     };
+                  } else if (currentCandidate.out_modalities?.includes('image')) {
+                    // BUG-04 Fix: OpenAI-compatible Images API payload format (e.g. /v1/images/generations)
+                    requestPayload = {
+                      model: currentCandidate.model_id || "dall-e-3",
+                      prompt: promptContent,
+                      response_format: 'b64_json',
+                      size: '1024x1024'
+                    };
                   } else {
                     requestPayload = {
                       model: currentCandidate.model_id || "Meta-Llama-3.1-8B-Instruct",
@@ -1316,7 +1355,11 @@ export async function executeDAGStream(
                           for (let i = 0; i < len; i++) u8[i] = binStr.charCodeAt(i);
                           imgBuffer = u8.buffer as ArrayBuffer;
                         } else if (jsonRes.data?.[0]?.url) {
-                          const fetched = await fetch(jsonRes.data[0].url);
+                          const imageUrl = jsonRes.data[0].url;
+                          if (typeof imageUrl !== 'string' || !isSafeExternalUrl(imageUrl)) {
+                            throw new Error(`安全违规：拒绝访问未经授权或存在安全隐患的外部图片回源地址 (${imageUrl})`);
+                          }
+                          const fetched = await fetch(imageUrl);
                           if (fetched.ok) imgBuffer = await fetched.arrayBuffer();
                         }
 
@@ -1694,8 +1737,8 @@ export async function executeDAGStream(
             const ledgerId = crypto.randomUUID();
             await env.DB.batch([
               env.DB.prepare(
-                "UPDATE users SET credits = MAX(0, credits - ?) WHERE user_id = ?"
-              ).bind(totalCost, options.userId),
+                "UPDATE users SET credits = credits - ? WHERE user_id = ? AND credits >= ?"
+              ).bind(totalCost, options.userId, totalCost),
               env.DB.prepare(
                 `INSERT INTO credit_ledger 
                  (ledger_id, user_id, category, amount, balance, title, detail, created_at)

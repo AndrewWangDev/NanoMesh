@@ -168,7 +168,7 @@ export async function handleChat(request: Request, env: Env, ctx?: ExecutionCont
     activeBranchId: body.activeBranchId,
     activeBranchSummary: body.activeBranchSummary,
     branchCatalog: body.branchCatalog,
-    disableBrowserInference: !!body.disableBrowserInference
+    disableBrowserInference: !!body.disableBrowserInference || (body.capabilities?.webgpu_handover_v3 === false)
   };
 
   // 3. Run Gateway 3-Step Arbitration & Instantiate DAG FIRST
@@ -186,12 +186,21 @@ export async function handleChat(request: Request, env: Env, ctx?: ExecutionCont
     });
   }
 
-  // 4. Dynamic Billing Alignment: Blast Radius & WebGPU Step 0 Zero Pre-Deduction
+  // 4. Dynamic Billing Alignment: Worst-Case Cloud Pre-Deduction & WebGPU Zero Pre-Deduction (BUG-01 Fix)
   let hasReservedCredit = false;
   if (!dag.is_security_violation && !dag.is_unreachable) {
-    const isFirstNodeBrowser = dag.nodes[0]?.selected_model?.inference_target === 'browser';
-    if (!isFirstNodeBrowser) {
-      // Cloud / Heavy first node: atomic reservation of 1 credit
+    const hasAnyCloudNode = dag.nodes.some(n => n.selected_model?.inference_target !== 'browser');
+    const firstNodeHasCloudStandby = (dag.nodes[0]?.standby_models || []).some(m => m.inference_target !== 'browser');
+    const clientSupportsWebGPU = body.capabilities?.webgpu_handover_v3 ?? !body.disableBrowserInference;
+    
+    // We must reserve 1 credit if:
+    // 1) The first node is cloud/heavy, OR
+    // 2) Any downstream intermediate or tail node is cloud/heavy, OR
+    // 3) First node is browser but client cannot execute WebGPU handover (will fallback to cloud standby)
+    const requiresPreDeduction = hasAnyCloudNode || (!clientSupportsWebGPU && firstNodeHasCloudStandby);
+
+    if (requiresPreDeduction) {
+      // Cloud / Multi-Node / Fallback execution: atomic reservation of 1 credit
       const reserveResult = await env.DB.prepare(
         "UPDATE users SET credits = credits - 1 WHERE user_id = ? AND credits >= 1"
       ).bind(session.userId).run();
@@ -207,7 +216,6 @@ export async function handleChat(request: Request, env: Env, ctx?: ExecutionCont
       }
       hasReservedCredit = true;
     }
-    // Note: If Step 0 is WebGPU ('browser'), hasReservedCredit remains FALSE! (0 pre-deduction)
   }
 
   try {
@@ -322,14 +330,13 @@ export async function handleChatContinue(
     });
   }
 
-  // 2. D1 Atomic CAS Anti-Replay Defense
-  const casResult = await env.DB.prepare(`
-    UPDATE dag_handshakes
-    SET status = 'CONSUMED'
-    WHERE handshake_id = ? AND user_id = ? AND status = 'ISSUED' AND datetime(expires_at) > datetime('now')
-  `).bind(claims.jti, session.userId).run();
+  // 2. Validate Handshake Record Pre-condition (Read-only check before DAG compilation & billing - BUG-05 Fix)
+  const handshakeRecord = await env.DB.prepare(`
+    SELECT status, expires_at FROM dag_handshakes
+    WHERE handshake_id = ? AND user_id = ?
+  `).bind(claims.jti, session.userId).first<any>();
 
-  if (!casResult.meta.changes || casResult.meta.changes === 0) {
+  if (!handshakeRecord || handshakeRecord.status !== 'ISSUED' || new Date(handshakeRecord.expires_at) <= new Date()) {
     return new Response(JSON.stringify({ 
       error: "handshake_already_consumed_or_expired", 
       message: "该任务接力握手已被消费或已超时，严禁重放执行。" 
@@ -405,8 +412,7 @@ export async function handleChatContinue(
     return new Response(JSON.stringify({ error: "step_already_completed", message: "流水线所有步骤已完成" }), { status: 400 });
   }
 
-  // 4. Cloud Pre-deduction for Phase 2:
-  // If the node starting Phase 2 is Cloud/Heavy, atomically pre-deduct 1 credit!
+  // 4. Two-Phase Commit for Phase 2: Credit Reservation followed by Atomic Handshake Transition (BUG-05 Fix)
   let hasReservedCredit = false;
   const nextExecutingNode = dag.nodes[startStepIndex];
   if (nextExecutingNode.selected_model.inference_target !== 'browser') {
@@ -415,6 +421,7 @@ export async function handleChatContinue(
     ).bind(session.userId).run();
 
     if (!reserveResult.meta.changes || reserveResult.meta.changes === 0) {
+      // NOTE: Handshake record remains 'ISSUED'! User can recharge and retry safely without burning handshake token!
       return new Response(JSON.stringify({ 
         error: "insufficient_quota", 
         message: "当前可用积分不足，无法执行后续云端任务，请先充值额度。" 
@@ -424,6 +431,28 @@ export async function handleChatContinue(
       });
     }
     hasReservedCredit = true;
+  }
+
+  // Phase 2: Atomically advance handshake state to 'CONSUMED' with CAS Anti-Replay
+  const casResult = await env.DB.prepare(`
+    UPDATE dag_handshakes
+    SET status = 'CONSUMED'
+    WHERE handshake_id = ? AND user_id = ? AND status = 'ISSUED' AND datetime(expires_at) > datetime('now')
+  `).bind(claims.jti, session.userId).run();
+
+  if (!casResult.meta.changes || casResult.meta.changes === 0) {
+    // If CAS failed (concurrent replay attack), roll back the reserved credit compensation!
+    if (hasReservedCredit) {
+      await env.DB.prepare("UPDATE users SET credits = credits + 1 WHERE user_id = ?").bind(session.userId).run();
+      hasReservedCredit = false;
+    }
+    return new Response(JSON.stringify({ 
+      error: "handshake_already_consumed_or_expired", 
+      message: "该任务接力握手已被消费或已超时，严禁重放执行。" 
+    }), { 
+      status: 409, 
+      headers: { "Content-Type": "application/json" } 
+    });
   }
 
   // 5. Execute resumed DAG stream

@@ -247,6 +247,11 @@ export async function runOrchestrationPipeline(
     }
   }
 
+  // Normalize non-standard/legacy document modalities (e.g. 'pdf' -> 'text_doc' - BUG-06 Fix)
+  envelope.assets_manifest.forEach(a => {
+    if ((a.modality as string) === 'pdf') a.modality = 'text_doc';
+  });
+
   // Extract physical media modalities and user text presence (AUDIT-MM-01)
   const mediaModalities = Array.from(new Set(
     envelope.assets_manifest
