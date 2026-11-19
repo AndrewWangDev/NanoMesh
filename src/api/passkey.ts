@@ -121,9 +121,9 @@ export async function handlePasskeyRegisterVerify(request: Request, env: Env): P
   }
 
   // 2. Parse attestationObject
-  let parsedAttestation: ReturnType<typeof parseAttestationObject>;
+  let parsedAttestation: Awaited<ReturnType<typeof parseAttestationObject>>;
   try {
-    parsedAttestation = parseAttestationObject(base64UrlToBuffer(response.attestationObject));
+    parsedAttestation = await parseAttestationObject(base64UrlToBuffer(response.attestationObject));
   } catch (err: any) {
     return Response.json({ error: err.message || "error.passkeyAttestationFailed" }, { status: 400 });
   }

@@ -123,7 +123,7 @@ export async function handleDeleteAccount(req: Request, env: Env) {
   if (!session) return Response.json({ error: "error.unauthorized" }, { status: 401 });
 
   // 1. Check frozen_credits
-  const user = await env.DB.prepare("SELECT email, oauth_id, frozen_credits FROM users WHERE user_id = ?").bind(session.userId).first<{email: string, oauth_id: string | null, frozen_credits: number}>();
+  const user = await env.DB.prepare("SELECT email, oauth_id, oauth_provider, frozen_credits FROM users WHERE user_id = ?").bind(session.userId).first<{email: string, oauth_id: string | null, oauth_provider: string | null, frozen_credits: number}>();
   if (!user) return Response.json({ error: "error.userNotFound" }, { status: 404 });
 
   if (user.frozen_credits > 0) {
@@ -140,14 +140,21 @@ export async function handleDeleteAccount(req: Request, env: Env) {
   // 3. Insert tombstone
   await env.DB.prepare("INSERT INTO account_tombstones (hash_id, type, expires_at) VALUES (?, 'email', datetime('now', '+90 days'))").bind(emailHash).run();
 
-  const bindings = await env.DB.prepare("SELECT provider_id FROM user_oauth_bindings WHERE user_id = ?").bind(session.userId).all<{provider_id: string}>();
+  const bindings = await env.DB.prepare("SELECT provider, provider_id FROM user_oauth_bindings WHERE user_id = ?").bind(session.userId).all<{provider: string; provider_id: string}>();
   if (bindings.results && bindings.results.length > 0) {
     for (const b of bindings.results) {
-      const oauthData = encoder.encode(b.provider_id + persistentSalt);
+      const oauthData = encoder.encode(`${b.provider}:${b.provider_id}` + persistentSalt);
       const oauthHashBuffer = await crypto.subtle.digest('SHA-256', oauthData);
       const oauthHash = Array.from(new Uint8Array(oauthHashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
       await env.DB.prepare("INSERT INTO account_tombstones (hash_id, type, expires_at) VALUES (?, 'oauth', datetime('now', '+90 days'))").bind(oauthHash).run();
     }
+  }
+
+  if (user.oauth_provider && user.oauth_id) {
+    const oauthData = encoder.encode(`${user.oauth_provider}:${user.oauth_id}` + persistentSalt);
+    const oauthHashBuffer = await crypto.subtle.digest('SHA-256', oauthData);
+    const oauthHash = Array.from(new Uint8Array(oauthHashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+    await env.DB.prepare("INSERT INTO account_tombstones (hash_id, type, expires_at) VALUES (?, 'oauth', datetime('now', '+90 days'))").bind(oauthHash).run();
   }
 
   // 4. In-place anonymization & private session erasure (GDPR compliance)

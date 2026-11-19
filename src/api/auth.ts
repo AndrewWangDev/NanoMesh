@@ -361,7 +361,7 @@ async function handleOAuthCallback(req: Request, env: Env, provider: 'github' | 
 
     // Check tombstone for OAuth ID
     const encoder = new TextEncoder();
-    const oauthData = encoder.encode(profile.id + getPersistentSalt(env));
+    const oauthData = encoder.encode(`${provider}:${profile.id}` + getPersistentSalt(env));
     const oauthHashBuffer = await crypto.subtle.digest('SHA-256', oauthData);
     const oauthHash = Array.from(new Uint8Array(oauthHashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
     

@@ -619,7 +619,7 @@ export async function executeDAGStream(
               name_en: dag.template.name_en,
               desc_zh: dag.template.desc_zh,
             },
-            candidate_templates: dag.candidate_templates.map(t => ({
+            candidate_templates: (dag.candidate_templates || []).map(t => ({
               template_id: t.template_id,
               name_zh: t.name_zh,
               name_en: t.name_en
@@ -640,7 +640,7 @@ export async function executeDAGStream(
                 browser_runtime: n.selected_model.browser_runtime,
                 download_size_bytes: n.selected_model.download_size_bytes
               },
-              standby_models: n.standby_models.map(m => ({
+              standby_models: (n.standby_models || []).map(m => ({
                 model_id: m.model_id,
                 display_name: m.display_name,
                 cost: m.cost_per_1k_tokens,
@@ -966,7 +966,10 @@ export async function executeDAGStream(
                       sendEvent('error', {
                         message: `当前可用积分不足，无法降级调用云端备用模型【${cloudStandby.display_name}】，请先充值。`
                       });
-                      break;
+                      if (options.hasPreDeducted) {
+                        await refundReservedCredit();
+                      }
+                      return;
                     }
                     options.hasPreDeducted = true;
                   }
@@ -984,7 +987,10 @@ export async function executeDAGStream(
                   sendEvent('error', {
                     message: `客户端未支持 WebGPU 中间握手协议，且未找到可用的云端备用模型。`
                   });
-                  break;
+                  if (options.hasPreDeducted) {
+                    await refundReservedCredit();
+                  }
+                  return;
                 }
               } else {
                 // Settle Phase 1 cloud cost if any cloud models executed prior to this step
@@ -1201,6 +1207,227 @@ export async function executeDAGStream(
             for (let attemptIdx = 0; attemptIdx < candidateModels.length; attemptIdx++) {
               const currentCandidate = candidateModels[attemptIdx];
               const endpoint = currentCandidate.endpoint;
+
+              // [BUG-02 Symmetrical Heterogeneous Dynamic Handover]:
+              // If candidate is a client-side WebGPU model, dispatch via Dynamic Handover Protocol!
+              if (currentCandidate.inference_target === 'browser') {
+                const supportsWebGPU = options.clientCapabilities?.webgpu_handover_v3 !== false;
+                if (!supportsWebGPU) {
+                  candidateErrors.push(`[${currentCandidate.display_name}]: 客户端未声明支持 WebGPU 端侧推理，跳过该备用模型`);
+                  continue;
+                }
+
+                // Symmetrical Failover Event
+                const previousCandidate = attemptIdx > 0 ? candidateModels[attemptIdx - 1] : node.selected_model;
+                sendEvent('node_failover', {
+                  role_id: node.role.role_id,
+                  role_name: node.role.name_zh,
+                  failed_model: previousCandidate.display_name,
+                  failed_model_id: previousCandidate.model_id,
+                  fallback_model: currentCandidate.display_name,
+                  fallback_model_id: currentCandidate.model_id,
+                  attempt: attemptIdx + 1,
+                  total_candidates: candidateModels.length,
+                  reason_zh: `首选云端节点【${previousCandidate.display_name}】故障，全对称自由流转至端侧 WebGPU 备用模型【${currentCandidate.display_name}】`,
+                  reason_en: `Primary cloud node [${previousCandidate.display_name}] failed, symmetric failover to client WebGPU standby model [${currentCandidate.display_name}]`
+                });
+
+                if (isTailNode) {
+                  // Tail Node WebGPU Handover
+                  // Conservation of Credits: Refund or settle Phase 1 cloud pre-deduction
+                  if (options.hasPreDeducted) {
+                    if (totalCost === 0) {
+                      await refundReservedCredit();
+                    } else {
+                      const remainingCost = totalCost - 1;
+                      const ledgerId = crypto.randomUUID();
+                      const statements = [];
+                      if (remainingCost > 0) {
+                        statements.push(
+                          env.DB.prepare(
+                            "UPDATE users SET credits = MAX(0, credits - ?) WHERE user_id = ?"
+                          ).bind(remainingCost, options.userId)
+                        );
+                      }
+                      statements.push(
+                        env.DB.prepare(
+                          `INSERT INTO credit_ledger 
+                           (ledger_id, user_id, category, amount, balance, title, detail, created_at)
+                           VALUES (?, ?, 'compute_cost', ?, (SELECT credits FROM users WHERE user_id = ?), 'DAG智能编排调用', ?, datetime('now'))`
+                        ).bind(
+                          ledgerId,
+                          options.userId,
+                          -totalCost,
+                          options.userId,
+                          `阶段结算: ${dag.template.name_zh} (步骤 ${idx})`
+                        )
+                      );
+                      await env.DB.batch(statements);
+                      isLedgerSettled = true;
+                      options.hasPreDeducted = false;
+                    }
+                  }
+
+                  let continuationToken: string | undefined = undefined;
+                  let handshakeId: string | undefined = undefined;
+                  const remainingStandbys = candidateModels.slice(attemptIdx + 1);
+                  if (remainingStandbys.length > 0) {
+                    handshakeId = crypto.randomUUID();
+                    const expiresAt = new Date(Date.now() + 300 * 1000).toISOString();
+                    await env.DB.prepare(
+                      `INSERT INTO dag_handshakes 
+                       (handshake_id, user_id, session_id, template_id, next_step, status, expires_at)
+                       VALUES (?, ?, ?, ?, ?, 'ISSUED', ?)`
+                    ).bind(
+                      handshakeId,
+                      options.userId,
+                      envelope.session_id,
+                      dag.template.template_id,
+                      idx + 1,
+                      expiresAt
+                    ).run();
+
+                    const arbitratedRoleModels: Record<string, string> = {};
+                    dag.nodes.forEach(n => {
+                      if (n.role?.role_id && n.selected_model?.model_id) {
+                        arbitratedRoleModels[n.role.role_id] = n.selected_model.model_id;
+                      }
+                    });
+
+                    continuationToken = await signJWT({
+                      jti: handshakeId,
+                      sub: options.userId,
+                      sid: envelope.session_id,
+                      tid: dag.template.template_id,
+                      nxt: idx + 1,
+                      mids: arbitratedRoleModels
+                    }, env.JWT_SECRET, 300);
+                  }
+
+                  sendEvent('client_exec_request', {
+                    role_id: node.role.role_id,
+                    role_name: node.role.name_zh,
+                    role_name_en: node.role.name_en,
+                    model_id: currentCandidate.model_id,
+                    model_name: currentCandidate.display_name,
+                    endpoint: currentCandidate.endpoint,
+                    system_prompt: systemPrompt,
+                    user_prompt: promptContent,
+                    is_tail_node: true,
+                    was_failover: true,
+                    handshake_id: handshakeId,
+                    continuation_token: continuationToken,
+                    claimed_assets: nodeCtx.claimed_assets.map(a => ({
+                      asset_id: a.asset_id,
+                      modality: a.modality,
+                      mime_type: a.mime_type,
+                      file_size: a.file_size,
+                      r2_key: a.r2_key,
+                      source_digest: a.source_digest
+                    }))
+                  });
+
+                  upstreamOutput = '';
+                  actualExecutingModel = currentCandidate;
+                  node.selected_model = currentCandidate;
+                  isExecutionSuccess = true;
+                  break;
+                } else {
+                  // Intermediate Node WebGPU Handover
+                  if (options.hasPreDeducted) {
+                    if (totalCost === 0) {
+                      await refundReservedCredit();
+                    } else {
+                      const remainingCost = totalCost - 1;
+                      const ledgerId = crypto.randomUUID();
+                      const statements = [];
+                      if (remainingCost > 0) {
+                        statements.push(
+                          env.DB.prepare(
+                            "UPDATE users SET credits = MAX(0, credits - ?) WHERE user_id = ?"
+                          ).bind(remainingCost, options.userId)
+                        );
+                      }
+                      statements.push(
+                        env.DB.prepare(
+                          `INSERT INTO credit_ledger 
+                           (ledger_id, user_id, category, amount, balance, title, detail, created_at)
+                           VALUES (?, ?, 'compute_cost', ?, (SELECT credits FROM users WHERE user_id = ?), 'DAG智能编排调用', ?, datetime('now'))`
+                        ).bind(
+                          ledgerId,
+                          options.userId,
+                          -totalCost,
+                          options.userId,
+                          `阶段结算: ${dag.template.name_zh} (步骤 ${idx})`
+                        )
+                      );
+                      await env.DB.batch(statements);
+                      isLedgerSettled = true;
+                      options.hasPreDeducted = false;
+                    }
+                  }
+
+                  const handshakeId = crypto.randomUUID();
+                  const expiresAt = new Date(Date.now() + 300 * 1000).toISOString();
+                  await env.DB.prepare(
+                    `INSERT INTO dag_handshakes 
+                     (handshake_id, user_id, session_id, template_id, next_step, status, expires_at)
+                     VALUES (?, ?, ?, ?, ?, 'ISSUED', ?)`
+                  ).bind(
+                    handshakeId,
+                    options.userId,
+                    envelope.session_id,
+                    dag.template.template_id,
+                    idx + 1,
+                    expiresAt
+                  ).run();
+
+                  const arbitratedRoleModels: Record<string, string> = {};
+                  dag.nodes.forEach(n => {
+                    if (n.role?.role_id && n.selected_model?.model_id) {
+                      arbitratedRoleModels[n.role.role_id] = n.selected_model.model_id;
+                    }
+                  });
+
+                  const continuationToken = await signJWT({
+                    jti: handshakeId,
+                    sub: options.userId,
+                    sid: envelope.session_id,
+                    tid: dag.template.template_id,
+                    nxt: idx + 1,
+                    mids: arbitratedRoleModels
+                  }, env.JWT_SECRET, 300);
+
+                  sendEvent('dag_handover', {
+                    handshake_id: handshakeId,
+                    continuation_token: continuationToken,
+                    current_step: idx,
+                    next_step: idx + 1,
+                    role_id: node.role.role_id,
+                    role_name: node.role.name_zh,
+                    role_name_en: node.role.name_en,
+                    model_id: currentCandidate.model_id,
+                    model_name: currentCandidate.display_name,
+                    endpoint: currentCandidate.endpoint,
+                    system_prompt: systemPrompt,
+                    user_prompt: promptContent,
+                    is_tail_node: false,
+                    was_failover: true,
+                    expires_in: 300,
+                    claimed_assets: nodeCtx.claimed_assets.map(a => ({
+                      asset_id: a.asset_id,
+                      modality: a.modality,
+                      mime_type: a.mime_type,
+                      file_size: a.file_size,
+                      r2_key: a.r2_key,
+                      source_digest: a.source_digest
+                    }))
+                  });
+
+                  return; // Gracefully yield worker execution immediately!
+                }
+              }
+
               if (!env.AI && !endpoint.startsWith('http')) break;
 
               // Transparent failover notice: notify frontend explicitly when falling back to Standby models
@@ -1359,8 +1586,48 @@ export async function executeDAGStream(
                           if (typeof imageUrl !== 'string' || !isSafeExternalUrl(imageUrl)) {
                             throw new Error(`安全违规：拒绝访问未经授权或存在安全隐患的外部图片回源地址 (${imageUrl})`);
                           }
-                          const fetched = await fetch(imageUrl);
-                          if (fetched.ok) imgBuffer = await fetched.arrayBuffer();
+                          const fetched = await fetch(imageUrl, { redirect: 'manual' });
+                          if (fetched.status >= 300 && fetched.status < 400) {
+                            throw new Error(`安全违规：外部图片回源地址禁止 HTTP 重定向 (Status ${fetched.status})`);
+                          }
+                          if (!fetched.ok) {
+                            throw new Error(`外部图片拉取失败 (HTTP ${fetched.status})`);
+                          }
+                          const MAX_IMAGE_SIZE = 15 * 1024 * 1024;
+                          const contentLengthStr = fetched.headers.get('content-length');
+                          if (contentLengthStr && parseInt(contentLengthStr, 10) > MAX_IMAGE_SIZE) {
+                            throw new Error(`安全防御拦截：回源图片体积 (${contentLengthStr} bytes) 超过 15MB 安全上限`);
+                          }
+                          if (fetched.body) {
+                            const reader = fetched.body.getReader();
+                            const chunks: Uint8Array[] = [];
+                            let totalBytes = 0;
+                            while (true) {
+                              const { done, value } = await reader.read();
+                              if (done) break;
+                              if (value) {
+                                totalBytes += value.byteLength;
+                                if (totalBytes > MAX_IMAGE_SIZE) {
+                                  reader.cancel();
+                                  throw new Error(`安全防御拦截：回源图片数据流体积已超 15MB 阈值，强行熔断`);
+                                }
+                                chunks.push(value);
+                              }
+                            }
+                            const merged = new Uint8Array(totalBytes);
+                            let offset = 0;
+                            for (const c of chunks) {
+                              merged.set(c, offset);
+                              offset += c.byteLength;
+                            }
+                            imgBuffer = merged.buffer as ArrayBuffer;
+                          } else {
+                            const buf = await fetched.arrayBuffer();
+                            if (buf.byteLength > MAX_IMAGE_SIZE) {
+                              throw new Error(`安全防御拦截：回源图片体积超过 15MB 安全上限`);
+                            }
+                            imgBuffer = buf;
+                          }
                         }
 
                         if (imgBuffer && imgBuffer.byteLength > 0) {
@@ -1614,6 +1881,11 @@ export async function executeDAGStream(
                 console.warn(`Node [${node.role.name_zh}] candidate [${currentCandidate.display_name}] failed/timed out:`, execErr.message);
                 // Failover to next candidate in this role's arbitrated pool!
               }
+            }
+
+            if (actualExecutingModel.inference_target === 'browser') {
+              // Tail node browser execution was handed over to client; advance node loop
+              continue;
             }
 
             // 6. Fail-Fast: If all Top-3 models in this role's pool failed, ABORT! NO ARBITRARY FALLBACK!
