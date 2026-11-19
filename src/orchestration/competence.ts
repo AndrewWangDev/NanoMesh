@@ -148,6 +148,19 @@ export interface RoleResolutionResult {
   downgradeEvent?: { original_tag: string; fallback_tag: string };
 }
 
+function getModelModalities(m: ModelMetadata): { inSet: Set<string>; outSet: Set<string> } {
+  const inSet = new Set(m.in_modalities && m.in_modalities.length > 0 ? m.in_modalities : m.modalities);
+  let outList = m.out_modalities && m.out_modalities.length > 0 ? m.out_modalities : null;
+  if (!outList) {
+    if (m.endpoint?.includes('flux') || m.tags?.includes('#image_generation')) {
+      outList = ['image'];
+    } else {
+      outList = ['text'];
+    }
+  }
+  return { inSet, outSet: new Set(outList) };
+}
+
 /**
  * Step 2: Competence Law (胜任定律) and Intersection Operation with Tag Downgrade
  * 
@@ -175,19 +188,17 @@ export function resolveRoleCompetence(
 
     // Perform Intersection Operation with Competence Law
     matchedModels = candidateModels.filter(m => {
-      const modelIn = new Set(m.modalities);
+      const { inSet, outSet } = getModelModalities(m);
       const modelTags = new Set(m.tags);
 
       // (1) Role.in ⊆ Model.in
       for (const reqIn of roleIn) {
-        if (!modelIn.has(reqIn)) return false;
+        if (!inSet.has(reqIn)) return false;
       }
 
-      // (2) Role.out ⊆ Model.out (If role outputs non-text such as audio or image, model must support it)
+      // (2) Role.out ⊆ Model.out
       for (const reqOut of roleOut) {
-        if (reqOut !== 'text' && !modelIn.has(reqOut)) {
-          return false;
-        }
+        if (!outSet.has(reqOut)) return false;
       }
 
       // (3) Role.tag ⊆ Model.tags
@@ -210,14 +221,12 @@ export function resolveRoleCompetence(
   // If even after trying all tags, no model was found, fall back to matching by modalities only
   if (matchedModels.length === 0) {
     matchedModels = candidateModels.filter(m => {
-      const modelIn = new Set(m.modalities);
+      const { inSet, outSet } = getModelModalities(m);
       for (const reqIn of roleIn) {
-        if (!modelIn.has(reqIn)) return false;
+        if (!inSet.has(reqIn)) return false;
       }
       for (const reqOut of roleOut) {
-        if (reqOut !== 'text' && !modelIn.has(reqOut)) {
-          return false;
-        }
+        if (!outSet.has(reqOut)) return false;
       }
       return true;
     });

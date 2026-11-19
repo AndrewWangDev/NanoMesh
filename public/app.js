@@ -4508,13 +4508,59 @@ document.addEventListener('DOMContentLoaded', async () => {
               model_id: data.model_id,
               endpoint: data.endpoint,
               system_prompt: data.system_prompt,
-              user_prompt: data.user_prompt
+              user_prompt: data.user_prompt,
+              claimed_assets: data.claimed_assets || []
             }
           });
         } catch (workerErr) {
           reject(workerErr);
         }
       });
+    } else if (event === 'asset_chunk') {
+      const isEn = getLocale() === 'en';
+      const roleId = data.role_id;
+      const assetId = data.asset_id;
+      const modality = data.modality;
+      const r2Key = data.r2_key;
+      const previewUrl = data.preview_url || `/api/assets/${assetId}?key=${encodeURIComponent(r2Key || '')}`;
+
+      const respEl = document.getElementById(assistantId);
+      if (respEl) {
+        let mediaGallery = respEl.querySelector('.chat-multimodal-gallery');
+        if (!mediaGallery) {
+          mediaGallery = document.createElement('div');
+          mediaGallery.className = 'chat-multimodal-gallery';
+          mediaGallery.style.marginTop = '12px';
+          mediaGallery.style.marginBottom = '12px';
+          mediaGallery.style.display = 'flex';
+          mediaGallery.style.flexWrap = 'wrap';
+          mediaGallery.style.gap = '8px';
+          respEl.appendChild(mediaGallery);
+        }
+
+        if (modality === 'image') {
+          const imgCard = document.createElement('div');
+          imgCard.className = 'generated-image-card';
+          imgCard.style.maxWidth = '360px';
+          imgCard.style.borderRadius = '8px';
+          imgCard.style.overflow = 'hidden';
+          imgCard.style.border = '1px solid var(--border-color, #e2e8f0)';
+          imgCard.innerHTML = `
+            <img src="${escapeHtml(previewUrl)}" alt="Generated Image" style="width:100%;height:auto;display:block;" loading="lazy" />
+            <div style="padding:6px 10px;font-size:11px;color:var(--text-secondary,#64748b);background:var(--bg-secondary,#f8fafc);display:flex;justify-content:space-between;align-items:center;">
+              <span>🖼️ ${escapeHtml(data.role_name || (isEn ? 'AI Image' : 'AI 生成图片'))}</span>
+              <a href="${escapeHtml(previewUrl)}" target="_blank" download="generated-${assetId.slice(0, 8)}.png" style="color:var(--color-primary,#3b82f6);text-decoration:none;">${isEn ? 'Download' : '下载'}</a>
+            </div>
+          `;
+          mediaGallery.appendChild(imgCard);
+        } else if (modality === 'audio') {
+          const audioEl = document.createElement('audio');
+          audioEl.controls = true;
+          audioEl.src = previewUrl;
+          audioEl.style.width = '100%';
+          mediaGallery.appendChild(audioEl);
+        }
+      }
     } else if (event === 'text_chunk') {
       const rawChunk = data.chunk || '';
       const cleanChunk = rawChunk.replace(/【执行输出】\s*/g, '');

@@ -494,6 +494,12 @@ function createMockR2() {
       return {
         body: item.body,
         httpEtag: "mock-etag-12345",
+        async arrayBuffer() {
+          return item.body.buffer.slice(item.body.byteOffset, item.body.byteOffset + item.body.byteLength);
+        },
+        async text() {
+          return new TextDecoder().decode(item.body);
+        },
         writeHttpMetadata(headers: Headers) {
           headers.set("content-type", item.metadata?.contentType || "application/octet-stream");
         }
@@ -539,6 +545,12 @@ function createMockAI() {
           answers[k] = { score: 2.0 };
         }
         return { answers };
+      }
+      if (model === "@cf/openai/whisper") {
+        return { text: "Mock Whisper transcription from voice audio stream." };
+      }
+      if (model === "@cf/black-forest-labs/flux-1-schnell") {
+        return new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137]);
       }
       if (model.includes("llama")) {
         // Realistic simulated generation latency (allows testing race conditions and client abort)
@@ -1605,8 +1617,314 @@ async function runIntegrationTests() {
   assert.ok(tailStreamText.includes("continuation_token"), "Tail WebGPU node with cloud standby MUST include continuation_token for failover (FINDING-NEW-02)");
   console.log("  ✓ FINDING-NEW-02: Tail WebGPU node issues continuation_token for transparent failover: PASSED");
 
+  // -----------------------------------------------------------------------
+  // SCENARIO 10: Multimodal Pipeline Orchestration, ASR & Decoupled Competence
+  // -----------------------------------------------------------------------
+  console.log("\n[Scenario 10] Multimodal Orchestration, ASR, Decoupled Competence & Targeted Claiming");
+
+  const testUser10Id = "usr_multimodal_001";
+  store.users.push({
+    user_id: testUser10Id,
+    username: "MultimodalUser",
+    email: "mm@nanomesh.local",
+    password_hash: "hash",
+    credits: 20,
+    referral_code: "REF-MM-001",
+    referred_by: null,
+    token_version: 1
+  });
+
+  const user10AuthToken = await signJWT({ userId: testUser10Id, role: "user", tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  const user10ReqHeaders = {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${user10AuthToken}`
+  };
+
+  // 10.1 Register Multimodal Models (Whisper ASR, Flux Schnell)
+  store.models.push(
+    {
+      model_id: "cf_whisper_node",
+      display_name: "Whisper ASR (Edge)",
+      provider: "Cloudflare Workers AI",
+      endpoint: "@cf/openai/whisper",
+      modalities: '["audio"]',
+      in_modalities: '["audio"]',
+      out_modalities: '["text"]',
+      tags: '["#asr", "#audio"]',
+      context_window: 4096,
+      max_concurrency: 30,
+      active_connections: 0,
+      precision: 0.95,
+      user_rating: 4.9,
+      usage_count: 50,
+      cost_per_1k_tokens: 1.0,
+      cost_per_invocation: 0.0,
+      status: "active",
+      is_generalist: 0,
+      prior_score: 0.8,
+      scenario_anchors: '["asr", "audio"]',
+      inference_target: "edge",
+      auth_mode: "none",
+      api_format: "workers_ai"
+    },
+    {
+      model_id: "cf_flux_node",
+      display_name: "FLUX.1-Schnell (Edge)",
+      provider: "Cloudflare Workers AI",
+      endpoint: "@cf/black-forest-labs/flux-1-schnell",
+      modalities: '["text", "image"]',
+      in_modalities: '["text"]',
+      out_modalities: '["image"]',
+      tags: '["#image_generation"]',
+      context_window: 2048,
+      max_concurrency: 20,
+      active_connections: 0,
+      precision: 0.98,
+      user_rating: 4.95,
+      usage_count: 50,
+      cost_per_1k_tokens: 0.0,
+      cost_per_invocation: 2.0,
+      status: "active",
+      is_generalist: 0,
+      prior_score: 0.9,
+      scenario_anchors: '["image_gen", "drawing"]',
+      inference_target: "edge",
+      auth_mode: "none",
+      api_format: "workers_ai"
+    }
+  );
+
+  // Register roles
+  store.dag_roles.push(
+    {
+      role_id: "role_asr_transcribe",
+      name_zh: "语音智能听写",
+      name_en: "Audio ASR Transcription",
+      in_modalities: JSON.stringify(["audio"]),
+      out_modalities: JSON.stringify(["text"]),
+      in_degree: 0,
+      out_degree: 0,
+      requisition_tags: JSON.stringify(["#asr"]),
+      compensation_prompts: null
+    },
+    {
+      role_id: "role_flux_draw",
+      name_zh: "视觉图像生成",
+      name_en: "Visual Image Generation",
+      in_modalities: JSON.stringify(["text"]),
+      out_modalities: JSON.stringify(["image"]),
+      in_degree: 0,
+      out_degree: 1,
+      requisition_tags: JSON.stringify(["#image_generation"]),
+      compensation_prompts: null
+    },
+    {
+      role_id: "role_vision_critique",
+      name_zh: "视觉多模态审校",
+      name_en: "Vision Quality Critique",
+      in_modalities: JSON.stringify(["image"]),
+      out_modalities: JSON.stringify(["text"]),
+      in_degree: 1,
+      out_degree: 0,
+      requisition_tags: JSON.stringify(["#vision"]),
+      compensation_prompts: null
+    }
+  );
+
+  // Register templates
+  store.dag_templates.push(
+    {
+      template_id: "tpl_audio_transcription",
+      name_zh: "语音转写流水线",
+      name_en: "Audio Transcription Pipeline",
+      desc_zh: "Whisper ASR 语音识别转写",
+      desc_en: "Whisper ASR speech-to-text",
+      scenario_category: "audio",
+      scenario_anchor: "audio",
+      roles: JSON.stringify(["role_asr_transcribe"]),
+      role_sequence: JSON.stringify(["role_asr_transcribe"]),
+      edges: JSON.stringify([]),
+      head_modalities: JSON.stringify(["audio"]),
+      tail_modalities: JSON.stringify(["text"]),
+      status: "active",
+      priority: 5
+    },
+    {
+      template_id: "tpl_flux_and_inspect",
+      name_zh: "生图与审校多模态编排",
+      name_en: "Generation & Inspection Multimodal Pipeline",
+      desc_zh: "FLUX.1 文本生图并由视觉模型质检",
+      desc_en: "FLUX.1 text-to-image with vision model QA",
+      scenario_category: "multimodal",
+      scenario_anchor: "image_gen",
+      roles: JSON.stringify(["role_flux_draw", "role_vision_critique"]),
+      role_sequence: JSON.stringify(["role_flux_draw", "role_vision_critique"]),
+      edges: JSON.stringify([]),
+      head_modalities: JSON.stringify(["text"]),
+      tail_modalities: JSON.stringify(["text"]),
+      status: "active",
+      priority: 5
+    },
+    {
+      template_id: "tpl_text_then_vision",
+      name_zh: "文本前序与视觉分析",
+      name_en: "Text then Vision",
+      desc_zh: "前序文本提炼后交由视觉分析",
+      desc_en: "Text refinement then vision analysis",
+      scenario_category: "multimodal",
+      scenario_anchor: "vision",
+      roles: JSON.stringify(["role_text_reasoning", "role_vision_critique"]),
+      role_sequence: JSON.stringify(["role_text_reasoning", "role_vision_critique"]),
+      edges: JSON.stringify([]),
+      head_modalities: JSON.stringify(["text", "image"]),
+      tail_modalities: JSON.stringify(["text"]),
+      status: "active",
+      priority: 5
+    }
+  );
+
+  // 10.2 Whisper Audio Transcription
+  const audioAssetKey = `tmp/${testUser10Id}/sess_audio_01/recording.wav`;
+  const dummyWavBytes = new Uint8Array([82, 73, 70, 70, 36, 0, 0, 0, 87, 65, 86, 69]); // RIFF...WAVE
+  await env.R2.put(audioAssetKey, dummyWavBytes, {
+    httpMetadata: { contentType: "audio/wav" }
+  });
+
+  const audioEnvelope: UnifiedProtocolEnvelope = {
+    envelope_id: "env_audio_001",
+    session_id: "sess_audio_001",
+    user_id: testUser10Id,
+    instruction_payload: "请将该语音转写为文字",
+    metadata: { estimated_input_tokens: 100 },
+    assets_manifest: [
+      {
+        asset_id: "asset_voice_01",
+        modality: "audio",
+        mime_type: "audio/wav",
+        file_size: dummyWavBytes.byteLength,
+        r2_key: audioAssetKey,
+        consumed: false,
+        source_digest: "digest_voice_01"
+      }
+    ]
+  };
+
+  const audioChatReq = new Request("https://nanomesh.local/api/chat", {
+    method: "POST",
+    headers: user10ReqHeaders,
+    body: JSON.stringify({
+      envelope: audioEnvelope,
+      reRouteMode: "switch_template",
+      chosenTemplateId: "tpl_audio_transcription"
+    })
+  });
+
+  const audioChatRes = await handleChat(audioChatReq, env);
+  assert.equal(audioChatRes.status, 200, "Audio chat request must return 200 SSE stream");
+  const audioStreamText = await audioChatRes.text();
+  assert.ok(audioStreamText.includes("Mock Whisper transcription"), "Must receive Whisper transcription in SSE stream");
+  assert.ok(audioStreamText.includes("dag_complete"), "Audio pipeline must emit dag_complete");
+
+  const user10AfterAudio = store.users.find(u => u.user_id === testUser10Id);
+  assert.equal(user10AfterAudio.credits, 19, "Whisper transcription must consume 1 credit (20 -> 19)");
+  console.log("  ✓ Whisper Audio ASR pipeline accurately transcribes R2 audio and deducts credit: PASSED");
+
+  // 10.3 Flux text-to-image + downstream vision critique (P0 targeted claiming & invocation pricing)
+  const drawEnvelope: UnifiedProtocolEnvelope = {
+    envelope_id: "env_flux_001",
+    session_id: "sess_flux_001",
+    user_id: testUser10Id,
+    instruction_payload: "请绘制赛博朋克霓虹城市夜景，并进行多模态构图分析",
+    metadata: { estimated_input_tokens: 200 },
+    assets_manifest: []
+  };
+
+  const drawChatReq = new Request("https://nanomesh.local/api/chat", {
+    method: "POST",
+    headers: user10ReqHeaders,
+    body: JSON.stringify({
+      envelope: drawEnvelope,
+      reRouteMode: "switch_template",
+      chosenTemplateId: "tpl_flux_and_inspect"
+    })
+  });
+
+  const drawChatRes = await handleChat(drawChatReq, env);
+  assert.equal(drawChatRes.status, 200, "Flux + Vision chat request must return 200 SSE stream");
+  const drawStreamText = await drawChatRes.text();
+
+  assert.ok(drawStreamText.includes("event: asset_chunk"), "Pipeline must emit asset_chunk for generated image");
+  assert.ok(drawStreamText.includes("image/png"), "Asset chunk must specify image/png MIME");
+  assert.ok(drawStreamText.includes("event: dag_complete"), "Must complete full two-stage multimodal pipeline");
+
+  // Verify R2 object creation for generated image
+  const r2List = await env.R2.list({ prefix: `tmp/${testUser10Id}/${drawEnvelope.session_id}/` });
+  assert.ok(r2List.objects.length > 0, "Generated Flux image must be stored in R2 bucket");
+
+  // Verify billing: Flux invocation (2 credits) + Vision critique (1 credit) = 3 credits total
+  const user10AfterDraw = store.users.find(u => u.user_id === testUser10Id);
+  assert.equal(user10AfterDraw.credits, 16, "Flux (2 credits) + Vision critique (1 credit) must deduct exactly 3 credits (19 -> 16)");
+
+  const drawLedger = store.credit_ledger.find(l => l.user_id === testUser10Id && l.amount === -3);
+  assert.ok(drawLedger, "Credit ledger must record -3 compute_cost for multimodal pipeline");
+  console.log("  ✓ Flux image generation -> R2 persistence -> P0 vision critique claiming & atomic billing (3 credits): PASSED");
+
+  // 10.4 P1 Penetrating Claiming: Downstream vision node claims unconsumed user asset when Step 0 produces no media
+  const userPhotoKey = `tmp/${testUser10Id}/sess_p1_01/user_photo.png`;
+  await env.R2.put(userPhotoKey, new Uint8Array([137, 80, 78, 71, 1, 2, 3, 4]), {
+    httpMetadata: { contentType: "image/png" }
+  });
+
+  const p1Envelope: UnifiedProtocolEnvelope = {
+    envelope_id: "env_p1_001",
+    session_id: "sess_p1_001",
+    user_id: testUser10Id,
+    instruction_payload: "请结合用户提供的图像进行分析",
+    metadata: { estimated_input_tokens: 150 },
+    assets_manifest: [
+      {
+        asset_id: "virtual_text_asset",
+        modality: "text",
+        mime_type: "text/plain",
+        file_size: 30,
+        in_memory_text: "请结合用户提供的图像进行分析",
+        consumed: false,
+        source_digest: "digest_p1_text"
+      },
+      {
+        asset_id: "user_photo_asset",
+        modality: "image",
+        mime_type: "image/png",
+        file_size: 8,
+        r2_key: userPhotoKey,
+        consumed: false,
+        source_digest: "digest_p1_photo"
+      }
+    ]
+  };
+
+  const p1ChatReq = new Request("https://nanomesh.local/api/chat", {
+    method: "POST",
+    headers: user10ReqHeaders,
+    body: JSON.stringify({
+      envelope: p1Envelope,
+      reRouteMode: "switch_template",
+      chosenTemplateId: "tpl_text_then_vision"
+    })
+  });
+
+  const p1ChatRes = await handleChat(p1ChatReq, env);
+  assert.equal(p1ChatRes.status, 200, "P1 chat request must return 200 SSE stream");
+  const p1StreamText = await p1ChatRes.text();
+  assert.ok(p1StreamText.includes("dag_complete"), "P1 penetrating claiming pipeline must complete");
+
+  // Step 0 text (1 credit) + Step 1 vision (1 credit) = 2 credits (16 -> 14)
+  const user10AfterP1 = store.users.find(u => u.user_id === testUser10Id);
+  assert.equal(user10AfterP1.credits, 14, "P1 pipeline must deduct 2 credits (16 -> 14)");
+  console.log("  ✓ P1 Penetrating Claiming Law (downstream node claims unconsumed user asset): PASSED");
+
   console.log("\n==================================================");
-  console.log("   🎉 ALL 9 INTEGRATION SCENARIOS PASSED (100%)!  ");
+  console.log("   🎉 ALL 10 INTEGRATION SCENARIOS PASSED (100%)! ");
   console.log("==================================================");
 }
 

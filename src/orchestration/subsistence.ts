@@ -28,13 +28,13 @@ export function hardFilterModels(
 }
 
 /**
- * Step 1: Subsistence Law (温饱定律) for DAG Templates
+ * Step 1: Generalized Subsistence Law (广义温饱定律) for DAG Templates
  * 
- * Formula:
- * { Head Node In-Modalities } ⊆ A_user ⊆ { Head Node In-Modalities } ∪ { Tail Node In-Modalities }
- * 
- * In Single-Node DAG (in=0 and out=0):
- * Head == Tail == N, so N_in ⊆ A_user ⊆ N_in, which mathematically forces A_user ≡ N_in!
+ * Axioms:
+ * 1. Single-Node DAG: Exact Equivalence A_user ≡ N_in
+ * 2. Multi-Node DAG:
+ *    - No-Starvation Axiom: For every node R_i, R_i.in ⊆ Ω_i, where Ω_i = A_user ∪ ⋃_{j < i} R_j.out
+ *    - No-Orphan Axiom: A_user ⊆ ⋃_{k=0}^{n-1} R_k.in
  */
 export function filterTemplatesBySubsistence(
   templates: DAGTemplate[],
@@ -44,10 +44,6 @@ export function filterTemplatesBySubsistence(
 
   return templates.filter(tpl => {
     if (tpl.status !== 'active') return false;
-
-    const headSet = new Set(tpl.head_modalities);
-    const tailSet = new Set(tpl.tail_modalities);
-    const combinedSet = new Set([...tpl.head_modalities, ...tpl.tail_modalities]);
 
     // Check single-node DAG case
     const isSingleNode = tpl.roles.length === 1 && tpl.roles[0].in_degree === 0 && tpl.roles[0].out_degree === 0;
@@ -61,16 +57,46 @@ export function filterTemplatesBySubsistence(
       return true;
     }
 
-    // 1. Condition A: { Head Node In-Modalities } ⊆ A_user
-    // Every modality that the head node requires must be present in user assets
-    for (const m of headSet) {
-      if (!userModalitySet.has(m)) return false;
+    if (!tpl.roles || tpl.roles.length === 0) {
+      // Legacy fallback if roles array is unpopulated
+      const headSet = new Set(tpl.head_modalities);
+      const combinedSet = new Set([...tpl.head_modalities, ...tpl.tail_modalities]);
+      for (const m of headSet) {
+        if (!userModalitySet.has(m)) return false;
+      }
+      for (const m of userModalitySet) {
+        if (!combinedSet.has(m)) return false;
+      }
+      return true;
     }
 
-    // 2. Condition B: A_user ⊆ { Head Node In-Modalities } ∪ { Tail Node In-Modalities }
-    // User assets cannot contain orphan modalities that neither head nor tail can accept
+    // Multi-Node DAG under Generalized Subsistence Law:
+    // 1. Axiom 1: No-Starvation (Every node R_i must have its input satisfied by Ω_i)
+    const cumulativeSupply = new Set<string>(userModalitySet);
+    for (let i = 0; i < tpl.roles.length; i++) {
+      const role = tpl.roles[i];
+      for (const requiredIn of role.in_modalities) {
+        if (!cumulativeSupply.has(requiredIn)) {
+          return false;
+        }
+      }
+      // Add this role's outputs to cumulative supply for downstream nodes
+      for (const outM of (role.out_modalities || ['text'])) {
+        cumulativeSupply.add(outM);
+      }
+    }
+
+    // 2. Axiom 2: No-Orphan (User assets cannot contain orphan modalities unconsumed by any node)
+    const allClaimableInputs = new Set<string>();
+    for (const role of tpl.roles) {
+      for (const inM of role.in_modalities) {
+        allClaimableInputs.add(inM);
+      }
+    }
     for (const m of userModalitySet) {
-      if (!combinedSet.has(m)) return false;
+      if (!allClaimableInputs.has(m)) {
+        return false;
+      }
     }
 
     return true;

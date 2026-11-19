@@ -6,7 +6,7 @@ import {
   lookupDeterministicCache, 
   storeDeterministicCache 
 } from "./signature";
-import { InstantiatedDAG, ModelMetadata, UnifiedProtocolEnvelope } from "./types";
+import { ArtifactBundle, InstantiatedDAG, MediaArtifact, ModelMetadata, UnifiedProtocolEnvelope } from "./types";
 import { signHeavyNodeToken, signJWT } from "../auth/jwt";
 
 export interface ExecutionOptions {
@@ -166,6 +166,8 @@ export interface DownstreamPromptParts {
   currentTaskDirective: string;
   flatPromptContent: string;
   attachedDocsContent?: string;
+  imageB64?: string;
+  imageMimeType?: string;
 }
 
 /**
@@ -177,36 +179,67 @@ export function buildDownstreamMessages(
   parts: DownstreamPromptParts,
   target: ModelMetadata
 ): {
-  openaiMessages: Array<{ role: string; content: string }>;
-  geminiContents: Array<{ role: string; parts: Array<{ text: string }> }>;
+  openaiMessages: Array<{ role: string; content: any }>;
+  geminiContents: Array<{ role: string; parts: Array<any> }>;
 } {
   const isHeavy = target.inference_target === 'heavy';
   const hasUpstream = !!parts.sanitizedIntermediateOutput && parts.sanitizedIntermediateOutput.trim().length > 0;
 
+  let imagePartForGemini: any = null;
+  if (parts.imageB64) {
+    const cleanB64 = parts.imageB64.includes('base64,') ? parts.imageB64.split('base64,')[1] : parts.imageB64;
+    imagePartForGemini = {
+      inlineData: {
+        mimeType: parts.imageMimeType || 'image/jpeg',
+        data: cleanB64
+      }
+    };
+  }
+
   if (isHeavy && hasUpstream) {
     const userPromptWithDocs = [parts.initialUserDirective || '请处理以下输入材料', parts.attachedDocsContent].filter(Boolean).join('\n\n');
+    const userContentOpenAI = parts.imageB64 ? [
+      { type: 'text', text: userPromptWithDocs },
+      { type: 'image_url', image_url: { url: parts.imageB64 } }
+    ] : userPromptWithDocs;
+
+    const userGeminiParts: any[] = [{ text: userPromptWithDocs }];
+    if (imagePartForGemini) {
+      userGeminiParts.push(imagePartForGemini);
+    }
+
     return {
       openaiMessages: [
         { role: 'system', content: parts.systemPrompt },
-        { role: 'user', content: userPromptWithDocs },
+        { role: 'user', content: userContentOpenAI },
         { role: 'assistant', content: parts.sanitizedIntermediateOutput },
         { role: 'user', content: parts.currentTaskDirective || '请基于前置产出完成当前岗位的执行任务' }
       ],
       geminiContents: [
-        { role: 'user', parts: [{ text: userPromptWithDocs }] },
+        { role: 'user', parts: userGeminiParts },
         { role: 'model', parts: [{ text: parts.sanitizedIntermediateOutput }] },
         { role: 'user', parts: [{ text: parts.currentTaskDirective || '请基于前置产出完成当前岗位的执行任务' }] }
       ]
     };
   }
 
+  const flatUserContentOpenAI = parts.imageB64 ? [
+    { type: 'text', text: parts.flatPromptContent },
+    { type: 'image_url', image_url: { url: parts.imageB64 } }
+  ] : parts.flatPromptContent;
+
+  const flatGeminiParts: any[] = [{ text: parts.flatPromptContent }];
+  if (imagePartForGemini) {
+    flatGeminiParts.push(imagePartForGemini);
+  }
+
   return {
     openaiMessages: [
       { role: 'system', content: parts.systemPrompt },
-      { role: 'user', content: parts.flatPromptContent }
+      { role: 'user', content: flatUserContentOpenAI }
     ],
     geminiContents: [
-      { role: 'user', parts: [{ text: parts.flatPromptContent }] }
+      { role: 'user', parts: flatGeminiParts }
     ]
   };
 }
@@ -684,6 +717,12 @@ export async function executeDAGStream(
           assets_manifest: envelope.assets_manifest.map(a => ({ ...a }))
         };
 
+        const currentBundle: ArtifactBundle = {
+          text_context: upstreamOutput || '',
+          generated_media: [],
+          inherited_assets: [...runEnvelope.assets_manifest]
+        };
+
         // 2. Loop through each node sequentially
         for (let idx = startIdx; idx < dag.nodes.length; idx++) {
           const node = dag.nodes[idx];
@@ -692,7 +731,7 @@ export async function executeDAGStream(
           const nodeStartTime = Date.now();
 
           // Envelope slicing with instruction masking and downstream metadata
-          const nodeCtx = sliceEnvelopeForNode(node, runEnvelope, upstreamOutput, parentRoleName);
+          const nodeCtx = sliceEnvelopeForNode(node, runEnvelope, upstreamOutput, parentRoleName, currentBundle);
 
           // 1. Prompt Assembly based on Role Responsibility
           let systemPrompt = '';
@@ -882,7 +921,15 @@ export async function executeDAGStream(
                 user_prompt: promptContent,
                 is_tail_node: true,
                 handshake_id: handshakeId,
-                continuation_token: continuationToken
+                continuation_token: continuationToken,
+                claimed_assets: nodeCtx.claimed_assets.map(a => ({
+                  asset_id: a.asset_id,
+                  modality: a.modality,
+                  mime_type: a.mime_type,
+                  file_size: a.file_size,
+                  r2_key: a.r2_key,
+                  source_digest: a.source_digest
+                }))
               });
               upstreamOutput = '';
               continue;
@@ -991,7 +1038,15 @@ export async function executeDAGStream(
                   system_prompt: systemPrompt,
                   user_prompt: promptContent,
                   is_tail_node: false,
-                  expires_in: 300
+                  expires_in: 300,
+                  claimed_assets: nodeCtx.claimed_assets.map(a => ({
+                    asset_id: a.asset_id,
+                    modality: a.modality,
+                    mime_type: a.mime_type,
+                    file_size: a.file_size,
+                    r2_key: a.r2_key,
+                    source_digest: a.source_digest
+                  }))
                 });
 
                 // End stream gracefully immediately to release Edge Worker connection & compute
@@ -1001,6 +1056,8 @@ export async function executeDAGStream(
           }
 
           let nodeOutput = '';
+          let actualExecutingModel: ModelMetadata = node.selected_model;
+          let nodeCost = 0;
           const cachedOutput = await lookupDeterministicCache(env, cacheKey);
 
           if (cachedOutput) {
@@ -1056,10 +1113,44 @@ export async function executeDAGStream(
               }
             }
 
+            // 2b. Fetch audio from R2 bucket if required
+            let audioBytes: Uint8Array | null = null;
+            const audioAsset = nodeCtx.claimed_assets.find(a => a.modality === 'audio');
+
+            if (audioAsset) {
+              if (audioAsset.r2_key && env.R2) {
+                const userSafePrefix = `tmp/${options.userId}/`;
+                if (!audioAsset.r2_key.startsWith(userSafePrefix)) {
+                  console.error(`[Security IDOR] User ${options.userId} attempted to access unauthorized R2 key: ${audioAsset.r2_key}`);
+                  throw new Error(`安全违规：拒绝访问未经授权的资产对象`);
+                }
+                try {
+                  const r2Obj = await env.R2.get(audioAsset.r2_key);
+                  if (r2Obj) {
+                    const buf = await r2Obj.arrayBuffer();
+                    if (buf.byteLength > 25 * 1024 * 1024) {
+                      throw new Error("音频资产体积超过 25MB 内存安全上限，已拒绝加载以防止 Worker 内存溢出。");
+                    }
+                    audioBytes = new Uint8Array(buf);
+                  } else {
+                    console.error(`[Dispatcher] Audio object not found in R2 for key: ${audioAsset.r2_key}`);
+                  }
+                } catch (r2Err) {
+                  console.error("[Dispatcher] R2 audio asset retrieval error:", r2Err);
+                }
+              }
+            }
+
             // 3. Fail-fast check: If node requires image, image MUST exist! Zero tolerance for missing assets!
-            const isImageNode = node.role.in_modalities.includes('image') || node.selected_model.modalities.includes('image');
+            const isImageNode = node.role.in_modalities.includes('image') || (node.selected_model.in_modalities?.includes('image') ?? node.selected_model.modalities.includes('image'));
             if (isImageNode && !imageB64 && !imageBytes) {
               throw new Error(`工作流执行中断：岗位【${node.role.name_zh}】强依赖图像资产输入，但未能检索到图片实体（R2 Key: ${imageAsset?.r2_key || '未指定'}）。严禁越权降级或跳过执行。`);
+            }
+
+            // 3b. Fail-fast check: If node requires audio, audio MUST exist!
+            const isAudioNode = node.role.in_modalities.includes('audio') || (node.selected_model.in_modalities?.includes('audio') ?? node.selected_model.modalities.includes('audio'));
+            if (isAudioNode && !audioBytes) {
+              throw new Error(`工作流执行中断：岗位【${node.role.name_zh}】强依赖音频资产输入，但未能检索到音频实体（R2 Key: ${audioAsset?.r2_key || '未指定'}）。严禁越权降级或跳过执行。`);
             }
 
             // 4. Candidate Models: STRICTLY Top-1 Primary + Top-2/Top-3 Standby Models from Step 3 Arbitration!
@@ -1073,7 +1164,7 @@ export async function executeDAGStream(
             // 5. Execute candidate pool sequentially (Primary -> Standby Failover)
             let isExecutionSuccess = false;
             let didStreamChunks = false;
-            let actualExecutingModel: ModelMetadata = node.selected_model;
+            actualExecutingModel = node.selected_model;
             const candidateErrors: string[] = [];
 
             for (let attemptIdx = 0; attemptIdx < candidateModels.length; attemptIdx++) {
@@ -1120,7 +1211,9 @@ export async function executeDAGStream(
                   sanitizedIntermediateOutput: compactedUpstream,
                   currentTaskDirective: currentStepDirective,
                   flatPromptContent: guardedPromptContent,
-                  attachedDocsContent: attachedDocsSection || ''
+                  attachedDocsContent: attachedDocsSection || '',
+                  imageB64: imageB64 || undefined,
+                  imageMimeType: imageAsset?.mime_type || 'image/jpeg'
                 };
 
                 const builtMessages = buildDownstreamMessages(downstreamParts, currentCandidate);
@@ -1284,7 +1377,100 @@ export async function executeDAGStream(
                   } else {
                     candidateErrors.push(`[${currentCandidate.display_name}]: 解析输出过短或空 (len=${parsed?.length || 0})`);
                   }
-                } else if (!isImageNode && endpoint.startsWith('@cf/')) {
+                } else if ((endpoint.includes('whisper') || isAudioNode) && audioBytes) {
+                  // Workers AI Whisper ASR Model
+                  const aiRes: any = await callWithTimeout(
+                    () => env.AI.run(endpoint as any, {
+                      audio: [...audioBytes]
+                    }),
+                    45000,
+                    abortController.signal
+                  );
+                  const parsed = (aiRes && typeof aiRes.text === 'string') 
+                    ? sanitizeLLMOutput(aiRes.text) 
+                    : (await parseAIResponse(aiRes));
+                  if (parsed && parsed.length > 2) {
+                    nodeOutput = parsed;
+                    actualExecutingModel = currentCandidate;
+                    isExecutionSuccess = true;
+                    break;
+                  } else {
+                    candidateErrors.push(`[${currentCandidate.display_name}]: 语音转写输出过短或为空`);
+                  }
+                } else if (endpoint.includes('flux') || currentCandidate.out_modalities?.includes('image')) {
+                  // Workers AI Flux Image Generation Model
+                  const aiRes: any = await callWithTimeout(
+                    () => env.AI.run(endpoint as any, {
+                      prompt: promptContent,
+                      steps: 4
+                    }),
+                    45000,
+                    abortController.signal
+                  );
+                  if (aiRes) {
+                    const generatedAssetId = crypto.randomUUID();
+                    const newAssetKey = `tmp/${options.userId}/${envelope.session_id}/${generatedAssetId}.png`;
+                    let imageBuffer: ArrayBuffer;
+                    if (aiRes instanceof ReadableStream || typeof aiRes.getReader === 'function') {
+                      const resp = new Response(aiRes);
+                      imageBuffer = await resp.arrayBuffer();
+                    } else if (aiRes instanceof ArrayBuffer) {
+                      imageBuffer = aiRes;
+                    } else if (aiRes instanceof Uint8Array) {
+                      imageBuffer = aiRes.buffer.slice(aiRes.byteOffset, aiRes.byteOffset + aiRes.byteLength) as ArrayBuffer;
+                    } else if (aiRes.image) {
+                      const binStr = atob(aiRes.image);
+                      const len = binStr.length;
+                      const u8 = new Uint8Array(len);
+                      for (let i = 0; i < len; i++) u8[i] = binStr.charCodeAt(i);
+                      imageBuffer = u8.buffer as ArrayBuffer;
+                    } else {
+                      const resp = new Response(aiRes);
+                      imageBuffer = await resp.arrayBuffer();
+                    }
+
+                    if (env.R2 && imageBuffer.byteLength > 0) {
+                      await env.R2.put(newAssetKey, imageBuffer, {
+                        httpMetadata: { contentType: 'image/png' },
+                        customMetadata: {
+                          userId: options.userId,
+                          sessionId: envelope.session_id,
+                          assetId: generatedAssetId,
+                          roleId: node.role.role_id
+                        }
+                      });
+                    }
+
+                    const mediaArtifact: MediaArtifact = {
+                      asset_id: generatedAssetId,
+                      modality: 'image',
+                      mime_type: 'image/png',
+                      file_size: imageBuffer.byteLength,
+                      r2_key: newAssetKey,
+                      source_digest: `${generatedAssetId}-${imageBuffer.byteLength}`
+                    };
+
+                    currentBundle.generated_media.push(mediaArtifact);
+
+                    sendEvent('asset_chunk', {
+                      role_id: node.role.role_id,
+                      role_name: node.role.name_zh,
+                      asset_id: generatedAssetId,
+                      modality: 'image',
+                      mime_type: 'image/png',
+                      file_size: imageBuffer.byteLength,
+                      r2_key: newAssetKey,
+                      preview_url: `/api/assets/${generatedAssetId}?key=${encodeURIComponent(newAssetKey)}`
+                    });
+
+                    nodeOutput = `[系统生成图像资产已存入会话账本: ${generatedAssetId}.png (体积: ${(imageBuffer.byteLength / 1024).toFixed(1)} KB)]\n提示词: ${promptContent}`;
+                    actualExecutingModel = currentCandidate;
+                    isExecutionSuccess = true;
+                    break;
+                  } else {
+                    candidateErrors.push(`[${currentCandidate.display_name}]: 图像生成接口未返回有效数据`);
+                  }
+                } else if (!isImageNode && !isAudioNode && !currentCandidate.out_modalities?.includes('image') && endpoint.startsWith('@cf/')) {
                   // Text Model Execution with token-by-token streaming on tail node (guarded against context window overflow)
                   const timeoutMs = endpoint.includes('qwq') ? 45000 : 35000;
                   const aiRes = await callWithTimeout(
@@ -1371,8 +1557,10 @@ export async function executeDAGStream(
               );
             }
 
-            // Calculate cost (derived from actual executing model's cost)
-            const nodeCost = Math.max(1, Math.round(actualExecutingModel.cost_per_1k_tokens || 1));
+            // Calculate cost (derived from actual executing model's cost + cost_per_invocation)
+            const tokenCost = Math.max(0, Math.round(actualExecutingModel.cost_per_1k_tokens ?? 1));
+            const invocationCost = Math.max(0, Math.round(actualExecutingModel.cost_per_invocation ?? 0));
+            nodeCost = Math.max(1, tokenCost + invocationCost);
             totalCost += nodeCost;
 
             sendEvent('node_complete', {
@@ -1390,6 +1578,13 @@ export async function executeDAGStream(
           }
 
           upstreamOutput = nodeOutput;
+          currentBundle.text_context = nodeOutput;
+          currentBundle.execution_trace = {
+            role_id: node.role.role_id,
+            model_id: actualExecutingModel.model_id,
+            cost: nodeCost,
+            duration_ms: Date.now() - nodeStartTime
+          };
         }
 
         if (isStreamCancelled) {
