@@ -982,6 +982,23 @@ async function runUnitTests() {
   assert.equal(orphanRejected.length, 0, "Pipeline ignoring user's physical image must be rejected by No-Orphan Axiom");
   console.log("  ✓ AUDIT-MM-01: Generalized Subsistence Law for Reverse Multimodal Pipelines & Physical Invariance: PASSED");
 
+  // 11.6 FINDING-NEW-01: Client Payload Dual-Key Serialization Compatibility
+  const appJsPath = path.resolve(process.cwd(), "public", "app.js");
+  const appJsContent = fs.readFileSync(appJsPath, "utf-8");
+
+  // Verify that asset_chunk push sets both camelCase and snake_case properties
+  assert.ok(appJsContent.includes("r2Key: r2Key"), "Must register r2Key in sessionAssets");
+  assert.ok(appJsContent.includes("r2_key: r2Key"), "Must register r2_key in sessionAssets");
+  assert.ok(appJsContent.includes("mime_type: data.mime_type"), "Must register mime_type in sessionAssets");
+  assert.ok(appJsContent.includes("type: data.mime_type"), "Must register type in sessionAssets");
+
+  // Verify that assets_manifest serialization provides fallback defense
+  assert.ok(appJsContent.includes("r2_key: f.r2Key || f.r2_key || null"), "assets_manifest must fallback between r2Key and r2_key");
+  assert.ok(appJsContent.includes("mime_type: f.type || f.mime_type || 'text/plain'"), "assets_manifest must fallback between type and mime_type");
+  assert.ok(appJsContent.includes("file_size: f.size ?? f.file_size ?? 0"), "assets_manifest must fallback between size and file_size");
+  assert.ok(appJsContent.includes("r2_key: a.r2_key || a.r2Key"), "sessionAssetLedger must support dual-key r2_key");
+  console.log("  ✓ FINDING-NEW-01: Client payload dual-key serialization compatibility: PASSED");
+
   console.log("\n==================================================");
   console.log("   🎉 ALL 11 UNIT TEST SUITES PASSED (100%)!      ");
   console.log("==================================================");
