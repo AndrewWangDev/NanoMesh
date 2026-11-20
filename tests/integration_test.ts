@@ -43,16 +43,19 @@ interface TableStore {
   user_uploaded_models: any[];
   account_tombstones: any[];
   dag_handshakes: any[];
+  notifications: any[];
+  broadcast_reads: any[];
 }
 
 interface TableConstraint {
   primaryKey: string;
   uniqueKeys?: string[][];
+  nocaseKeys?: string[];
 }
 
 const SCHEMA_CONSTRAINTS: Record<string, TableConstraint> = {
   account_tombstones: { primaryKey: 'hash_id' },
-  users: { primaryKey: 'user_id', uniqueKeys: [['email'], ['referral_code']] },
+  users: { primaryKey: 'user_id', uniqueKeys: [['email'], ['referral_code'], ['username']], nocaseKeys: ['username', 'email'] },
   user_oauth_bindings: { primaryKey: 'id', uniqueKeys: [['provider', 'provider_id']] },
   dag_handshakes: { primaryKey: 'handshake_id' },
   dag_roles: { primaryKey: 'role_id' },
@@ -81,13 +84,21 @@ function checkAndInsertRow(
     const pk = constraint.primaryKey;
     const pkConflictIndex = tableData.findIndex(r => r[pk] !== undefined && r[pk] !== null && r[pk] === newRow[pk]);
 
-    // 2. Check UNIQUE Keys (including compound keys)
+    // 2. Check UNIQUE Keys (including compound keys and NOCASE collation)
     let ukConflictIndex = -1;
     let conflictedKey = pk;
     if (constraint.uniqueKeys) {
       for (const ukCols of constraint.uniqueKeys) {
         const idx = tableData.findIndex(r =>
-          ukCols.every(col => r[col] !== undefined && r[col] !== null && r[col] === newRow[col])
+          ukCols.every(col => {
+            const valA = r[col];
+            const valB = newRow[col];
+            if (valA === undefined || valA === null || valB === undefined || valB === null) return false;
+            if (constraint.nocaseKeys?.includes(col) && typeof valA === 'string' && typeof valB === 'string') {
+              return valA.toLowerCase() === valB.toLowerCase();
+            }
+            return valA === valB;
+          })
         );
         if (idx !== -1) {
           ukConflictIndex = idx;
@@ -171,6 +182,19 @@ function createMockD1(store: TableStore) {
             let res = [...store.users];
             if (cleanSql.includes("WHERE user_id = ?")) {
               res = res.filter(u => u.user_id === boundArgs[0]);
+            } else if (cleanSql.includes("LOWER(email) = LOWER(?) OR LOWER(username) = LOWER(?)")) {
+              const emailArg = String(boundArgs[0] || '').toLowerCase();
+              const userArg = String(boundArgs[1] || '').toLowerCase();
+              res = res.filter(u => 
+                (u.email && u.email.toLowerCase() === emailArg) || 
+                (u.username && u.username.toLowerCase() === userArg)
+              );
+            } else if (cleanSql.includes("WHERE email = ? OR username = ?")) {
+              res = res.filter(u => u.email === boundArgs[0] || u.username === boundArgs[1]);
+            } else if (cleanSql.includes("LOWER(username) = LOWER(?) AND user_id != ?")) {
+              const userArg = String(boundArgs[0] || '').toLowerCase();
+              const userId = boundArgs[1];
+              res = res.filter(u => u.username && u.username.toLowerCase() === userArg && u.user_id !== userId);
             }
             return { results: res as any };
           }
@@ -248,6 +272,20 @@ function createMockD1(store: TableStore) {
 
           // DELETE FROM user_passkeys
           if (cleanSql.startsWith("DELETE FROM user_passkeys")) {
+            return { meta: { changes: 1 } };
+          }
+
+          // DELETE FROM notifications
+          if (cleanSql.startsWith("DELETE FROM notifications")) {
+            const userId = boundArgs[0];
+            store.notifications = (store.notifications || []).filter(n => n.user_id !== userId);
+            return { meta: { changes: 1 } };
+          }
+
+          // DELETE FROM broadcast_reads
+          if (cleanSql.startsWith("DELETE FROM broadcast_reads")) {
+            const userId = boundArgs[0];
+            store.broadcast_reads = (store.broadcast_reads || []).filter(r => r.user_id !== userId);
             return { meta: { changes: 1 } };
           }
 
@@ -767,7 +805,9 @@ function buildMockEnv(): { env: Env; store: TableStore } {
     user_passkeys: [],
     user_uploaded_models: [],
     account_tombstones: [],
-    dag_handshakes: []
+    dag_handshakes: [],
+    notifications: [],
+    broadcast_reads: []
   };
 
   const env = {
@@ -859,7 +899,19 @@ async function runIntegrationTests() {
     /SQLITE_CONSTRAINT: UNIQUE constraint failed: users\.email/
   );
 
+  // NM-SEC-03: Verify case-insensitive username uniqueness guard (newbieuser vs NewbieUser)
+  await assert.rejects(
+    async () => {
+      await env.DB.prepare(`
+        INSERT INTO users (user_id, username, email, password_hash, credits, referral_code, referred_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).bind("usr_case_insensitive_003", "newbieuser", "different2@nanomesh.local", "hash123", 100, "REF-DUP-3", null).run();
+    },
+    /SQLITE_CONSTRAINT: UNIQUE constraint failed: users\.username/
+  );
+
   console.log("  ✓ Declarative unique constraint guard intercepts PK & UNIQUE violations: PASSED");
+  console.log("  ✓ NM-SEC-03: Case-insensitive unique constraint guard intercepts 'newbieuser' vs 'NewbieUser': PASSED");
 
   // -----------------------------------------------------------------------
   // SCENARIO 2: R2 Asset Access Control & Public Light Node Route
@@ -1261,7 +1313,23 @@ async function runIntegrationTests() {
     title: "Secret Strategy Conversation",
     rounds_json: JSON.stringify([{ role: "user", text: "Classified Prompt" }])
   });
+  // NM-SEC-04: Seed notifications and broadcast read receipts
+  store.notifications.push({
+    notification_id: "notif_priv_1",
+    user_id: newUserId,
+    category: "billing",
+    event_type: "topup_success",
+    title_zh: "充值成功",
+    title_en: "Top-up Success"
+  });
+  store.broadcast_reads.push({
+    user_id: newUserId,
+    notification_id: "notif_global_announcement_1",
+    read_at: new Date().toISOString()
+  });
   assert.equal(store.user_chat_sessions.length, 1);
+  assert.equal(store.notifications.length, 1);
+  assert.equal(store.broadcast_reads.length, 1);
 
   // Authenticated user request to delete account
   const deleteReq = new Request("https://nanomesh.local/api/user/delete", {
@@ -1274,6 +1342,12 @@ async function runIntegrationTests() {
   // Verify user_chat_sessions is completely erased
   const remainingSessions = store.user_chat_sessions.filter(s => s.user_id === newUserId);
   assert.equal(remainingSessions.length, 0, "All private chat sessions must be physically erased upon deletion");
+
+  // NM-SEC-04: Verify notifications and broadcast_reads are completely erased
+  const remainingNotifs = store.notifications.filter(n => n.user_id === newUserId);
+  assert.equal(remainingNotifs.length, 0, "All direct user notifications must be erased upon account deletion");
+  const remainingReads = store.broadcast_reads.filter(r => r.user_id === newUserId);
+  assert.equal(remainingReads.length, 0, "All broadcast read receipts must be erased upon account deletion");
   
   const anonymizedUser = store.users.find(u => u.user_id === newUserId);
   assert.ok(anonymizedUser.email.startsWith("deleted_"), "User must be anonymized in-place");
@@ -2756,6 +2830,127 @@ async function runIntegrationTests() {
   const patchAdminRes = await worker.fetch(patchAdminUnknownReq, env);
   assert.equal(patchAdminRes.status, 404, "BUG-05: Unmatched PATCH route under /api/admin must return 404 Not Found");
   console.log("  ✓ BUG-05: Admin PATCH route guard strictly returns 404 on unmapped subpaths: PASSED");
+
+  // 12.4 NM-SEC-01: Admin Route Trailing Slash Normalization & Scoped Suffix Matching
+  const patchAdminWithSlash = new Request("https://nanomesh.local/api/admin/nodes/cf_llama32_text/", {
+    method: "PATCH",
+    headers: adminReqHeaders,
+    body: JSON.stringify({ display_name: "Llama 3.2 3B Normalized" })
+  });
+  const patchSlashRes = await worker.fetch(patchAdminWithSlash, env);
+  assert.equal(patchSlashRes.status, 200, "NM-SEC-01: PATCH /api/admin/nodes/:id/ with trailing slash must succeed without 404");
+
+  // Verify non-model route with /download is rejected (does not enter handleAdminDownload)
+  const unknownDownloadReq = new Request("https://nanomesh.local/api/admin/arbitrary_route/download", {
+    method: "GET",
+    headers: adminReqHeaders
+  });
+  const unknownDownloadRes = await worker.fetch(unknownDownloadReq, env);
+  assert.equal(unknownDownloadRes.status, 404, "NM-SEC-01: Unscoped /download must return 404 and not enter model download logic");
+  console.log("  ✓ NM-SEC-01: Admin trailing slash normalization & scoped prefix matching: PASSED");
+
+  // 12.5 NM-SEC-02: External Model HTTP Redirect (SSRF Defense) Rejection
+  const origFetchRedirectTest = globalThis.fetch;
+  try {
+    let capturedRedirectOption: string | undefined = undefined;
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const urlStr = typeof input === "string" ? input : (input instanceof URL ? input.toString() : input.url);
+      if (urlStr.includes("api.redirect-attack.com")) {
+        capturedRedirectOption = init?.redirect;
+        // Return 302 redirecting to internal metadata
+        return new Response(null, {
+          status: 302,
+          headers: { "Location": "http://169.254.169.254/latest/meta-data/" }
+        });
+      }
+      return origFetchRedirectTest(input, init);
+    };
+
+    const redirectDag: any = {
+      template: {
+        template_id: "tpl_redirect_test",
+        name_zh: "重定向测试模板",
+        name_en: "Redirect Test Template",
+        desc_zh: "测试外部重定向拦截",
+        desc_en: "Test external redirect blocking",
+        roles: [],
+        head_modalities: ["text"],
+        tail_modalities: ["text"],
+        priority: 1,
+        status: "active"
+      },
+      nodes: [
+        {
+          role: {
+            role_id: "role_redirect_test",
+            name_zh: "重定向测试岗",
+            name_en: "Redirect Test Role",
+            in_modalities: ["text"],
+            out_modalities: ["text"],
+            in_degree: 0,
+            out_degree: 0,
+            requisition_tags: []
+          },
+          selected_model: {
+            model_id: "m_redirect_attacker",
+            display_name: "Redirecting Cloud Model",
+            provider: "Cloud",
+            endpoint: "https://api.redirect-attack.com/v1/chat",
+            auth_mode: "none",
+            modalities: ["text"],
+            tags: [],
+            context_window: 2048,
+            max_concurrency: 10,
+            active_connections: 0,
+            precision: 0.9,
+            user_rating: 4.5,
+            usage_count: 0,
+            status: "active",
+            is_generalist: 1,
+            prior_score: 0.7,
+            scenario_anchors: [],
+            cost_per_1k_tokens: 1,
+            inference_target: "cloud" as const
+          },
+          standby_models: []
+        }
+      ],
+      execution_order: ["role_redirect_test"],
+      candidate_templates: [],
+      is_incremental_refinement: false,
+      is_security_violation: false,
+      is_unreachable: false
+    };
+
+    const redirectStream = await executeDAGStream(env, redirectDag, {
+      envelope_id: "env_redirect_001",
+      session_id: "sess_redirect_001",
+      user_id: referrerId,
+      round_index: 1,
+      instruction_payload: "测试外部重定向拦截",
+      metadata: { estimated_input_tokens: 50 },
+      assets_manifest: []
+    }, {
+      userId: referrerId,
+      hasPreDeducted: true
+    });
+
+    const redirectReader = redirectStream.getReader();
+    const redirectDecoder = new TextDecoder();
+    let redirectEvents = "";
+    while (true) {
+      const chunk = await redirectReader.read();
+      if (chunk.done) break;
+      redirectEvents += redirectDecoder.decode(chunk.value, { stream: true });
+    }
+
+    assert.equal(capturedRedirectOption, "manual", "NM-SEC-02: External model call must configure redirect: 'manual'");
+    assert.ok(redirectEvents.includes("event: dag_error"), "External model redirect must trigger dag_error event");
+    assert.ok(redirectEvents.includes("算力终端禁止 HTTP 重定向"), "Error message must report prohibited HTTP redirect");
+    console.log("  ✓ NM-SEC-02: External model fetch strictly enforces redirect: 'manual' and blocks 302 SSRF: PASSED");
+  } finally {
+    globalThis.fetch = origFetchRedirectTest;
+  }
 
   console.log("\n==================================================");
   console.log("   🎉 ALL 12 INTEGRATION SCENARIOS PASSED (100%)! ");

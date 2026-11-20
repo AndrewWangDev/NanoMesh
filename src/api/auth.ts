@@ -126,8 +126,8 @@ export async function handleRegister(req: Request, env: Env) {
     return Response.json({ error: "error.accountCooldown" }, { status: 403 });
   }
 
-  // Check uniqueness
-  const existing = await env.DB.prepare("SELECT user_id FROM users WHERE email = ? OR username = ?").bind(email || '', username || '').first();
+  // Check uniqueness (case-insensitive for email and username)
+  const existing = await env.DB.prepare("SELECT user_id FROM users WHERE LOWER(email) = LOWER(?) OR LOWER(username) = LOWER(?)").bind(email || '', username || '').first();
   if (existing) {
     return Response.json({ error: "error.userOrEmailExists" }, { status: 400 });
   }

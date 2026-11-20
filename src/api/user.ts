@@ -16,8 +16,8 @@ export async function handleUpdateProfile(req: Request, env: Env) {
     return Response.json({ error: "error.invalidUsernameFormat" }, { status: 400 });
   }
 
-  // Check uniqueness
-  const existing = await env.DB.prepare("SELECT user_id FROM users WHERE username = ? AND user_id != ?").bind(username, session.userId).first();
+  // Check uniqueness (case-insensitive)
+  const existing = await env.DB.prepare("SELECT user_id FROM users WHERE LOWER(username) = LOWER(?) AND user_id != ?").bind(username, session.userId).first();
   if (existing) {
     return Response.json({ error: "error.usernameExists" }, { status: 400 });
   }
@@ -181,7 +181,9 @@ export async function handleDeleteAccount(req: Request, env: Env) {
     `).bind(session.userId),
     env.DB.prepare("DELETE FROM user_chat_sessions WHERE user_id = ?").bind(session.userId),
     env.DB.prepare("DELETE FROM user_oauth_bindings WHERE user_id = ?").bind(session.userId),
-    env.DB.prepare("DELETE FROM user_passkeys WHERE user_id = ?").bind(session.userId)
+    env.DB.prepare("DELETE FROM user_passkeys WHERE user_id = ?").bind(session.userId),
+    env.DB.prepare("DELETE FROM notifications WHERE user_id = ?").bind(session.userId),
+    env.DB.prepare("DELETE FROM broadcast_reads WHERE user_id = ?").bind(session.userId)
   ]);
 
   // 5. Cascade cleanup of user assets in R2 (GDPR right to be forgotten)

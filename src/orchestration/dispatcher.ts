@@ -135,8 +135,26 @@ function buildConstraintDirective(targetLang?: string, outputStyle?: string): st
  */
 export function applyAttentionSinkCompaction(text: string, maxChars: number = 1600): string {
   if (!text || text.length <= maxChars) return text || '';
-  const headLen = Math.floor(maxChars * 0.3); // 30% 头部意图
-  const tailLen = Math.floor(maxChars * 0.7); // 70% 尾部结论
+  let headLen = Math.floor(maxChars * 0.3); // 30% 头部意图
+  let tailLen = Math.floor(maxChars * 0.7); // 70% 尾部结论
+
+  // 边界保护：防止在 UTF-16 高位代理 (0xD800-0xDBFF) 处截断 head
+  if (headLen > 0 && headLen < text.length) {
+    const code = text.charCodeAt(headLen - 1);
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      headLen -= 1;
+    }
+  }
+
+  // 边界保护：防止在 UTF-16 低位代理 (0xDC00-0xDFFF) 处开始 tail
+  if (tailLen > 0 && tailLen < text.length) {
+    const tailStart = text.length - tailLen;
+    const code = text.charCodeAt(tailStart);
+    if (code >= 0xDC00 && code <= 0xDFFF) {
+      tailLen -= 1;
+    }
+  }
+
   const head = text.slice(0, headLen);
   const tail = text.slice(-tailLen);
   const omitted = text.length - headLen - tailLen;
@@ -1543,8 +1561,14 @@ export async function executeDAGStream(
                       method: 'POST',
                       headers: reqHeaders,
                       body: payloadStr,
-                      signal: callSignal
+                      signal: callSignal,
+                      redirect: 'manual'
                     });
+
+                    // Defense-in-depth: Strictly block HTTP redirects to eliminate SSRF bypass
+                    if (fRes.status >= 300 && fRes.status < 400) {
+                      throw new Error(`[SECURITY_REJECTED] 算力终端禁止 HTTP 重定向 (Status ${fRes.status})`);
+                    }
 
                     // Fail-fast on authentication/tampering violations (NEVER failover on security errors!)
                     if (fRes.status === 401 || fRes.status === 403) {
@@ -1633,7 +1657,8 @@ export async function executeDAGStream(
                         if (imgBuffer && imgBuffer.byteLength > 0) {
                           const generatedAssetId = crypto.randomUUID();
                           const safeUserId = options.userId || envelope.user_id || 'anonymous';
-                          const newAssetKey = `tmp/${safeUserId}/${envelope.session_id}/${generatedAssetId}.png`;
+                          const cleanSessionId = (envelope.session_id || 'session').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+                          const newAssetKey = `tmp/${safeUserId}/${cleanSessionId}/${generatedAssetId}.png`;
                           if (env.R2) {
                             await env.R2.put(newAssetKey, imgBuffer, {
                               httpMetadata: { contentType: 'image/png' },
@@ -1775,7 +1800,8 @@ export async function executeDAGStream(
                   if (aiRes) {
                     const generatedAssetId = crypto.randomUUID();
                     const safeUserId = options.userId || envelope.user_id || 'anonymous';
-                    const newAssetKey = `tmp/${safeUserId}/${envelope.session_id}/${generatedAssetId}.png`;
+                    const cleanSessionId = (envelope.session_id || 'session').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+                    const newAssetKey = `tmp/${safeUserId}/${cleanSessionId}/${generatedAssetId}.png`;
                     let imageBuffer: ArrayBuffer | null = null;
                     if (aiRes instanceof ReadableStream || typeof aiRes.getReader === 'function') {
                       const resp = new Response(aiRes);

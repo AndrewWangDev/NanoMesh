@@ -51,53 +51,54 @@ export default {
            res = await handleUnbindOAuth(request, env, provider || "");
         } else if (url.pathname.startsWith("/api/admin/")) {
            const admin = await import("./api/admin");
-           if (url.pathname === "/api/admin/login") res = await admin.handleAdminLogin(request, env, ctx);
-           else if (url.pathname === "/api/admin/logout") res = await admin.handleAdminLogout(request, env);
+           const adminPath = url.pathname.replace(/\/+$/, "");
+           if (adminPath === "/api/admin/login") res = await admin.handleAdminLogin(request, env, ctx);
+           else if (adminPath === "/api/admin/logout") res = await admin.handleAdminLogout(request, env);
            // Compute Topology Nodes
-           else if (url.pathname === "/api/admin/nodes" && request.method === "GET") res = await admin.handleAdminListNodes(request, env);
-           else if (url.pathname === "/api/admin/nodes" && request.method === "POST") res = await admin.handleAdminCreateNode(request, env);
-           else if (url.pathname.startsWith("/api/admin/nodes/") && request.method === "PATCH") {
-             const nodeId = url.pathname.slice("/api/admin/nodes/".length);
+           else if (adminPath === "/api/admin/nodes" && request.method === "GET") res = await admin.handleAdminListNodes(request, env);
+           else if (adminPath === "/api/admin/nodes" && request.method === "POST") res = await admin.handleAdminCreateNode(request, env);
+           else if (adminPath.startsWith("/api/admin/nodes/") && request.method === "PATCH") {
+             const nodeId = adminPath.slice("/api/admin/nodes/".length);
              res = await admin.handleAdminUpdateNode(request, env, nodeId);
-           } else if (url.pathname.startsWith("/api/admin/nodes/") && request.method === "DELETE") {
-             const nodeId = url.pathname.slice("/api/admin/nodes/".length);
+           } else if (adminPath.startsWith("/api/admin/nodes/") && request.method === "DELETE") {
+             const nodeId = adminPath.slice("/api/admin/nodes/".length);
              res = await admin.handleAdminDeleteNode(request, env, nodeId);
-           } else if (url.pathname === "/api/admin/nodes/upload-light" && request.method === "POST") {
+           } else if (adminPath === "/api/admin/nodes/upload-light" && request.method === "POST") {
              res = await admin.handleAdminUploadLightNode(request, env);
            }
            // Role Dictionary & Competence Health Matrix
-           else if (url.pathname === "/api/admin/roles" && request.method === "GET") res = await admin.handleAdminListRoles(request, env);
-           else if (url.pathname === "/api/admin/roles" && request.method === "POST") res = await admin.handleAdminCreateOrUpdateRole(request, env);
-           else if (url.pathname === "/api/admin/competence-matrix" && request.method === "GET") res = await admin.handleAdminCompetenceMatrix(request, env);
+           else if (adminPath === "/api/admin/roles" && request.method === "GET") res = await admin.handleAdminListRoles(request, env);
+           else if (adminPath === "/api/admin/roles" && request.method === "POST") res = await admin.handleAdminCreateOrUpdateRole(request, env);
+           else if (adminPath === "/api/admin/competence-matrix" && request.method === "GET") res = await admin.handleAdminCompetenceMatrix(request, env);
            // Linear Workflow Templates
-           else if (url.pathname === "/api/admin/templates" && request.method === "GET") res = await admin.handleAdminListTemplates(request, env);
-           else if (url.pathname === "/api/admin/templates" && request.method === "POST") res = await admin.handleAdminCreateOrUpdateTemplate(request, env);
-           else if (url.pathname.startsWith("/api/admin/templates/") && url.pathname.endsWith("/toggle") && request.method === "POST") {
-             const parts = url.pathname.split("/");
+           else if (adminPath === "/api/admin/templates" && request.method === "GET") res = await admin.handleAdminListTemplates(request, env);
+           else if (adminPath === "/api/admin/templates" && request.method === "POST") res = await admin.handleAdminCreateOrUpdateTemplate(request, env);
+           else if (adminPath.startsWith("/api/admin/templates/") && adminPath.endsWith("/toggle") && request.method === "POST") {
+             const parts = adminPath.split("/");
              const templateId = parts[parts.length - 2];
              res = await admin.handleAdminToggleTemplate(request, env, templateId);
-           } else if (url.pathname.startsWith("/api/admin/templates/") && request.method === "DELETE") {
-             const templateId = url.pathname.slice("/api/admin/templates/".length);
+           } else if (adminPath.startsWith("/api/admin/templates/") && request.method === "DELETE") {
+             const templateId = adminPath.slice("/api/admin/templates/".length);
              res = await admin.handleAdminDeleteTemplate(request, env, templateId);
            }
            // Gift codes & notifications & legacy compat
-           else if (url.pathname === "/api/admin/models" && request.method === "GET") res = await admin.handleAdminListModels(request, env);
-           else if (url.pathname.endsWith("/download") && request.method === "GET") res = await admin.handleAdminDownload(request, env);
-           else if (url.pathname === "/api/admin/gift-codes" && request.method === "POST") res = await admin.handleAdminCreateGiftCodes(request, env);
-           else if (url.pathname === "/api/admin/gift-codes" && request.method === "GET") res = await admin.handleAdminListGiftCodes(request, env);
-           else if (url.pathname.endsWith("/revoke") && request.method === "POST") res = await admin.handleAdminRevokeGiftCode(request, env);
-           else if (url.pathname === "/api/admin/gift-codes/revoke-batch" && request.method === "POST") res = await admin.handleAdminRevokeBatch(request, env);
-           else if (url.pathname === "/api/admin/notifications" && request.method === "GET") {
+           else if (adminPath === "/api/admin/models" && request.method === "GET") res = await admin.handleAdminListModels(request, env);
+           else if (adminPath.startsWith("/api/admin/models/") && adminPath.endsWith("/download") && request.method === "GET") res = await admin.handleAdminDownload(request, env);
+           else if (adminPath === "/api/admin/gift-codes" && request.method === "POST") res = await admin.handleAdminCreateGiftCodes(request, env);
+           else if (adminPath === "/api/admin/gift-codes" && request.method === "GET") res = await admin.handleAdminListGiftCodes(request, env);
+           else if (adminPath.startsWith("/api/admin/gift-codes/") && adminPath.endsWith("/revoke") && request.method === "POST") res = await admin.handleAdminRevokeGiftCode(request, env);
+           else if (adminPath === "/api/admin/gift-codes/revoke-batch" && request.method === "POST") res = await admin.handleAdminRevokeBatch(request, env);
+           else if (adminPath === "/api/admin/notifications" && request.method === "GET") {
              const notif = await import("./api/notifications");
              res = await notif.handleAdminListNotifications(request, env);
-           } else if (url.pathname === "/api/admin/notifications" && request.method === "POST") {
+           } else if (adminPath === "/api/admin/notifications" && request.method === "POST") {
              const notif = await import("./api/notifications");
              res = await notif.handleAdminSendNotification(request, env);
-           } else if (url.pathname.startsWith("/api/admin/notifications/") && request.method === "DELETE") {
+           } else if (adminPath.startsWith("/api/admin/notifications/") && request.method === "DELETE") {
              const notif = await import("./api/notifications");
              res = await notif.handleAdminRevokeNotification(request, env);
            }
-           else if ((url.pathname.startsWith("/api/admin/models/") || url.pathname.startsWith("/api/admin/nodes/")) && request.method === "PATCH") res = await admin.handleAdminUpdateModel(request, env);
+           else if (adminPath.startsWith("/api/admin/models/") && request.method === "PATCH") res = await admin.handleAdminUpdateModel(request, env);
            else res = new Response("Not Found", { status: 404 });
         } else if (url.pathname === "/api/notifications" && request.method === "GET") {
            const { handleGetNotifications } = await import("./api/notifications");
@@ -287,7 +288,7 @@ export default {
             // Pass other requests to ASSETS (static site)
       const assetResponse = await env.ASSETS.fetch(request);
       if (assetResponse.status === 404) {
-        const notFoundUrl = new URL('/404', request.url);
+        const notFoundUrl = new URL('/404.html', request.url);
         const fallbackResponse = await env.ASSETS.fetch(new Request(notFoundUrl));
         return new Response(fallbackResponse.body, {
           status: 404,
