@@ -45,6 +45,77 @@ interface TableStore {
   dag_handshakes: any[];
 }
 
+interface TableConstraint {
+  primaryKey: string;
+  uniqueKeys?: string[][];
+}
+
+const SCHEMA_CONSTRAINTS: Record<string, TableConstraint> = {
+  account_tombstones: { primaryKey: 'hash_id' },
+  users: { primaryKey: 'user_id', uniqueKeys: [['email'], ['referral_code']] },
+  user_oauth_bindings: { primaryKey: 'id', uniqueKeys: [['provider', 'provider_id']] },
+  dag_handshakes: { primaryKey: 'handshake_id' },
+  dag_roles: { primaryKey: 'role_id' },
+  dag_templates: { primaryKey: 'template_id' },
+  models: { primaryKey: 'model_id' },
+  user_passkeys: { primaryKey: 'credential_id' },
+  user_chat_sessions: { primaryKey: 'session_id' },
+  credit_ledger: { primaryKey: 'ledger_id' }
+};
+
+function checkAndInsertRow(
+  tableName: keyof TableStore,
+  newRow: Record<string, any>,
+  sql: string,
+  store: TableStore
+): { changes: number } {
+  const constraint = SCHEMA_CONSTRAINTS[tableName as string];
+  const tableData: any[] = store[tableName] || [];
+  const cleanSql = sql.trim();
+  const isOrIgnore = cleanSql.includes("INSERT OR IGNORE");
+  const isOrReplace = cleanSql.includes("INSERT OR REPLACE");
+  const hasOnConflict = cleanSql.includes("ON CONFLICT");
+
+  if (constraint) {
+    // 1. Check Primary Key
+    const pk = constraint.primaryKey;
+    const pkConflictIndex = tableData.findIndex(r => r[pk] !== undefined && r[pk] !== null && r[pk] === newRow[pk]);
+
+    // 2. Check UNIQUE Keys (including compound keys)
+    let ukConflictIndex = -1;
+    let conflictedKey = pk;
+    if (constraint.uniqueKeys) {
+      for (const ukCols of constraint.uniqueKeys) {
+        const idx = tableData.findIndex(r =>
+          ukCols.every(col => r[col] !== undefined && r[col] !== null && r[col] === newRow[col])
+        );
+        if (idx !== -1) {
+          ukConflictIndex = idx;
+          conflictedKey = ukCols.join('_');
+          break;
+        }
+      }
+    }
+
+    const hasConflict = pkConflictIndex !== -1 || ukConflictIndex !== -1;
+    const conflictIndex = pkConflictIndex !== -1 ? pkConflictIndex : ukConflictIndex;
+
+    if (hasConflict) {
+      if (isOrIgnore) {
+        return { changes: 0 };
+      } else if (isOrReplace || hasOnConflict) {
+        tableData[conflictIndex] = { ...tableData[conflictIndex], ...newRow };
+        return { changes: 1 };
+      } else {
+        throw new Error(`SQLITE_CONSTRAINT: UNIQUE constraint failed: ${tableName}.${conflictedKey}`);
+      }
+    }
+  }
+
+  tableData.push(newRow);
+  return { changes: 1 };
+}
+
 function createMockD1(store: TableStore) {
   return {
     prepare(sql: string) {
@@ -183,20 +254,20 @@ function createMockD1(store: TableStore) {
           // INSERT INTO account_tombstones (faithful SQLite / D1 unique constraint simulation)
           if (cleanSql.includes("INTO account_tombstones")) {
             const hashId = boundArgs[0];
-            const exists = store.account_tombstones.some(t => t.hash_id === hashId);
-            if (cleanSql.includes("INSERT OR IGNORE")) {
-              if (!exists) {
-                store.account_tombstones.push({ hash_id: hashId });
-                return { meta: { changes: 1 } };
-              }
-              return { meta: { changes: 0 } };
-            } else {
-              if (exists) {
-                throw new Error("SQLITE_CONSTRAINT: UNIQUE constraint failed: account_tombstones.hash_id");
-              }
-              store.account_tombstones.push({ hash_id: hashId });
-              return { meta: { changes: 1 } };
-            }
+            const type = cleanSql.includes("'email'") ? 'email' : 'oauth';
+            return { meta: checkAndInsertRow("account_tombstones", { hash_id: hashId, type }, cleanSql, store) };
+          }
+
+          // INSERT INTO user_oauth_bindings
+          if (cleanSql.includes("INTO user_oauth_bindings")) {
+            const [userId, provider, providerId] = boundArgs;
+            const newRow = {
+              id: crypto.randomUUID(),
+              user_id: userId,
+              provider,
+              provider_id: String(providerId)
+            };
+            return { meta: checkAndInsertRow("user_oauth_bindings", newRow, cleanSql, store) };
           }
 
           // UPDATE users (anonymization)
@@ -237,8 +308,7 @@ function createMockD1(store: TableStore) {
           // INSERT INTO dag_handshakes
           if (cleanSql.startsWith("INSERT INTO dag_handshakes")) {
             const [handshakeId, userId, sessionId, templateId, nextStep, expiresAt] = boundArgs;
-            store.dag_handshakes = store.dag_handshakes || [];
-            store.dag_handshakes.push({
+            const newRow = {
               handshake_id: handshakeId,
               user_id: userId,
               session_id: sessionId,
@@ -247,8 +317,8 @@ function createMockD1(store: TableStore) {
               status: 'ISSUED',
               expires_at: expiresAt,
               created_at: new Date().toISOString()
-            });
-            return { meta: { changes: 1 } };
+            };
+            return { meta: checkAndInsertRow("dag_handshakes", newRow, cleanSql, store) };
           }
 
           // UPDATE dag_handshakes SET status = 'CONSUMED'
@@ -285,7 +355,7 @@ function createMockD1(store: TableStore) {
           // INSERT INTO users
           if (cleanSql.startsWith("INSERT INTO users")) {
             const [userId, username, email, password_hash, credits, referral_code, referred_by] = boundArgs;
-            store.users.push({
+            const newRow = {
               user_id: userId,
               username,
               email,
@@ -294,8 +364,8 @@ function createMockD1(store: TableStore) {
               referral_code,
               referred_by,
               token_version: 1
-            });
-            return { meta: { changes: 1 } };
+            };
+            return { meta: checkAndInsertRow("users", newRow, cleanSql, store) };
           }
 
           // UPDATE users credits
@@ -372,7 +442,7 @@ function createMockD1(store: TableStore) {
               related_id = boundArgs[7] || null;
             }
 
-            store.credit_ledger.push({
+            const newRow = {
               ledger_id,
               user_id,
               category,
@@ -382,14 +452,12 @@ function createMockD1(store: TableStore) {
               detail,
               related_id,
               created_at: new Date().toISOString()
-            });
-            return { meta: { changes: 1 } };
+            };
+            return { meta: checkAndInsertRow("credit_ledger", newRow, cleanSql, store) };
           }
 
           // INSERT / UPDATE models (ON CONFLICT)
           if (cleanSql.startsWith("INSERT INTO models")) {
-            const modelId = boundArgs[0];
-            const existingIdx = store.models.findIndex(m => m.model_id === modelId);
             const modelObj: any = {
               model_id: boundArgs[0],
               display_name: boundArgs[1],
@@ -418,12 +486,7 @@ function createMockD1(store: TableStore) {
               modelObj.api_format = boundArgs[13];
               modelObj.inference_target = boundArgs[14];
             }
-            if (existingIdx >= 0) {
-              store.models[existingIdx] = modelObj;
-            } else {
-              store.models.push(modelObj);
-            }
-            return { meta: { changes: 1 } };
+            return { meta: checkAndInsertRow("models", modelObj, cleanSql, store) };
           }
 
           // UPDATE models
@@ -451,7 +514,7 @@ function createMockD1(store: TableStore) {
 
           // INSERT INTO dag_templates
           if (cleanSql.startsWith("INSERT INTO dag_templates")) {
-            store.dag_templates.push({
+            const newRow = {
               template_id: boundArgs[0],
               name_zh: boundArgs[1],
               name_en: boundArgs[2],
@@ -463,8 +526,8 @@ function createMockD1(store: TableStore) {
               role_sequence: boundArgs[8],
               priority: boundArgs[9] || 1,
               status: boundArgs[10] || 'active'
-            });
-            return { meta: { changes: 1 } };
+            };
+            return { meta: checkAndInsertRow("dag_templates", newRow, cleanSql, store) };
           }
 
           // DELETE FROM dag_templates
@@ -774,6 +837,29 @@ async function runIntegrationTests() {
   assert.equal(bossLedgers.length, 1, "Boss must have 1 referral reward ledger");
   assert.equal(bossLedgers[0].balance, 150, "Boss ledger balance snapshot must accurately equal 150");
   console.log("  ✓ Atomic registration batch & ledger balance consistency: PASSED");
+
+  // Verify declarative unique constraint guard intercepts duplicate PK & UNIQUE violations
+  await assert.rejects(
+    async () => {
+      await env.DB.prepare(`
+        INSERT INTO users (user_id, username, email, password_hash, credits, referral_code, referred_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).bind(newUserId, "DuplicatePKUser", "different@nanomesh.local", "hash123", 100, "REF-DUP-1", null).run();
+    },
+    /SQLITE_CONSTRAINT: UNIQUE constraint failed: users\.user_id/
+  );
+
+  await assert.rejects(
+    async () => {
+      await env.DB.prepare(`
+        INSERT INTO users (user_id, username, email, password_hash, credits, referral_code, referred_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).bind("usr_another_002", "DuplicateEmailUser", "newbie@nanomesh.local", "hash123", 100, "REF-DUP-2", null).run();
+    },
+    /SQLITE_CONSTRAINT: UNIQUE constraint failed: users\.email/
+  );
+
+  console.log("  ✓ Declarative unique constraint guard intercepts PK & UNIQUE violations: PASSED");
 
   // -----------------------------------------------------------------------
   // SCENARIO 2: R2 Asset Access Control & Public Light Node Route
