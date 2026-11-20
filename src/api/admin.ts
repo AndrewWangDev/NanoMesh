@@ -820,7 +820,7 @@ export async function handleAdminDownload(request: Request, env: Env): Promise<R
   if (!session) return new Response("Unauthorized", { status: 401 });
 
   const url = new URL(request.url);
-  const pathParts = url.pathname.split("/");
+  const pathParts = url.pathname.replace(/\/+$/, "").split("/");
   const id = pathParts[pathParts.length - 2];
 
   const model = await env.DB.prepare("SELECT r2_object_key FROM user_uploaded_models WHERE upload_id = ?").bind(id).first<{ r2_object_key: string }>();
@@ -849,7 +849,7 @@ export async function handleAdminUpdateModel(request: Request, env: Env): Promis
 
   try {
     const url = new URL(request.url);
-    const id = url.pathname.split("/").pop();
+    const id = url.pathname.replace(/\/+$/, "").split("/").pop();
     if (!id) return Response.json({ error: "Missing model id" }, { status: 400 });
 
     const body = (await request.json().catch(() => ({}))) as {
@@ -1221,7 +1221,7 @@ export async function handleAdminRevokeGiftCode(request: Request, env: Env): Pro
 
   const url = new URL(request.url);
   // Match /api/admin/gift-codes/:id/revoke
-  const parts = url.pathname.split("/");
+  const parts = url.pathname.replace(/\/+$/, "").split("/");
   const codeId = parts[parts.length - 2];
 
   if (!codeId) return Response.json({ error: "Missing code id" }, { status: 400 });

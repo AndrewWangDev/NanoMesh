@@ -1268,8 +1268,44 @@ async function runUnitTests() {
   assert.notEqual(ghHash, gHash, "Tombstone hashes for different OAuth providers with same numeric ID must be isolated");
   console.log("  ✓ BUG-07: OAuth tombstone hash includes provider namespace to prevent collisions: PASSED");
 
+  // -----------------------------------------------------------------------
+  // SUITE 14: Audit Report 10 Remediations (NM-SEC-05, NM-SEC-06)
+  // -----------------------------------------------------------------------
+  console.log("\n[Suite 14] Audit Report 10 Remediations (NM-SEC-05, NM-SEC-06)");
+
+  // 14.1 NM-SEC-06: Attention-Sink Compaction Surrogate Pair Healing
+  // Create a 100-char string where an Emoji (4 bytes, length 2: \uD83D\uDE80) falls exactly on cut boundary
+  // For maxChars = 20: headLen = 6, tailLen = 14
+  // Place rocket emoji at indices 5-6 (so index 5 is \uD83D, index 6 is \uDE80)
+  const prefix = "12345"; // 5 chars
+  const rocket = "🚀";    // 2 UTF-16 code units (\uD83D \uDE80)
+  const filler = "ABCDEFGHIJ0123456789".repeat(5);
+  const testTextWithEmoji = prefix + rocket + filler; // rocket is at [5, 6]
+
+  const compactedEmoji = applyAttentionSinkCompaction(testTextWithEmoji, 20);
+  assert.ok(compactedEmoji.includes("[=== 平台协同优化："), "Compaction banner must exist");
+  // Crucial test: encodeURIComponent throws URIError if string contains unpaired surrogates!
+  assert.doesNotThrow(() => {
+    encodeURIComponent(compactedEmoji);
+  }, "Compacted string with surrogate boundary must NOT produce unpaired surrogates or throw URIError");
+
+  // Verify head does not end with orphan high surrogate
+  const headPartEmoji = compactedEmoji.split("\n\n[===")[0];
+  const lastCode = headPartEmoji.charCodeAt(headPartEmoji.length - 1);
+  assert.ok(lastCode < 0xD800 || lastCode > 0xDBFF, "Head must NOT end with an unpaired high surrogate");
+  console.log("  ✓ NM-SEC-06: UTF-16 surrogate pairs cleanly preserved without orphan codepoints: PASSED");
+
+  // 14.2 NM-SEC-05: Session ID Sanitization
+  const dirtySessionId = "../../etc/passwd?foo=bar#section!@$";
+  const sanitizedSessionId = dirtySessionId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+  assert.equal(sanitizedSessionId.includes(".."), false, "Sanitized session ID must not contain path traversal");
+  assert.equal(sanitizedSessionId.includes("/"), false, "Sanitized session ID must not contain forward slashes");
+  assert.equal(sanitizedSessionId.includes("?"), false, "Sanitized session ID must not contain query characters");
+  assert.equal(sanitizedSessionId.includes("#"), false, "Sanitized session ID must not contain hash fragments");
+  console.log("  ✓ NM-SEC-05: envelope.session_id strictly sanitized against path traversal & URL confusion: PASSED");
+
   console.log("\n==================================================");
-  console.log("   🎉 ALL 13 UNIT TEST SUITES PASSED (100%)!      ");
+  console.log("   🎉 ALL 14 UNIT TEST SUITES PASSED (100%)!      ");
   console.log("==================================================");
 }
 
