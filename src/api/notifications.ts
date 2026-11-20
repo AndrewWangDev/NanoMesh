@@ -302,7 +302,7 @@ export async function handleAdminRevokeNotification(req: Request, env: Env): Pro
   if (!session) return new Response("Unauthorized", { status: 401 });
 
   const url = new URL(req.url);
-  const id = url.pathname.split("/").pop();
+  const id = url.pathname.replace(/\/+$/, "").split("/").pop();
   if (!id) return Response.json({ error: "Missing notification ID" }, { status: 400 });
 
   await env.DB.prepare("DELETE FROM notifications WHERE notification_id = ?").bind(id).run();
