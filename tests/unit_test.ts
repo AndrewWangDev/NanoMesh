@@ -1304,6 +1304,12 @@ async function runUnitTests() {
   assert.equal(sanitizedSessionId.includes("#"), false, "Sanitized session ID must not contain hash fragments");
   console.log("  ✓ NM-SEC-05: envelope.session_id strictly sanitized against path traversal & URL confusion: PASSED");
 
+  // 14.3 JS Boundary Edge-case: slice(-0) defensive guard in applyAttentionSinkCompaction
+  const edgeText = "LongOriginalStringRequiringCompaction";
+  const edgeCompacted = applyAttentionSinkCompaction(edgeText, 1);
+  assert.ok(!edgeCompacted.endsWith("LongOriginalStringRequiringCompaction"), "tailLen === 0 must NOT return entire original string via slice(-0)");
+  console.log("  ✓ JS Boundary: slice(-0) guarded against full string duplication when tailLen === 0: PASSED");
+
   console.log("\n==================================================");
   console.log("   🎉 ALL 14 UNIT TEST SUITES PASSED (100%)!      ");
   console.log("==================================================");

@@ -156,7 +156,7 @@ export function applyAttentionSinkCompaction(text: string, maxChars: number = 16
   }
 
   const head = text.slice(0, headLen);
-  const tail = text.slice(-tailLen);
+  const tail = tailLen > 0 ? text.slice(-tailLen) : '';
   const omitted = text.length - headLen - tailLen;
   return `${head}\n\n[=== 平台协同优化：中间过程性细节共 ${omitted} 字已智能折叠，核心前提与最终事实完整保留 ===]\n\n${tail}`;
 }

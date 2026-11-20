@@ -2847,6 +2847,14 @@ async function runIntegrationTests() {
   });
   const unknownDownloadRes = await worker.fetch(unknownDownloadReq, env);
   assert.equal(unknownDownloadRes.status, 404, "NM-SEC-01: Unscoped /download must return 404 and not enter model download logic");
+
+  // Verify notification revocation with trailing slash succeeds without 400
+  const deleteNotifWithSlash = new Request("https://nanomesh.local/api/admin/notifications/notif_test_123/", {
+    method: "DELETE",
+    headers: adminReqHeaders
+  });
+  const deleteNotifSlashRes = await worker.fetch(deleteNotifWithSlash, env);
+  assert.equal(deleteNotifSlashRes.status, 200, "DELETE /api/admin/notifications/:id/ with trailing slash must succeed without 400");
   console.log("  ✓ NM-SEC-01: Admin trailing slash normalization & scoped prefix matching: PASSED");
 
   // 12.5 NM-SEC-02: External Model HTTP Redirect (SSRF Defense) Rejection
