@@ -29,14 +29,21 @@ export function getRpId(request: Request): string {
 }
 
 export function isOriginAllowed(origin: string, request: Request, env: Env): boolean {
-  const reqOrigin = new URL(request.url).origin;
-  if (origin === reqOrigin) return true;
+  const reqUrl = new URL(request.url);
+  if (origin === reqUrl.origin) return true;
   if (env.FRONTEND_URL && origin === env.FRONTEND_URL) return true;
   
-  // 仅在本地开发测试环境下允许 localhost origin
-  const isLocalRequest = reqOrigin.includes("://localhost") || reqOrigin.includes("://127.0.0.1");
-  if (isLocalRequest && (origin.startsWith("http://localhost:") || origin.startsWith("https://localhost:") || origin.startsWith("http://127.0.0.1:") || origin === "http://localhost" || origin === "https://localhost")) {
-    return true;
+  // 仅在本地开发测试环境下允许 localhost / 127.0.0.1 跨源调用
+  const isLocalRequest = reqUrl.hostname === "localhost" || reqUrl.hostname === "127.0.0.1";
+  if (isLocalRequest) {
+    try {
+      const originUrl = new URL(origin);
+      if (originUrl.hostname === "localhost" || originUrl.hostname === "127.0.0.1") {
+        return true;
+      }
+    } catch {
+      return false;
+    }
   }
   return false;
 }
