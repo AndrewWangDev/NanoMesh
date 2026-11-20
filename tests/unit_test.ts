@@ -1242,15 +1242,22 @@ async function runUnitTests() {
   assert.equal(isVerified, true, "RS256 assertion signature must verify successfully using parsed SPKI");
   console.log("  ✓ BUG-01: Passkey RS256 attestation parsing & assertion verification: PASSED");
 
-  // 13.2 BUG-06: WebAuthn Origin Allowed Localhost Protection
+  // 13.2 BUG-06 & FINDING-NEW-02: WebAuthn Origin Allowed Localhost Protection (Strict Hostname Check)
   const prodRequest = new Request("https://nano.andrewwangdev.com/api/passkey/login");
   const localRequest = new Request("http://localhost:8787/api/passkey/login");
+  const attackerRequest = new Request("https://localhost.attacker.com/api/passkey/login");
   const testEnv = { FRONTEND_URL: "https://nano.andrewwangdev.com" } as any;
 
   assert.equal(isOriginAllowed("http://localhost:3000", prodRequest, testEnv), false, "Production host must reject localhost origin");
   assert.equal(isOriginAllowed("https://nano.andrewwangdev.com", prodRequest, testEnv), true, "Production host allows official FRONTEND_URL");
   assert.equal(isOriginAllowed("http://localhost:3000", localRequest, testEnv), true, "Localhost request allows localhost origin");
-  console.log("  ✓ BUG-06: WebAuthn localhost origin strictly scoped to local dev requests: PASSED");
+  assert.equal(isOriginAllowed("http://127.0.0.1:8080", localRequest, testEnv), true, "Localhost request allows 127.0.0.1 origin");
+
+  // FINDING-NEW-02: Substring evasion attempts must be strictly blocked
+  assert.equal(isOriginAllowed("http://localhost:3000", attackerRequest, testEnv), false, "FINDING-NEW-02: Request from https://localhost.attacker.com must NOT be classified as local request");
+  assert.equal(isOriginAllowed("https://localhost.attacker.com", localRequest, testEnv), false, "FINDING-NEW-02: Origin from https://localhost.attacker.com must be rejected");
+  assert.equal(isOriginAllowed("http://localhost:3000@attacker.com", localRequest, testEnv), false, "FINDING-NEW-02: Spoofed userinfo origin must be rejected");
+  console.log("  ✓ BUG-06 & FINDING-NEW-02: WebAuthn origin strictly checks hostname and rejects substring bypasses: PASSED");
 
   // 13.3 BUG-07: OAuth Tombstone Namespace Isolation
   const salt = getPersistentSalt({} as any);

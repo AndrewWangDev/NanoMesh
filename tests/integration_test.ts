@@ -180,10 +180,23 @@ function createMockD1(store: TableStore) {
             return { meta: { changes: 1 } };
           }
 
-          // INSERT INTO account_tombstones
-          if (cleanSql.startsWith("INSERT INTO account_tombstones")) {
-            store.account_tombstones.push({ hash_id: boundArgs[0] });
-            return { meta: { changes: 1 } };
+          // INSERT INTO account_tombstones (faithful SQLite / D1 unique constraint simulation)
+          if (cleanSql.includes("INTO account_tombstones")) {
+            const hashId = boundArgs[0];
+            const exists = store.account_tombstones.some(t => t.hash_id === hashId);
+            if (cleanSql.includes("INSERT OR IGNORE")) {
+              if (!exists) {
+                store.account_tombstones.push({ hash_id: hashId });
+                return { meta: { changes: 1 } };
+              }
+              return { meta: { changes: 0 } };
+            } else {
+              if (exists) {
+                throw new Error("SQLITE_CONSTRAINT: UNIQUE constraint failed: account_tombstones.hash_id");
+              }
+              store.account_tombstones.push({ hash_id: hashId });
+              return { meta: { changes: 1 } };
+            }
           }
 
           // UPDATE users (anonymization)
@@ -1187,6 +1200,36 @@ async function runIntegrationTests() {
   assert.equal(remainingAvatars.objects.length, 0, "User avatars/ must be cascade deleted from R2 upon account deletion");
 
   console.log("  ✓ User account deletion cascades physical erasure of chat sessions & R2 assets: PASSED");
+
+  // 7.2 FINDING-NEW-01: OAuth user deletion with dual presence in users & user_oauth_bindings
+  const oauthUserId = "usr_oauth_dual_presence";
+  store.users.push({
+    user_id: oauthUserId,
+    username: "OAuthDualUser",
+    email: "oauth_dual@example.com",
+    password_hash: null,
+    oauth_provider: "github",
+    oauth_id: "gh_99999",
+    frozen_credits: 0,
+    credits: 0,
+    token_version: 1
+  });
+  store.user_oauth_bindings.push({
+    user_id: oauthUserId,
+    provider: "github",
+    provider_id: "gh_99999"
+  });
+
+  const oauthOwnerToken = await signJWT({ userId: oauthUserId, tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  const deleteOauthReq = new Request("https://nanomesh.local/api/user/delete", {
+    method: "POST",
+    headers: { "Cookie": `session=${oauthOwnerToken}` }
+  });
+  const deleteOauthRes = await handleDeleteAccount(deleteOauthReq, env);
+  assert.equal(deleteOauthRes.status, 200, "FINDING-NEW-01: OAuth user deletion with dual records must succeed with 200 without D1 unique constraint failure");
+  const anonymizedOauthUser = store.users.find(u => u.user_id === oauthUserId);
+  assert.ok(anonymizedOauthUser.email.startsWith("deleted_"), "OAuth user must be anonymized in-place");
+  console.log("  ✓ FINDING-NEW-01: OAuth user deletion with duplicate bindings succeeds with idempotent tombstone: PASSED");
 
   // -----------------------------------------------------------------------
   // SCENARIO 8: Audit Report 3 Remediations (BUG-01, BUG-02, BUG-03, BUG-04)

@@ -137,8 +137,10 @@ export async function handleDeleteAccount(req: Request, env: Env) {
   const emailHashBuffer = await crypto.subtle.digest('SHA-256', emailData);
   const emailHash = Array.from(new Uint8Array(emailHashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
 
-  // 3. Insert tombstone
-  await env.DB.prepare("INSERT INTO account_tombstones (hash_id, type, expires_at) VALUES (?, 'email', datetime('now', '+90 days'))").bind(emailHash).run();
+  // 3. Insert tombstone (with in-memory Set deduplication & INSERT OR IGNORE idempotency)
+  const tombstoneHashes = new Set<string>();
+  tombstoneHashes.add(emailHash);
+  await env.DB.prepare("INSERT OR IGNORE INTO account_tombstones (hash_id, type, expires_at) VALUES (?, 'email', datetime('now', '+90 days'))").bind(emailHash).run();
 
   const bindings = await env.DB.prepare("SELECT provider, provider_id FROM user_oauth_bindings WHERE user_id = ?").bind(session.userId).all<{provider: string; provider_id: string}>();
   if (bindings.results && bindings.results.length > 0) {
@@ -146,7 +148,10 @@ export async function handleDeleteAccount(req: Request, env: Env) {
       const oauthData = encoder.encode(`${b.provider}:${b.provider_id}` + persistentSalt);
       const oauthHashBuffer = await crypto.subtle.digest('SHA-256', oauthData);
       const oauthHash = Array.from(new Uint8Array(oauthHashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
-      await env.DB.prepare("INSERT INTO account_tombstones (hash_id, type, expires_at) VALUES (?, 'oauth', datetime('now', '+90 days'))").bind(oauthHash).run();
+      if (!tombstoneHashes.has(oauthHash)) {
+        tombstoneHashes.add(oauthHash);
+        await env.DB.prepare("INSERT OR IGNORE INTO account_tombstones (hash_id, type, expires_at) VALUES (?, 'oauth', datetime('now', '+90 days'))").bind(oauthHash).run();
+      }
     }
   }
 
@@ -154,7 +159,10 @@ export async function handleDeleteAccount(req: Request, env: Env) {
     const oauthData = encoder.encode(`${user.oauth_provider}:${user.oauth_id}` + persistentSalt);
     const oauthHashBuffer = await crypto.subtle.digest('SHA-256', oauthData);
     const oauthHash = Array.from(new Uint8Array(oauthHashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
-    await env.DB.prepare("INSERT INTO account_tombstones (hash_id, type, expires_at) VALUES (?, 'oauth', datetime('now', '+90 days'))").bind(oauthHash).run();
+    if (!tombstoneHashes.has(oauthHash)) {
+      tombstoneHashes.add(oauthHash);
+      await env.DB.prepare("INSERT OR IGNORE INTO account_tombstones (hash_id, type, expires_at) VALUES (?, 'oauth', datetime('now', '+90 days'))").bind(oauthHash).run();
+    }
   }
 
   // 4. In-place anonymization & private session erasure (GDPR compliance)
