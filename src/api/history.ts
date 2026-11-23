@@ -63,21 +63,31 @@ export async function handleSaveHistory(request: Request, env: Env): Promise<Res
   try {
     const body: any = await request.json();
     const sessionId = body.sessionId || body.session_id;
-    if (!sessionId) {
-      return new Response(JSON.stringify({ error: "Missing sessionId" }), {
+    if (!sessionId || typeof sessionId !== 'string' || !sessionId.trim() || sessionId.trim().length > 64) {
+      return new Response(JSON.stringify({ error: "Invalid sessionId (must be non-empty string <= 64 chars)" }), {
         status: 400,
         headers: { "Content-Type": "application/json" }
       });
     }
+    const cleanSessionId = sessionId.trim();
 
     const traceId = body.id || body.trace_id || ('trace-' + Date.now());
-    const title = body.title || '多模态任务编排';
-    const cost = String(body.cost ?? '0');
-    const duration = String(body.duration ?? '0s');
+    const rawTitle = typeof body.title === 'string' ? body.title.trim() : '';
+    const title = (rawTitle || '多模态任务编排').slice(0, 100);
+    const cost = String(body.cost ?? '0').slice(0, 32);
+    const duration = String(body.duration ?? '0s').slice(0, 32);
     const nodesCount = Number(body.nodesCount ?? body.nodes_count ?? 1);
     const cached = body.cached ? 1 : 0;
     const pinned = body.pinned ? 1 : 0;
-    const roundsJson = JSON.stringify(body.rounds || []);
+
+    const rawRounds = Array.isArray(body.rounds) ? body.rounds.slice(0, 100) : [];
+    const roundsJson = JSON.stringify(rawRounds);
+    if (roundsJson.length > 512 * 1024) {
+      return new Response(JSON.stringify({ error: "History payload too large (max 512KB)" }), {
+        status: 413,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
 
     await env.DB.prepare(
       `INSERT INTO user_chat_sessions (session_id, user_id, trace_id, title, cost, duration, nodes_count, cached, pinned, rounds_json, updated_at)
@@ -94,7 +104,7 @@ export async function handleSaveHistory(request: Request, env: Env): Promise<Res
          updated_at = datetime('now')
        WHERE user_chat_sessions.user_id = excluded.user_id`
     ).bind(
-      sessionId,
+      cleanSessionId,
       session.userId,
       traceId,
       title,
@@ -133,8 +143,9 @@ export async function handleUpdateHistoryItem(request: Request, env: Env, sessio
     const values: any[] = [];
 
     if (body.title !== undefined) {
+      const sanitizedTitle = String(body.title).trim().slice(0, 100);
       updates.push("title = ?");
-      values.push(body.title);
+      values.push(sanitizedTitle);
     }
     if (body.pinned !== undefined) {
       updates.push("pinned = ?");

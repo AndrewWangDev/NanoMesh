@@ -1256,6 +1256,7 @@
         <div style="margin-bottom:12px;">
           <label class="form-label" style="display:block; margin-bottom:4px; font-size:0.82rem;">调用端点 (endpoint) *</label>
           <input type="text" id="node-endpoint-input" class="input-field" placeholder="如 @cf/meta/llama-3.2-3b-instruct 或 https://vps.com/v1/chat/completions" required>
+          <div id="endpoint-http-warning" style="display:none; color:#f59e0b; font-size:0.75rem; margin-top:4px;">⚠️ 提示：该端点采用明文 HTTP 协议，在公网信道传输鉴权密钥可能存在窃听风险，建议在生产环境配置 HTTPS。</div>
         </div>
 
         <div class="form-grid-2">
@@ -1434,6 +1435,17 @@
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+    }
+
+    // --- CSV Formula Injection & Field Escaping Utility (RFC 4180 / CWE-1236) ---
+    function escapeCsv(val) {
+      if (val === null || val === undefined) return '';
+      let str = String(val);
+      // Neutralize formula triggers in Excel/Calc: =, +, -, @, tab, CR
+      if (/^[=+\-@\t\r]/.test(str)) {
+        str = "'" + str;
+      }
+      return str.replace(/"/g, '""');
     }
 
     // --- Format Bytes Utility ---
@@ -1871,6 +1883,14 @@
         }
         updateModalityChips();
       });
+    });
+
+    // Node Endpoint Plaintext HTTP Warning (NM-INFO-03)
+    document.getElementById('node-endpoint-input')?.addEventListener('input', (e) => {
+      const warn = document.getElementById('endpoint-http-warning');
+      if (warn) {
+        warn.style.display = e.target.value.trim().toLowerCase().startsWith('http://') ? 'block' : 'none';
+      }
     });
 
     // Node Form Submit
@@ -2648,7 +2668,7 @@
       const d = generatedDataForModal;
       let csv = 'Code,Amount,Expires_At,Batch_ID,Note\r\n';
       d.codes.forEach(c => {
-        csv += `"${c}",${d.amount},"${d.expires_at || 'Never'}","${d.batch_id}","${escapeHtml(d.note || '')}"\r\n`;
+        csv += `"${escapeCsv(c)}",${d.amount},"${escapeCsv(d.expires_at || 'Never')}","${escapeCsv(d.batch_id)}","${escapeCsv(d.note || '')}"\r\n`;
       });
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);

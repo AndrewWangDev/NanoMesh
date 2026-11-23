@@ -10,9 +10,13 @@ function getClient(env: Env) {
   });
 }
 
+export function getCloudflareAccountId(env: Env): string {
+  return env.Cloudflare_Account_ID || (env as any).CLOUDFLARE_ACCOUNT_ID || "";
+}
+
 function getEndpoint(env: Env) {
   const bucket = (env as any).R2_BUCKET_NAME || 'nanomesh-assets';
-  return `https://${env.Cloudflare_Account_ID}.r2.cloudflarestorage.com/${bucket}`;
+  return `https://${getCloudflareAccountId(env)}.r2.cloudflarestorage.com/${bucket}`;
 }
 
 export async function createMultipartUpload(env: Env, objectKey: string, contentType: string = 'application/octet-stream'): Promise<string> {

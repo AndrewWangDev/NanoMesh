@@ -13,7 +13,7 @@ import { UnifiedProtocolEnvelope } from "../orchestration/types";
 export function triggerLazyHandshakeSweep(env: Env, ctx?: ExecutionContext) {
   if (ctx && typeof ctx.waitUntil === 'function') {
     const sweepPromise = env.DB.prepare(
-      "DELETE FROM dag_handshakes WHERE datetime(expires_at) < datetime('now', '-1 hour')"
+      "DELETE FROM dag_handshakes WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 hour')"
     ).run().catch((e) => console.warn("[HandshakeSweep] lazy cleanup error:", e));
     ctx.waitUntil(sweepPromise);
   }
@@ -143,8 +143,8 @@ export async function handleChat(request: Request, env: Env, ctx?: ExecutionCont
   }
 
   const envelope = body.envelope;
-  if (!envelope || !envelope.instruction_payload) {
-    return new Response(JSON.stringify({ error: "Missing instruction payload" }), { 
+  if (!envelope || !envelope.instruction_payload || typeof envelope.instruction_payload !== 'string' || !envelope.instruction_payload.trim()) {
+    return new Response(JSON.stringify({ error: "Missing or invalid instruction_payload: must be a non-empty string" }), { 
       status: 400, 
       headers: { "Content-Type": "application/json" } 
     });

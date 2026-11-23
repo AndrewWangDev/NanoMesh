@@ -211,6 +211,8 @@ export async function handleGetAsset(request: Request, env: Env): Promise<Respon
     headers.set("cache-control", "public, max-age=31536000, immutable");
     headers.set("access-control-allow-origin", "*");
     headers.set("X-Content-Type-Options", "nosniff");
+    headers.set("Content-Security-Policy", "default-src 'none'; sandbox");
+    headers.set("Content-Disposition", "attachment");
     return new Response(object.body, { headers });
   }
 

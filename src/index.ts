@@ -46,12 +46,16 @@ export default {
     try {
       if (url.pathname.startsWith("/api/")) {
         let res: Response;
-        if (url.pathname.startsWith("/api/auth/oauth/") && request.method === "DELETE") {
-           const provider = url.pathname.replace(/\/$/, "").split("/").pop();
+        const cleanPath = (url.pathname.length > 1 && url.pathname.endsWith("/"))
+          ? url.pathname.replace(/\/+$/, "")
+          : url.pathname;
+
+        if (cleanPath.startsWith("/api/auth/oauth/") && request.method === "DELETE") {
+           const provider = cleanPath.split("/").pop();
            res = await handleUnbindOAuth(request, env, provider || "");
-        } else if (url.pathname.startsWith("/api/admin/")) {
+        } else if (cleanPath.startsWith("/api/admin/")) {
            const admin = await import("./api/admin");
-           const adminPath = url.pathname.replace(/\/+$/, "");
+           const adminPath = cleanPath;
            if (adminPath === "/api/admin/login") res = await admin.handleAdminLogin(request, env, ctx);
            else if (adminPath === "/api/admin/logout") res = await admin.handleAdminLogout(request, env);
            // Compute Topology Nodes
@@ -100,53 +104,53 @@ export default {
            }
            else if (adminPath.startsWith("/api/admin/models/") && request.method === "PATCH") res = await admin.handleAdminUpdateModel(request, env);
            else res = new Response("Not Found", { status: 404 });
-        } else if (url.pathname === "/api/notifications" && request.method === "GET") {
+        } else if (cleanPath === "/api/notifications" && request.method === "GET") {
            const { handleGetNotifications } = await import("./api/notifications");
            res = await handleGetNotifications(request, env);
-        } else if (url.pathname === "/api/notifications/read-all" && request.method === "POST") {
+        } else if (cleanPath === "/api/notifications/read-all" && request.method === "POST") {
            const { handleMarkAllAsRead } = await import("./api/notifications");
            res = await handleMarkAllAsRead(request, env);
-        } else if (url.pathname.startsWith("/api/notifications/") && url.pathname.endsWith("/read") && request.method === "POST") {
-           const notifId = url.pathname.split("/")[3];
+        } else if (cleanPath.startsWith("/api/notifications/") && cleanPath.endsWith("/read") && request.method === "POST") {
+           const notifId = cleanPath.split("/")[3];
            const { handleMarkAsRead } = await import("./api/notifications");
            res = await handleMarkAsRead(request, env, notifId);
-        } else if (url.pathname === "/api/history" && request.method === "GET") {
+        } else if (cleanPath === "/api/history" && request.method === "GET") {
            const { handleGetHistory } = await import("./api/history");
            res = await handleGetHistory(request, env);
-        } else if (url.pathname === "/api/history" && request.method === "POST") {
+        } else if (cleanPath === "/api/history" && request.method === "POST") {
            const { handleSaveHistory } = await import("./api/history");
            res = await handleSaveHistory(request, env);
-        } else if (url.pathname.startsWith("/api/history/") && request.method === "PATCH") {
-           const sessionId = url.pathname.slice("/api/history/".length);
+        } else if (cleanPath.startsWith("/api/history/") && request.method === "PATCH") {
+           const sessionId = cleanPath.slice("/api/history/".length);
            const { handleUpdateHistoryItem } = await import("./api/history");
            res = await handleUpdateHistoryItem(request, env, sessionId);
-        } else if (url.pathname.startsWith("/api/history/") && request.method === "DELETE") {
-           const sessionId = url.pathname.slice("/api/history/".length);
+        } else if (cleanPath.startsWith("/api/history/") && request.method === "DELETE") {
+           const sessionId = cleanPath.slice("/api/history/".length);
            const { handleDeleteHistoryItem } = await import("./api/history");
            res = await handleDeleteHistoryItem(request, env, sessionId);
-        } else if (url.pathname.startsWith("/api/auth/passkey")) {
+        } else if (cleanPath.startsWith("/api/auth/passkey")) {
            const passkey = await import("./api/passkey");
-           if (url.pathname === "/api/auth/passkey/register/options" && request.method === "POST") {
+           if (cleanPath === "/api/auth/passkey/register/options" && request.method === "POST") {
              res = await passkey.handlePasskeyRegisterOptions(request, env);
-           } else if (url.pathname === "/api/auth/passkey/register/verify" && request.method === "POST") {
+           } else if (cleanPath === "/api/auth/passkey/register/verify" && request.method === "POST") {
              res = await passkey.handlePasskeyRegisterVerify(request, env);
-           } else if (url.pathname === "/api/auth/passkey/login/options" && request.method === "POST") {
+           } else if (cleanPath === "/api/auth/passkey/login/options" && request.method === "POST") {
              res = await passkey.handlePasskeyLoginOptions(request, env);
-           } else if (url.pathname === "/api/auth/passkey/login/verify" && request.method === "POST") {
+           } else if (cleanPath === "/api/auth/passkey/login/verify" && request.method === "POST") {
              res = await passkey.handlePasskeyLoginVerify(request, env);
-           } else if ((url.pathname === "/api/auth/passkey/list" || url.pathname === "/api/auth/passkey") && request.method === "GET") {
+           } else if ((cleanPath === "/api/auth/passkey/list" || cleanPath === "/api/auth/passkey") && request.method === "GET") {
              res = await passkey.handlePasskeyList(request, env);
-           } else if (url.pathname.startsWith("/api/auth/passkey/") && request.method === "DELETE") {
-             const credentialId = url.pathname.slice("/api/auth/passkey/".length);
+           } else if (cleanPath.startsWith("/api/auth/passkey/") && request.method === "DELETE") {
+             const credentialId = cleanPath.slice("/api/auth/passkey/".length);
              res = await passkey.handlePasskeyDelete(request, env, credentialId);
            } else {
              res = new Response("Not Found", { status: 404 });
            }
-        } else if (url.pathname === "/api/asset" || url.pathname === "/api/assets" || url.pathname.startsWith("/api/assets/") || url.pathname.startsWith("/api/asset/")) {
+        } else if (cleanPath === "/api/asset" || cleanPath === "/api/assets" || cleanPath.startsWith("/api/assets/") || cleanPath.startsWith("/api/asset/")) {
            const { handleGetAsset } = await import("./api/presign");
            res = await handleGetAsset(request, env);
         } else {
-          switch (url.pathname) {
+          switch (cleanPath) {
             case "/api/auth/register":
               res = await handleRegister(request, env); break;
             case "/api/auth/login":
