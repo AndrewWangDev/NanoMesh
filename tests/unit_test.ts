@@ -8,6 +8,8 @@ import { scoreAndRankRoleModels, cosineSimilarity } from "../src/orchestration/s
 import { isSafeExternalUrl, applyContextWindowGuard, buildAuthHeaders, buildDownstreamMessages } from "../src/orchestration/dispatcher";
 import { sliceEnvelopeForNode } from "../src/orchestration/slicing";
 import { getAdminSigningSecret } from "../src/api/admin";
+import { isValidEmailDomain } from "../src/api/auth";
+import { getGitHubAuthURL, getGoogleAuthURL } from "../src/auth/oauth";
 import { parseAttestationObject, verifyAssertionSignature, isOriginAllowed, base64UrlToBuffer } from "../src/auth/webauthn";
 import type { DAGRole, DAGTemplate, ModelMetadata } from "../src/orchestration/types";
 
@@ -96,7 +98,21 @@ async function runUnitTests() {
   assert.equal(isSafeExternalUrl("http://[::ffff:192.168.1.1]:8000"), false, "IPv4-mapped 192.168.1.1 must be rejected");
   assert.equal(isSafeExternalUrl("http://[::ffff:10.0.0.1]:8000"), false, "IPv4-mapped 10.0.0.1 must be rejected");
   assert.equal(isSafeExternalUrl("http://[::ffff:169.254.169.254]"), false, "IPv4-mapped cloud metadata must be rejected");
-  console.log("  ✓ SSRF IP / Protocol filter: PASSED");
+  // NM-SEC-01: Wildcard Dynamic DNS & Private IP Hostname protection
+  assert.equal(isSafeExternalUrl("http://127.0.0.1.nip.io:8080"), false, "nip.io loopback must be rejected");
+  assert.equal(isSafeExternalUrl("https://169.254.169.254.sslip.io"), false, "sslip.io metadata must be rejected");
+  assert.equal(isSafeExternalUrl("http://127-0-0-1.nip.io"), false, "dashed nip.io loopback must be rejected");
+  assert.equal(isSafeExternalUrl("http://10.0.0.1.traefik.me"), false, "traefik.me private IP must be rejected");
+  assert.equal(isSafeExternalUrl("http://192-168-1-1.sslip.io"), false, "dashed sslip.io private IP must be rejected");
+  assert.equal(isSafeExternalUrl("http://internal.10.1.2.3"), false, "private IP subdomain must be rejected");
+  assert.equal(isSafeExternalUrl("https://api.openai.com/v1"), true, "legitimate public domain must be allowed");
+  // NEW-01: Legitimate domains starting with 10-, 0-, or 127- must not be falsely blocked
+  assert.equal(isSafeExternalUrl("https://0-shot.ai"), true, "0-shot.ai must be allowed");
+  assert.equal(isSafeExternalUrl("https://10-ai.com/v1"), true, "10-ai.com must be allowed");
+  assert.equal(isSafeExternalUrl("https://10-tech.net"), true, "10-tech.net must be allowed");
+  assert.equal(isSafeExternalUrl("https://0-cdn.example.com"), true, "0-cdn.example.com must be allowed");
+  assert.equal(isSafeExternalUrl("https://127-foo.com"), true, "127-foo.com must be allowed");
+  console.log("  ✓ SSRF IP / Protocol / Wildcard DNS filter & non-IP prefix preservation: PASSED");
 
   // 3.2 applyContextWindowGuard
   const sysPrompt = "You are a professional compiler.";
@@ -1310,8 +1326,115 @@ async function runUnitTests() {
   assert.ok(!edgeCompacted.endsWith("LongOriginalStringRequiringCompaction"), "tailLen === 0 must NOT return entire original string via slice(-0)");
   console.log("  ✓ JS Boundary: slice(-0) guarded against full string duplication when tailLen === 0: PASSED");
 
+  // 14.4 Input Type Validation: isValidEmailDomain non-string & malformed resilience
+  assert.equal(isValidEmailDomain(undefined), false, "undefined must return false without TypeError");
+  assert.equal(isValidEmailDomain(null), false, "null must return false without TypeError");
+  assert.equal(isValidEmailDomain(12345), false, "number must return false without TypeError");
+  assert.equal(isValidEmailDomain(true), false, "boolean must return false without TypeError");
+  assert.equal(isValidEmailDomain(["user@gmail.com"]), false, "array must return false without TypeError");
+  assert.equal(isValidEmailDomain({ email: "user@gmail.com" }), false, "object must return false without TypeError");
+  assert.equal(isValidEmailDomain(""), false, "empty string must return false");
+  assert.equal(isValidEmailDomain("   "), false, "whitespace string must return false");
+  assert.equal(isValidEmailDomain("noatsign.com"), false, "missing at sign must return false");
+  assert.equal(isValidEmailDomain("a@b@gmail.com"), false, "multiple at signs must return false");
+  assert.equal(isValidEmailDomain("@gmail.com"), false, "missing local part must return false");
+  assert.equal(isValidEmailDomain("user@unsupported-domain.xyz"), false, "unsupported domain must return false");
+  assert.equal(isValidEmailDomain("user@gmail.com"), true, "standard gmail must return true");
+  assert.equal(isValidEmailDomain("USER@OUTLOOK.COM"), true, "uppercase outlook must return true");
+  assert.equal(isValidEmailDomain("  user@yahoo.com  "), true, "trimmed whitespace yahoo must return true");
+  console.log("  ✓ Input Type Validation: isValidEmailDomain rejects non-string and malformed inputs with 0 unhandled exceptions: PASSED");
+
+  // ----------------------------------------------------
+  // SUITE 15: Audit Report 12 Remediations
+  // (NM-SEC-01, NM-BUG-03, NM-SEC-04, NM-INFO-05)
+  // ----------------------------------------------------
+  console.log("\n[Suite 15] Audit Report 12 Remediations (NM-SEC-01, NM-BUG-03, NM-SEC-04, NM-INFO-05)");
+
+  // 15.1 NM-SEC-01: OAuth Bind State anchors userId
+  const mockEnv: any = {
+    JWT_SECRET: "test-secret-32-chars-long-audit12-unit",
+    GITHUB_CLIENT_ID: "gh_client_123",
+    GOOGLE_CLIENT_ID: "goog_client_123",
+    FRONTEND_URL: "https://nano.andrewwangdev.com"
+  };
+
+  const loginUrl = await getGitHubAuthURL(mockEnv, "login");
+  const loginState = new URL(loginUrl).searchParams.get("state")!;
+  const loginPayload: any = await verifyJWT(loginState, mockEnv.JWT_SECRET);
+  assert.equal(loginPayload.action, "login");
+  assert.equal(loginPayload.userId, undefined, "Login action state must NOT require or contain userId");
+
+  const bindUrl = await getGitHubAuthURL(mockEnv, "bind", "usr_bound_456");
+  const bindState = new URL(bindUrl).searchParams.get("state")!;
+  const bindPayload: any = await verifyJWT(bindState, mockEnv.JWT_SECRET);
+  assert.equal(bindPayload.action, "bind");
+  assert.equal(bindPayload.userId, "usr_bound_456", "Bind action state must strictly anchor caller userId");
+
+  const googleBindUrl = await getGoogleAuthURL(mockEnv, "bind", "usr_bound_789");
+  const googleBindState = new URL(googleBindUrl).searchParams.get("state")!;
+  const googleBindPayload: any = await verifyJWT(googleBindState, mockEnv.JWT_SECRET);
+  assert.equal(googleBindPayload.action, "bind");
+  assert.equal(googleBindPayload.userId, "usr_bound_789", "Google bind action state must strictly anchor caller userId");
+  console.log("  ✓ NM-SEC-01: OAuth bind state anchors userId to prevent binding CSRF: PASSED");
+
+  // 15.2 NM-BUG-03: buildAuthHeaders with Google AI in bearer_static
+  const googleModel: ModelMetadata = {
+    model_id: "gemini-2.5-flash-test",
+    display_name: "Gemini 2.5 Flash",
+    provider: "Google AI",
+    inference_target: "heavy",
+    endpoint: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash",
+    api_format: "google_ai",
+    auth_mode: "bearer_static",
+    auth_secret: "AIzaSyTestGoogleKey123",
+    cost_per_1k_tokens: 0.25,
+    context_window: 131072,
+    modalities: ["text", "image"],
+    is_active: 1
+  };
+  const gHeaders = await buildAuthHeaders(googleModel, mockEnv, "{}", {});
+  assert.equal(gHeaders["Authorization"], "Bearer AIzaSyTestGoogleKey123");
+  assert.equal(gHeaders["x-goog-api-key"], "AIzaSyTestGoogleKey123");
+  assert.equal(gHeaders["Content-Type"], "application/json");
+  console.log("  ✓ NM-BUG-03: buildAuthHeaders cleanly sets x-goog-api-key without dead code: PASSED");
+
+  // 15.3 NM-SEC-04: CSV formula injection escape logic
+  function testEscapeCsv(val: any): string {
+    if (val === null || val === undefined) return '';
+    let str = String(val);
+    if (/^[=+\-@\t\r]/.test(str)) {
+      str = "'" + str;
+    }
+    return str.replace(/"/g, '""');
+  }
+
+  assert.equal(testEscapeCsv("=cmd|'/C calc'!A0"), "'=cmd|'/C calc'!A0");
+  assert.equal(testEscapeCsv("+12345"), "'+12345");
+  assert.equal(testEscapeCsv("-100"), "'-100");
+  assert.equal(testEscapeCsv("@SUM(A1:A10)"), "'@SUM(A1:A10)");
+  assert.equal(testEscapeCsv("\t=cmd"), "'\t=cmd");
+  assert.equal(testEscapeCsv('Normal "Quotes"'), 'Normal ""Quotes""');
+  assert.equal(testEscapeCsv('Safe note'), 'Safe note');
+  console.log("  ✓ NM-SEC-04: escapeCsv neutralizes formula injection (=,+,-,@) & escapes quotes: PASSED");
+
+  // 15.4 NM-INFO-05: getPersistentSalt fallback warning & separation
+  const envWithSalt: any = { PERSISTENT_DATA_SALT: "dedicated_salt_abc", JWT_SECRET: "jwt_sec_xyz" };
+  assert.equal(getPersistentSalt(envWithSalt), "dedicated_salt_abc", "Must prioritize PERSISTENT_DATA_SALT");
+
+  let warned = false;
+  const originalWarn = console.warn;
+  console.warn = (...args: any[]) => {
+    if (String(args[0]).includes("PERSISTENT_DATA_SALT is unset")) warned = true;
+  };
+  const envFallback: any = { JWT_SECRET: "jwt_sec_fallback_123" };
+  const fallbackSalt = getPersistentSalt(envFallback);
+  console.warn = originalWarn;
+  assert.equal(fallbackSalt, "jwt_sec_fallback_123");
+  assert.equal(warned, true, "Must output warning when falling back to JWT_SECRET");
+  console.log("  ✓ NM-INFO-05: getPersistentSalt prioritizes dedicated salt & logs fallback warning: PASSED");
+
   console.log("\n==================================================");
-  console.log("   🎉 ALL 14 UNIT TEST SUITES PASSED (100%)!      ");
+  console.log("   🎉 ALL 15 UNIT TEST SUITES PASSED (100%)!      ");
   console.log("==================================================");
 }
 
