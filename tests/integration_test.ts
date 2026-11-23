@@ -3629,8 +3629,94 @@ async function runIntegrationTests() {
   assert.equal(lightModelRes.headers.get("Content-Disposition"), "attachment");
   console.log("  ✓ NM-INFO-02: Public light node static responses strictly include CSP sandbox and attachment headers: PASSED");
 
+  // -----------------------------------------------------------------------
+  // SCENARIO 15: Audit Report 13 Remediations (NM-BUG-01, NM-BUG-02, NM-SEC-01, NM-SEC-02, NM-INFO-02)
+  // -----------------------------------------------------------------------
+  console.log("\n[Scenario 15] Audit Report 13 Remediations (NM-BUG-01, NM-BUG-02, NM-SEC-01, NM-SEC-02, NM-INFO-02)");
+
+  // 15.1 NM-BUG-01: /api/user/credits unauthenticated returns 401 with CORS headers & JSON error
+  const unauthCreditsReq = new Request("https://nanomesh.local/api/user/credits", {
+    method: "GET",
+    headers: { "Origin": "https://frontend.nanomesh.app" }
+  });
+  const unauthCreditsRes = await worker.fetch(unauthCreditsReq, env, {} as any);
+  assert.equal(unauthCreditsRes.status, 401, "/api/user/credits without session must return 401");
+  assert.ok(unauthCreditsRes.headers.get("access-control-allow-origin"), "Must include access-control-allow-origin header");
+  assert.equal(unauthCreditsRes.headers.get("x-content-type-options"), "nosniff", "Must include nosniff security header");
+  const unauthBody = await unauthCreditsRes.json();
+  assert.equal(unauthBody.error, "Unauthorized", "Response must be JSON error object");
+  console.log("  ✓ NM-BUG-01: Unauthenticated /api/user/credits returns 401 with full CORS and security headers: PASSED");
+
+  // 15.2 NM-INFO-02: Read-only endpoints reject non-GET requests with 405 Method Not Allowed
+  const postCreditsReq = new Request("https://nanomesh.local/api/user/credits", { method: "POST" });
+  const postCreditsRes = await worker.fetch(postCreditsReq, env, {} as any);
+  assert.equal(postCreditsRes.status, 405, "POST /api/user/credits must return 405");
+
+  const postConfigReq = new Request("https://nanomesh.local/api/auth/config", { method: "POST" });
+  const postConfigRes = await worker.fetch(postConfigReq, env, {} as any);
+  assert.equal(postConfigRes.status, 405, "POST /api/auth/config must return 405");
+
+  const postBindingsReq = new Request("https://nanomesh.local/api/user/bindings", { method: "POST" });
+  const postBindingsRes = await worker.fetch(postBindingsReq, env, {} as any);
+  assert.equal(postBindingsRes.status, 405, "POST /api/user/bindings must return 405");
+  console.log("  ✓ NM-INFO-02: Read-only endpoints strictly enforce HTTP Method GET/HEAD and reject POST with 405: PASSED");
+
+  // 15.3 NM-SEC-01: Path traversal filter blocks '..' in asset key
+  const traversalReq1 = new Request("https://nanomesh.local/api/assets?key=models/light/../secret.onnx");
+  const traversalRes1 = await worker.fetch(traversalReq1, env, {} as any);
+  assert.equal(traversalRes1.status, 400, "Path traversal sequence in asset key must be rejected with 400");
+
+  const traversalReq2 = new Request(`https://nanomesh.local/api/assets?key=tmp/${lowBalanceUserId}/..\\other\\pass.txt`, {
+    headers: { "Cookie": `session=${histToken}` }
+  });
+  const traversalRes2 = await worker.fetch(traversalReq2, env, {} as any);
+  assert.equal(traversalRes2.status, 400, "Encoded path traversal sequence must be rejected with 400");
+  console.log("  ✓ NM-SEC-01: Asset retrieval strictly intercepts path traversal sequences with 400: PASSED");
+
+  // 15.4 NM-SEC-02: Passkey login rejects deleted user (email starting with deleted_)
+  const deletedUserId = "del_pk_user_999";
+  store.users.push({
+    user_id: deletedUserId,
+    username: "del_user",
+    email: `deleted_${deletedUserId}`,
+    credits: 0,
+    token_version: 1
+  } as any);
+  store.user_passkeys.push({
+    credential_id: "cred_deleted_user_1",
+    user_id: deletedUserId,
+    public_key: "dummy_pk",
+    public_key_alg: -7,
+    counter: 0,
+    device_name: "MacBook",
+    aaguid: "00000000-0000-0000-0000-000000000000",
+    transports: "[]",
+    created_at: new Date().toISOString(),
+    last_used_at: null
+  });
+
+  const { handlePasskeyLoginVerify } = await import("../src/api/passkey");
+  const delVerifyReq = new Request("https://nanomesh.local/api/auth/passkey/login/verify", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      id: "cred_deleted_user_1",
+      rawId: "cred_deleted_user_1",
+      response: {
+        clientDataJSON: Buffer.from(JSON.stringify({ type: "webauthn.get", challenge: "dummy_c", origin: "https://nanomesh.local" })).toString("base64url"),
+        authenticatorData: Buffer.from("a".repeat(37)).toString("base64url"),
+        signature: Buffer.from("dummy_sig").toString("base64url")
+      }
+    })
+  });
+  const delVerifyRes = await handlePasskeyLoginVerify(delVerifyReq, env);
+  assert.equal(delVerifyRes.status, 401, "Deleted user passkey login must be rejected with 401");
+  const delVerifyBody = await delVerifyRes.json();
+  assert.equal(delVerifyBody.error, "error.userNotFound", "Must return userNotFound error for deleted user");
+  console.log("  ✓ NM-SEC-02: Passkey verification strictly rejects tombstoned (deleted_) accounts: PASSED");
+
   console.log("\n==================================================");
-  console.log("   🎉 ALL 14 INTEGRATION SCENARIOS PASSED (100%)! ");
+  console.log("   🎉 ALL 15 INTEGRATION SCENARIOS PASSED (100%)! ");
   console.log("==================================================");
 }
 
