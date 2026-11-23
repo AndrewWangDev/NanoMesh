@@ -21,6 +21,9 @@ node_modules/
 wrangler.toml
 !*.example
 
+# Cloudflare Wrangler generated type definitions (keep local on disk, untracked)
+worker-configuration.d.ts
+
 # Build outputs & TypeScript compilation cache
 dist/
 build/
