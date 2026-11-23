@@ -199,6 +199,9 @@ function createMockD1(store: TableStore) {
               const userArg = String(boundArgs[0] || '').toLowerCase();
               const userId = boundArgs[1];
               res = res.filter(u => u.username && u.username.toLowerCase() === userArg && u.user_id !== userId);
+            } else if (cleanSql.includes("WHERE referral_code = ?")) {
+              const code = boundArgs[0];
+              res = res.filter(u => u.referral_code === code && (!cleanSql.includes("email NOT LIKE 'deleted_%'") || !u.email?.startsWith("deleted_")));
             }
             return { results: res as any };
           }
@@ -275,7 +278,13 @@ function createMockD1(store: TableStore) {
 
           // 13. SELECT id FROM verification_codes
           if (cleanSql.includes("FROM verification_codes")) {
-            return { results: [] };
+            let res = [...(store.verification_codes || [])];
+            if (cleanSql.includes("WHERE email = ?")) {
+              const emailArg = boundArgs[0];
+              const nowIso = new Date().toISOString();
+              res = res.filter(v => v.email === emailArg && (!cleanSql.includes("expires_at > datetime('now')") || v.expires_at >= nowIso));
+            }
+            return { results: res as any };
           }
 
           // 14. SELECT * FROM notifications
@@ -413,6 +422,7 @@ function createMockD1(store: TableStore) {
               u.email = 'deleted_' + userId;
               u.username = 'del_' + userId.slice(0, 12);
               u.credits = 0;
+              u.referral_code = null;
               u.token_version = (u.token_version || 1) + 1;
             }
             return { meta: { changes: 1 } };
@@ -484,6 +494,13 @@ function createMockD1(store: TableStore) {
           // DELETE FROM admin_login_attempts
           if (cleanSql.startsWith("DELETE FROM admin_login_attempts")) {
             store.admin_login_attempts = [];
+            return { meta: { changes: 1 } };
+          }
+
+          // INSERT INTO admin_login_attempts
+          if (cleanSql.startsWith("INSERT INTO admin_login_attempts")) {
+            store.admin_login_attempts = store.admin_login_attempts || [];
+            store.admin_login_attempts.push({ ip: boundArgs[0], created_at: new Date().toISOString() });
             return { meta: { changes: 1 } };
           }
 
@@ -3715,8 +3732,143 @@ async function runIntegrationTests() {
   assert.equal(delVerifyBody.error, "error.userNotFound", "Must return userNotFound error for deleted user");
   console.log("  ✓ NM-SEC-02: Passkey verification strictly rejects tombstoned (deleted_) accounts: PASSED");
 
+  // -----------------------------------------------------------------------
+  // SCENARIO 16: Audit Report 14 Remediations (NM-BUG-01, NM-BUG-02, NM-SEC-01, NM-INFO-01, NM-BUG-03)
+  // -----------------------------------------------------------------------
+  console.log("\n[Scenario 16] Audit Report 14 Remediations (NM-BUG-01, NM-BUG-02, NM-SEC-01, NM-INFO-01, NM-BUG-03)");
+
+  // 16.1 NM-BUG-01: Deleted user referral code rejection
+  const delTestUserId = "usr_to_delete_for_ref";
+  const delTestUserToken = await signJWT({ userId: delTestUserId, tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  store.users.push({
+    user_id: delTestUserId,
+    username: "UserToDelete",
+    email: "todelete@nanomesh.local",
+    password_hash: "hash_del",
+    credits: 50,
+    referral_code: "REF-DEL-CODE-1",
+    referred_by: null,
+    token_version: 1
+  } as any);
+
+  // Perform account deletion
+  const delReq = new Request("https://nanomesh.local/api/user/delete", {
+    method: "POST",
+    headers: { "Cookie": `session=${delTestUserToken}` }
+  });
+  const delRes = await handleDeleteAccount(delReq, env);
+  assert.equal(delRes.status, 200, "Account deletion must succeed");
+  const deletedDbUser = store.users.find(u => u.user_id === delTestUserId);
+  assert.equal(deletedDbUser?.referral_code, null, "Deleted user referral_code must be set to null");
+
+  // Attempt to register with the old deleted referral code
+  const { handleRegister } = await import("../src/api/auth");
+  // Set verification code for registration
+  store.verification_codes.push({
+    id: "vc_del_ref_test",
+    email: "new_referral_target@gmail.com",
+    code: "123456",
+    expires_at: new Date(Date.now() + 600000).toISOString()
+  });
+  const registerWithDeletedRefReq = new Request("https://nanomesh.local/api/auth/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      username: "NewRefTarget",
+      email: "new_referral_target@gmail.com",
+      password: "Password123!",
+      code: "123456",
+      referral_code: "REF-DEL-CODE-1",
+      turnstile_token: "mock_turnstile_pass"
+    })
+  });
+  const origFetchRegister = globalThis.fetch;
+  try {
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const urlStr = typeof input === "string" ? input : (input instanceof URL ? input.toString() : (input as any).url);
+      if (urlStr.includes("turnstile")) {
+        return new Response(JSON.stringify({ success: true }), { status: 200 });
+      }
+      return origFetchRegister(input, init);
+    };
+
+    const registerWithDeletedRefRes = await handleRegister(registerWithDeletedRefReq, env);
+    assert.equal(registerWithDeletedRefRes.status, 400, "Registration with deleted user's referral code must be rejected");
+    const regErrBody = await registerWithDeletedRefRes.json();
+    assert.equal(regErrBody.error, "error.invalidReferralCode");
+    assert.equal(deletedDbUser?.credits, 0, "Deleted user credits must remain 0 and not receive ghost reward");
+  } finally {
+    globalThis.fetch = origFetchRegister;
+  }
+  console.log("  ✓ NM-BUG-01: Deleted account referral code is nulled and registration with it rejected: PASSED");
+
+  // 16.2 NM-BUG-02: Admin login rejects non-POST without recording attempts (Anti-DoS)
+  store.admin_login_attempts = [];
+  const adminGetReq = new Request("https://nanomesh.local/api/admin/login", { method: "GET" });
+  for (let i = 0; i < 5; i++) {
+    const adminGetRes = await worker.fetch(adminGetReq, env, {} as any);
+    assert.equal(adminGetRes.status, 405, "GET /api/admin/login must return 405 Method Not Allowed");
+  }
+  assert.equal(store.admin_login_attempts.length, 0, "GET requests must never write to admin_login_attempts");
+
+  // Valid POST still succeeds (not locked out)
+  const adminPostReq = new Request("https://nanomesh.local/api/admin/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password: (env as any).ADMIN_PASSWORD || "IntegrationAdminPass123!" })
+  });
+  const adminPostRes = await worker.fetch(adminPostReq, env, {} as any);
+  assert.equal(adminPostRes.status, 200, "Valid POST admin login must succeed without being DoS locked");
+  console.log("  ✓ NM-BUG-02: Non-POST /api/admin/login returns 405 and avoids lockout DoS: PASSED");
+
+  // 16.3 NM-SEC-01: Logout routes reject GET (Logout CSRF defense)
+  const userLogoutGetReq = new Request("https://nanomesh.local/api/auth/logout", { method: "GET" });
+  const userLogoutGetRes = await worker.fetch(userLogoutGetReq, env, {} as any);
+  assert.equal(userLogoutGetRes.status, 405, "GET /api/auth/logout must return 405");
+
+  const adminLogoutGetReq = new Request("https://nanomesh.local/api/admin/logout", { method: "GET" });
+  const adminLogoutGetRes = await worker.fetch(adminLogoutGetReq, env, {} as any);
+  assert.equal(adminLogoutGetRes.status, 405, "GET /api/admin/logout must return 405");
+
+  const userLogoutPostReq = new Request("https://nanomesh.local/api/auth/logout", { method: "POST" });
+  const userLogoutPostRes = await worker.fetch(userLogoutPostReq, env, {} as any);
+  assert.equal(userLogoutPostRes.status, 200, "POST /api/auth/logout must succeed");
+  console.log("  ✓ NM-SEC-01: Logout endpoints strictly reject GET to block Logout CSRF: PASSED");
+
+  // 16.4 NM-INFO-01: Read-only endpoints reject non-GET/HEAD with 405
+  const postMeReq = new Request("https://nanomesh.local/api/auth/me", { method: "POST" });
+  const postMeRes = await worker.fetch(postMeReq, env, {} as any);
+  assert.equal(postMeRes.status, 405, "POST /api/auth/me must return 405");
+
+  const postLedgerReq = new Request("https://nanomesh.local/api/user/ledger", { method: "POST" });
+  const postLedgerRes = await worker.fetch(postLedgerReq, env, {} as any);
+  assert.equal(postLedgerRes.status, 405, "POST /api/user/ledger must return 405");
+
+  const postAssetReq = new Request("https://nanomesh.local/api/assets?key=models/light/qwen.onnx", { method: "POST" });
+  const postAssetRes = await worker.fetch(postAssetReq, env, {} as any);
+  assert.equal(postAssetRes.status, 405, "POST /api/assets must return 405");
+  console.log("  ✓ NM-INFO-01: /api/auth/me, /api/user/ledger and /api/assets enforce GET/HEAD with 405: PASSED");
+
+  // 16.5 NM-BUG-03: Continuation payload boundary (> 512KB) rejected with 413
+  const oversizedContReq = new Request("https://nanomesh.local/api/chat/continue", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Cookie": `session=${histToken}`
+    },
+    body: JSON.stringify({
+      continuation_token: "dummy_token",
+      status: "success",
+      envelope: { session_id: "sess_test_cont", messages: [] },
+      client_step_output: "X".repeat(512 * 1024 + 10)
+    })
+  });
+  const oversizedContRes = await worker.fetch(oversizedContReq, env, {} as any);
+  assert.equal(oversizedContRes.status, 413, "Oversized continuation payload must return 413 Payload Too Large");
+  console.log("  ✓ NM-BUG-03: Chat continuation strictly rejects payload exceeding 512KB with 413: PASSED");
+
   console.log("\n==================================================");
-  console.log("   🎉 ALL 15 INTEGRATION SCENARIOS PASSED (100%)! ");
+  console.log("   🎉 ALL 16 INTEGRATION SCENARIOS PASSED (100%)! ");
   console.log("==================================================");
 }
 
