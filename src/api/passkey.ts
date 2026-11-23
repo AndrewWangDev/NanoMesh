@@ -36,6 +36,11 @@ export async function handlePasskeyRegisterOptions(request: Request, env: Env): 
   const rpId = getRpId(request);
   const { challenge, cookieHeader } = await createChallenge("register", env.JWT_SECRET);
 
+  // NM-NEW-01: Opportunistic cleanup of stale challenge CAS entries (> 10m old)
+  env.DB.prepare(
+    "DELETE FROM system_counters WHERE key LIKE 'pk_used_%' AND value < strftime('%s', 'now', '-10 minutes')"
+  ).run().catch(() => {});
+
   const excludeCredentials = (existingKeys.results || []).map((k) => {
     let transports = ["internal"];
     try {
@@ -118,6 +123,18 @@ export async function handlePasskeyRegisterVerify(request: Request, env: Env): P
   );
   if (!isChallengeValid) {
     return Response.json({ error: "error.passkeyChallengeExpired" }, { status: 400 });
+  }
+
+  // NM-SEC-03 & NM-NEW-01: Single-use challenge consumption via CAS in system_counters with creation timestamp
+  const nowEpoch = Math.floor(Date.now() / 1000);
+  const regChallengeKey = `pk_used_${clientData.challenge}`;
+  const regCasResult = await env.DB.prepare(
+    "INSERT OR IGNORE INTO system_counters (key, value) VALUES (?, ?)"
+  ).bind(regChallengeKey, nowEpoch).run();
+
+  if (regCasResult.meta.changes === 0) {
+    console.error(`[Passkey Security Violation] Challenge replayed: ${regChallengeKey}`);
+    return Response.json({ error: "error.passkeyChallengeAlreadyUsed" }, { status: 403 });
   }
 
   // 2. Parse attestationObject
@@ -305,6 +322,11 @@ export async function handlePasskeyLoginOptions(request: Request, env: Env): Pro
   const headers = new Headers({ "Content-Type": "application/json" });
   headers.set("Set-Cookie", cookieHeader);
 
+  // NM-NEW-01: Opportunistic cleanup of stale challenge CAS entries (> 10m old)
+  env.DB.prepare(
+    "DELETE FROM system_counters WHERE key LIKE 'pk_used_%' AND value < strftime('%s', 'now', '-10 minutes')"
+  ).run().catch(() => {});
+
   return new Response(JSON.stringify(options), { status: 200, headers });
 }
 
@@ -369,6 +391,18 @@ export async function handlePasskeyLoginVerify(request: Request, env: Env): Prom
   );
   if (!isChallengeValid) {
     return Response.json({ error: "error.passkeyChallengeExpired" }, { status: 400 });
+  }
+
+  // NM-SEC-03 & NM-NEW-01: Single-use challenge consumption via CAS in system_counters with creation timestamp
+  const nowEpoch = Math.floor(Date.now() / 1000);
+  const loginChallengeKey = `pk_used_${clientData.challenge}`;
+  const loginCasResult = await env.DB.prepare(
+    "INSERT OR IGNORE INTO system_counters (key, value) VALUES (?, ?)"
+  ).bind(loginChallengeKey, nowEpoch).run();
+
+  if (loginCasResult.meta.changes === 0) {
+    console.error(`[Passkey Security Violation] Challenge replayed: ${loginChallengeKey}`);
+    return Response.json({ error: "error.passkeyChallengeAlreadyUsed" }, { status: 403 });
   }
 
   // 4. Verify cryptographic assertion signature
