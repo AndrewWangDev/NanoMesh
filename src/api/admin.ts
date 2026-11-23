@@ -1,6 +1,7 @@
 import type { Env } from "../types";
 import { signJWT, verifyJWT } from "../auth/jwt";
 import { AwsClient } from "aws4fetch";
+import { getCloudflareAccountId } from "../lib/r2s3";
 import { hashGiftCode, normalizeGiftCode, getPersistentSalt } from "./billing";
 import { resolveRoleCompetence } from "../orchestration/competence";
 import { isSafeExternalUrl } from "../orchestration/dispatcher";
@@ -210,11 +211,15 @@ export async function handleAdminCreateNode(request: Request, env: Env): Promise
   }
 
   const modalities = Array.isArray(body.modalities) ? body.modalities : (typeof body.modalities === "string" ? body.modalities.split(",").map((s: string) => s.trim()).filter(Boolean) : ["text"]);
+  const inModalities = Array.isArray(body.in_modalities) ? body.in_modalities : (typeof body.in_modalities === "string" ? body.in_modalities.split(",").map((s: string) => s.trim()).filter(Boolean) : modalities);
+  const outModalities = Array.isArray(body.out_modalities) ? body.out_modalities : (typeof body.out_modalities === "string" ? body.out_modalities.split(",").map((s: string) => s.trim()).filter(Boolean) : modalities);
+  const rawCostPerInvocation = Number(body.cost_per_invocation);
+  const costPerInvocation = Number.isFinite(rawCostPerInvocation) ? Math.max(0, rawCostPerInvocation) : 0.0;
   const tags = Array.isArray(body.tags) ? body.tags : (typeof body.tags === "string" ? body.tags.split(",").map((s: string) => s.trim()).filter(Boolean) : ["#chat"]);
-  const contextWindow = Number(body.context_window) || 4096;
-  const maxConcurrency = Number(body.max_concurrency) || 10;
-  const precision = Number(body.precision) || 0.8;
-  const cost = Number(body.cost_per_1k_tokens) || 0.0;
+  const contextWindow = Number.isFinite(Number(body.context_window)) && Number(body.context_window) > 0 ? Number(body.context_window) : 4096;
+  const maxConcurrency = Number.isFinite(Number(body.max_concurrency)) && Number(body.max_concurrency) > 0 ? Number(body.max_concurrency) : 10;
+  const precision = Number.isFinite(Number(body.precision)) ? Number(body.precision) : 0.8;
+  const cost = Number.isFinite(Number(body.cost_per_1k_tokens)) ? Math.max(0, Number(body.cost_per_1k_tokens)) : 0.0;
   const status = body.status === "disabled" ? "disabled" : "active";
   const authMode = ["none", "bearer_static", "jwt_ephemeral"].includes(body.auth_mode) ? body.auth_mode : "none";
   const apiFormat = ["workers_ai", "openai_compat", "google_ai"].includes(body.api_format) ? body.api_format : "workers_ai";
@@ -224,16 +229,20 @@ export async function handleAdminCreateNode(request: Request, env: Env): Promise
   await env.DB.prepare(`
     INSERT INTO models (
       model_id, display_name, provider, endpoint, modalities, tags,
+      in_modalities, out_modalities, cost_per_invocation,
       context_window, max_concurrency, precision, cost_per_1k_tokens,
       status, auth_mode, auth_secret, api_format, inference_target,
       created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
     ON CONFLICT(model_id) DO UPDATE SET
       display_name = excluded.display_name,
       provider = excluded.provider,
       endpoint = excluded.endpoint,
       modalities = excluded.modalities,
       tags = excluded.tags,
+      in_modalities = excluded.in_modalities,
+      out_modalities = excluded.out_modalities,
+      cost_per_invocation = excluded.cost_per_invocation,
       context_window = excluded.context_window,
       max_concurrency = excluded.max_concurrency,
       precision = excluded.precision,
@@ -251,6 +260,9 @@ export async function handleAdminCreateNode(request: Request, env: Env): Promise
     endpoint,
     JSON.stringify(modalities),
     JSON.stringify(tags),
+    JSON.stringify(inModalities),
+    JSON.stringify(outModalities),
+    costPerInvocation,
     contextWindow,
     maxConcurrency,
     precision,
@@ -294,11 +306,15 @@ export async function handleAdminUpdateNode(request: Request, env: Env, nodeId: 
     }
   }
   const modalities = body.modalities !== undefined ? (Array.isArray(body.modalities) ? JSON.stringify(body.modalities) : body.modalities) : existing.modalities;
+  const inModalities = body.in_modalities !== undefined ? (Array.isArray(body.in_modalities) ? JSON.stringify(body.in_modalities) : (typeof body.in_modalities === "string" ? body.in_modalities : existing.in_modalities)) : existing.in_modalities;
+  const outModalities = body.out_modalities !== undefined ? (Array.isArray(body.out_modalities) ? JSON.stringify(body.out_modalities) : (typeof body.out_modalities === "string" ? body.out_modalities : existing.out_modalities)) : existing.out_modalities;
+  const rawCostPerInvocation = body.cost_per_invocation !== undefined ? Number(body.cost_per_invocation) : NaN;
+  const costPerInvocation = Number.isFinite(rawCostPerInvocation) ? Math.max(0, rawCostPerInvocation) : (existing.cost_per_invocation ?? 0.0);
   const tags = body.tags !== undefined ? (Array.isArray(body.tags) ? JSON.stringify(body.tags) : body.tags) : existing.tags;
-  const contextWindow = body.context_window !== undefined ? Number(body.context_window) : existing.context_window;
-  const maxConcurrency = body.max_concurrency !== undefined ? Number(body.max_concurrency) : existing.max_concurrency;
-  const precision = body.precision !== undefined ? Number(body.precision) : existing.precision;
-  const cost = body.cost_per_1k_tokens !== undefined ? Number(body.cost_per_1k_tokens) : existing.cost_per_1k_tokens;
+  const contextWindow = body.context_window !== undefined && Number.isFinite(Number(body.context_window)) && Number(body.context_window) > 0 ? Number(body.context_window) : existing.context_window;
+  const maxConcurrency = body.max_concurrency !== undefined && Number.isFinite(Number(body.max_concurrency)) && Number(body.max_concurrency) > 0 ? Number(body.max_concurrency) : existing.max_concurrency;
+  const precision = body.precision !== undefined && Number.isFinite(Number(body.precision)) ? Number(body.precision) : existing.precision;
+  const cost = body.cost_per_1k_tokens !== undefined && Number.isFinite(Number(body.cost_per_1k_tokens)) ? Math.max(0, Number(body.cost_per_1k_tokens)) : existing.cost_per_1k_tokens;
   const status = body.status !== undefined ? (body.status === "disabled" || body.status === "offline" ? "disabled" : "active") : existing.status;
   const authMode = body.auth_mode !== undefined ? body.auth_mode : existing.auth_mode;
   const apiFormat = body.api_format !== undefined ? body.api_format : existing.api_format;
@@ -335,6 +351,9 @@ export async function handleAdminUpdateNode(request: Request, env: Env, nodeId: 
       endpoint = ?,
       modalities = ?,
       tags = ?,
+      in_modalities = ?,
+      out_modalities = ?,
+      cost_per_invocation = ?,
       context_window = ?,
       max_concurrency = ?,
       precision = ?,
@@ -352,6 +371,9 @@ export async function handleAdminUpdateNode(request: Request, env: Env, nodeId: 
     endpoint,
     modalities,
     tags,
+    inModalities,
+    outModalities,
+    costPerInvocation,
     contextWindow,
     maxConcurrency,
     precision,
@@ -401,7 +423,8 @@ export async function handleAdminUploadLightNode(request: Request, env: Env): Pr
     region: "auto"
   });
   const bucket = (env as any).R2_BUCKET_NAME || "nanomesh-assets";
-  const objectUrl = new URL(`https://${env.Cloudflare_Account_ID}.r2.cloudflarestorage.com/${bucket}/${objectKey}`);
+  const accountId = getCloudflareAccountId(env);
+  const objectUrl = new URL(`https://${accountId}.r2.cloudflarestorage.com/${bucket}/${objectKey}`);
   objectUrl.searchParams.set("X-Amz-Expires", "3600");
 
   const presigned = await aws.sign(objectUrl, {
@@ -833,7 +856,8 @@ export async function handleAdminDownload(request: Request, env: Env): Promise<R
     region: "auto"
   });
   const bucket = (env as any).R2_BUCKET_NAME || "nanomesh-assets";
-  const objectUrl = new URL(`https://${env.Cloudflare_Account_ID}.r2.cloudflarestorage.com/${bucket}/${model.r2_object_key}`);
+  const accountId = getCloudflareAccountId(env);
+  const objectUrl = new URL(`https://${accountId}.r2.cloudflarestorage.com/${bucket}/${model.r2_object_key}`);
   objectUrl.searchParams.set("X-Amz-Expires", "3600");
   const req = await aws.sign(objectUrl, {
     method: "GET",

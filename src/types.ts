@@ -16,7 +16,8 @@ export interface Env {
 
   R2_ACCESS_KEY_ID: string;
   R2_SECRET_ACCESS_KEY: string;
-  Cloudflare_Account_ID: string;
+  Cloudflare_Account_ID?: string;
+  CLOUDFLARE_ACCOUNT_ID?: string;
 
   ADMIN_PASSWORD?: string;
   TURNSTILE_SITE_KEY: string;

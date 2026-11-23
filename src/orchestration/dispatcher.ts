@@ -8,6 +8,7 @@ import {
 } from "./signature";
 import { ArtifactBundle, InstantiatedDAG, MediaArtifact, ModelMetadata, UnifiedProtocolEnvelope } from "./types";
 import { signHeavyNodeToken, signJWT } from "../auth/jwt";
+import { checkAndNotifyLowBalance } from "../api/notifications";
 
 export interface ExecutionOptions {
   userId: string;
@@ -19,6 +20,23 @@ export interface ExecutionOptions {
   clientCapabilities?: {
     webgpu_handover_v3?: boolean;
   };
+}
+
+function triggerLowBalanceCheckAsync(env: Env, userId: string, ctx?: ExecutionContext) {
+  if (!userId) return;
+  const task = (async () => {
+    try {
+      const user = await env.DB.prepare("SELECT credits FROM users WHERE user_id = ?").bind(userId).first<{ credits: number }>();
+      if (user && user.credits < 500) {
+        await checkAndNotifyLowBalance(env, userId, user.credits);
+      }
+    } catch (err) {
+      console.error("[LowBalanceCheck] Error during low balance notification check:", err);
+    }
+  })();
+  if (ctx?.waitUntil) {
+    ctx.waitUntil(task);
+  }
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
@@ -59,6 +77,24 @@ export function isSafeExternalUrl(urlStr: string): boolean {
     // Loopback, all-interfaces, and unroutable addresses (IPv4 & IPv6)
     if (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host === '::1' || host === '::') return false;
     if (host.endsWith('.local') || host.endsWith('.internal')) return false;
+
+    // Wildcard dynamic DNS rebinding services commonly used to proxy to localhost/private IPs (NM-SEC-01)
+    const WILDCARD_DNS_PATTERNS = [
+      /\.nip\.io$/i,
+      /\.sslip\.io$/i,
+      /\.traefik\.me$/i,
+      /\.localtest\.me$/i,
+      /\.vcap\.me$/i,
+      /\.lacolhost\.com$/i,
+      /\.spoofed\.net$/i
+    ];
+    if (WILDCARD_DNS_PATTERNS.some(pat => pat.test(host))) return false;
+
+    // Block hosts that embed private IPs in dynamic DNS naming schemes (e.g., 127.0.0.1.x, 127-0-0-1.x, 10-0-0-1.x)
+    // Note: Must require digits following the separator to avoid false-flagging legitimate domains (e.g., 10-ai.com, 0-shot.ai)
+    if (/^(127[-.]\d+|10[-.]\d+|192[-.]168[-.]\d+|172[-.](1[6-9]|2[0-9]|3[01])[-.]\d+|169[-.]254[-.]\d+|0[-.]\d+)/i.test(host)) {
+      return false;
+    }
 
     // IPv6 Private & Link-Local Ranges:
     // - fc00::/7 (Unique Local Address, covers fc00:: to fdff::)
@@ -351,10 +387,6 @@ export async function buildAuthHeaders(
     );
     headers['Authorization'] = `Bearer ${heavyToken}`;
     return headers;
-  }
-
-  if (model.api_format === 'google_ai' && model.auth_secret) {
-    headers['x-goog-api-key'] = model.auth_secret;
   }
 
   return headers;
@@ -1042,6 +1074,7 @@ export async function executeDAGStream(
                     await env.DB.batch(statements);
                     isLedgerSettled = true;
                     options.hasPreDeducted = false;
+                    triggerLowBalanceCheckAsync(env, options.userId, options.ctx);
                   }
                 }
 
@@ -1283,6 +1316,7 @@ export async function executeDAGStream(
                       await env.DB.batch(statements);
                       isLedgerSettled = true;
                       options.hasPreDeducted = false;
+                      triggerLowBalanceCheckAsync(env, options.userId, options.ctx);
                     }
                   }
 
@@ -1382,6 +1416,7 @@ export async function executeDAGStream(
                       await env.DB.batch(statements);
                       isLedgerSettled = true;
                       options.hasPreDeducted = false;
+                      triggerLowBalanceCheckAsync(env, options.userId, options.ctx);
                     }
                   }
 
@@ -2026,6 +2061,7 @@ export async function executeDAGStream(
               await env.DB.batch(statements);
               isLedgerSettled = true;
               options.hasPreDeducted = false;
+              triggerLowBalanceCheckAsync(env, options.userId, options.ctx);
             } catch (billingErr) {
               console.error("[Dispatcher] Failed to settle credits atomically:", billingErr);
             }
@@ -2050,6 +2086,7 @@ export async function executeDAGStream(
               )
             ]);
             isLedgerSettled = true;
+            triggerLowBalanceCheckAsync(env, options.userId, options.ctx);
           } catch (billingErr) {
             console.error("[Dispatcher] Failed to deduct credits atomically:", billingErr);
           }
