@@ -199,6 +199,11 @@ export async function handleGetAsset(request: Request, env: Env): Promise<Respon
     return new Response("Missing asset key", { status: 400 });
   }
 
+  // NM-SEC-01: Defend against path traversal, backslashes, and directory confusion in CDN/Cache
+  if (key.includes("..") || key.includes("\\") || key.includes("//")) {
+    return new Response("Invalid asset key: path traversal sequences prohibited", { status: 400 });
+  }
+
   // 1. Public Light Node Models: accessible without user session for WebGPU/browser runtimes
   if (key.startsWith("models/light/")) {
     const object = await env.R2.get(key);

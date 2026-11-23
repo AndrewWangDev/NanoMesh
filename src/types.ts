@@ -26,6 +26,7 @@ export interface Env {
   HEAVY_JWT_SECRET?: string;
   PERSISTENT_DATA_SALT?: string;
   GIFT_CARD_SALT?: string;
+  ENVIRONMENT?: string;
 }
 
 export interface User {

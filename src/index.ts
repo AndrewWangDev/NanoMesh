@@ -163,8 +163,14 @@ export default {
               res = await handleMe(request, env); break;
             case "/api/user/bindings":
               res = await handleGetBindings(request, env); break;
-            case "/api/auth/config":
-              res = Response.json({ turnstile_site_key: env.TURNSTILE_SITE_KEY }); break;
+            case "/api/auth/config": {
+              if (request.method !== "GET" && request.method !== "HEAD") {
+                res = new Response("Method not allowed", { status: 405 });
+              } else {
+                res = Response.json({ turnstile_site_key: env.TURNSTILE_SITE_KEY });
+              }
+              break;
+            }
             case "/api/auth/github":
               res = await handleGitHubRedirect(request, env); break;
             case "/api/auth/google":
@@ -198,9 +204,16 @@ export default {
               res = await handleRedeem(request, env, ctx); break;
             }
             case "/api/user/credits": {
+              if (request.method !== "GET" && request.method !== "HEAD") {
+                res = new Response("Method not allowed", { status: 405 });
+                break;
+              }
               const user = await getSession(request, env);
-              if (!user) return new Response("Unauthorized", { status: 401 });
-              const dbUser = await env.DB.prepare("SELECT credits FROM users WHERE user_id = ?").bind(user.userId).first();
+              if (!user) {
+                res = Response.json({ error: "Unauthorized" }, { status: 401 });
+                break;
+              }
+              const dbUser = await env.DB.prepare("SELECT credits FROM users WHERE user_id = ?").bind(user.userId).first<{ credits: number }>();
               res = Response.json({ credits: dbUser?.credits ?? 0 });
               break;
             }
@@ -312,8 +325,10 @@ export default {
       return secureAssetRes;
       
     } catch (err: any) {
-      console.error(err);
-      return new Response(JSON.stringify({ error: err.message || "Internal Server Error" }), { 
+      console.error("[Unhandled Gateway Exception]:", err);
+      const isDev = env.ENVIRONMENT === "development";
+      const errorMessage = isDev ? (err?.message || "Internal Server Error") : "Internal Server Error";
+      return new Response(JSON.stringify({ error: errorMessage }), { 
         status: 500, 
         headers: { "Content-Type": "application/json", ...getCorsHeaders(env) } 
       });
