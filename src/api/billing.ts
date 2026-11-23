@@ -2,7 +2,10 @@ import { Env } from "../types";
 import { getSession } from "../auth/middleware";
 
 export function getPersistentSalt(env: Env): string {
-  return env.PERSISTENT_DATA_SALT || env.GIFT_CARD_SALT || env.JWT_SECRET;
+  if (env.PERSISTENT_DATA_SALT) return env.PERSISTENT_DATA_SALT;
+  if (env.GIFT_CARD_SALT) return env.GIFT_CARD_SALT;
+  console.warn("[SECURITY_ARCHITECTURE_WARNING] PERSISTENT_DATA_SALT is unset! Falling back to JWT_SECRET. Key rotation will invalidate stored gift cards and account tombstones!");
+  return env.JWT_SECRET;
 }
 
 export async function hashGiftCode(code: string, secret: string): Promise<string> {

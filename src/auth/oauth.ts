@@ -2,8 +2,12 @@ import { Env } from "../types";
 import { signJWT } from "./jwt";
 
 // GitHub
-export async function getGitHubAuthURL(env: Env, action: string = 'login'): Promise<string> {
-  const state = await signJWT({ nonce: crypto.randomUUID(), action }, env.JWT_SECRET, 300); // 5 min
+export async function getGitHubAuthURL(env: Env, action: string = 'login', userId?: string): Promise<string> {
+  const payload: any = { nonce: crypto.randomUUID(), action };
+  if (action === 'bind' && userId) {
+    payload.userId = userId;
+  }
+  const state = await signJWT(payload, env.JWT_SECRET, 300); // 5 min
   const url = new URL("https://github.com/login/oauth/authorize");
   url.searchParams.set("client_id", env.GITHUB_CLIENT_ID);
   url.searchParams.set("redirect_uri", `${env.FRONTEND_URL}/api/auth/callback/github`);
@@ -64,8 +68,12 @@ export async function handleGitHubCallback(code: string, state: string, env: Env
 }
 
 // Google
-export async function getGoogleAuthURL(env: Env, action: string = 'login'): Promise<string> {
-  const state = await signJWT({ nonce: crypto.randomUUID(), action }, env.JWT_SECRET, 300); // 5 min
+export async function getGoogleAuthURL(env: Env, action: string = 'login', userId?: string): Promise<string> {
+  const payload: any = { nonce: crypto.randomUUID(), action };
+  if (action === 'bind' && userId) {
+    payload.userId = userId;
+  }
+  const state = await signJWT(payload, env.JWT_SECRET, 300); // 5 min
   const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
   url.searchParams.set("client_id", env.GOOGLE_CLIENT_ID);
   url.searchParams.set("redirect_uri", `${env.FRONTEND_URL}/api/auth/callback/google`);

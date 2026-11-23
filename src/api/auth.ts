@@ -6,11 +6,13 @@ import { getGitHubAuthURL, getGoogleAuthURL, handleGitHubCallback as ghCallback,
 import { getPersistentSalt } from "./billing";
 import * as bcrypt from "bcryptjs";
 
-const VALID_EMAIL_DOMAINS = ["gmail.com", "outlook.com", "yahoo.com", "protonmail.com", "icloud.com", "hotmail.com"];
+export const VALID_EMAIL_DOMAINS = ["gmail.com", "outlook.com", "yahoo.com", "protonmail.com", "icloud.com", "hotmail.com"];
 
-function isValidEmailDomain(email: string) {
-  const parts = email.split("@");
+export function isValidEmailDomain(email: unknown): boolean {
+  if (typeof email !== 'string' || !email.trim()) return false;
+  const parts = email.trim().split("@");
   if (parts.length !== 2) return false;
+  if (!parts[0].trim() || !parts[1].trim()) return false;
   return VALID_EMAIL_DOMAINS.includes(parts[1].toLowerCase());
 }
 
@@ -84,16 +86,20 @@ export async function handleRegister(req: Request, env: Env) {
     return Response.json({ error: "error.invalidCaptcha" }, { status: 400 });
   }
 
-  if (!isValidEmailDomain(email)) {
+  if (typeof email !== 'string' || !isValidEmailDomain(email)) {
     return Response.json({ error: "error.unsupportedEmailDomain" }, { status: 400 });
   }
   
-  if (!username || !/^[a-zA-Z0-9_-]{3,20}$/.test(username)) {
+  if (!username || typeof username !== 'string' || !/^[a-zA-Z0-9_-]{3,20}$/.test(username)) {
     return Response.json({ error: "error.invalidUsernameFormat" }, { status: 400 });
   }
   
-  if (!password || password.length < 8 || password.length > 64 || !/[a-zA-Z]/.test(password) || !/[0-9]/.test(password)) {
+  if (!password || typeof password !== 'string' || password.length < 8 || password.length > 64 || !/[a-zA-Z]/.test(password) || !/[0-9]/.test(password)) {
     return Response.json({ error: "error.invalidPasswordFormat" }, { status: 400 });
+  }
+
+  if (!code || typeof code !== 'string') {
+    return Response.json({ error: "error.invalidCode" }, { status: 400 });
   }
 
   // Check code with anti-brute force tracking
@@ -202,6 +208,10 @@ export async function handleLogin(req: Request, env: Env) {
     return Response.json({ error: "Invalid captcha" }, { status: 400 });
   }
 
+  if (typeof email !== 'string' || !email.trim() || typeof password !== 'string' || !password) {
+    return Response.json({ error: "Invalid credentials" }, { status: 401 });
+  }
+
   const user = await env.DB.prepare("SELECT * FROM users WHERE LOWER(email) = ?").bind(email || '').first<User & { password_hash: string | null; token_version: number | null }>();
   if (!user) return Response.json({ error: "Invalid credentials" }, { status: 401 });
   
@@ -225,8 +235,12 @@ export async function handleLogin(req: Request, env: Env) {
 export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionContext) {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
 
-  // Opportunistic cleanup of expired verification codes (> 1 day old)
-  const cleanupPromise = env.DB.prepare("DELETE FROM verification_codes WHERE expires_at < datetime('now', '-1 day')").run().catch(() => {});
+  // Opportunistic cleanup of expired verification codes (> 1 day old), stale IP rate limits (> 24h old), and stale passkey challenge CAS entries (> 10m old)
+  const cleanupPromise = Promise.all([
+    env.DB.prepare("DELETE FROM verification_codes WHERE expires_at < datetime('now', '-1 day')").run().catch(() => {}),
+    env.DB.prepare("DELETE FROM system_counters WHERE key LIKE 'ip_code_rate_20%' AND key < 'ip_code_rate_' || strftime('%Y-%m-%dT%H', 'now', '-24 hours')").run().catch(() => {}),
+    env.DB.prepare("DELETE FROM system_counters WHERE key LIKE 'pk_used_%' AND value < strftime('%s', 'now', '-10 minutes')").run().catch(() => {})
+  ]);
   if (ctx && typeof ctx.waitUntil === 'function') {
     ctx.waitUntil(cleanupPromise);
   }
@@ -240,8 +254,21 @@ export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionCont
     return Response.json({ error: "error.invalidCaptcha" }, { status: 400 });
   }
 
-  if (!isValidEmailDomain(email)) {
+  if (typeof email !== 'string' || !isValidEmailDomain(email)) {
     return Response.json({ error: "error.unsupportedEmailDomain" }, { status: 400 });
+  }
+
+  const clientIp = req.headers.get("CF-Connecting-IP") || req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+  const currentHourStr = new Date().toISOString().slice(0, 13); // YYYY-MM-DDTHH
+  const ipHourlyKey = `ip_code_rate_${currentHourStr}_${clientIp}`;
+
+  if (clientIp !== "unknown") {
+    const ipCounter = await env.DB.prepare(
+      "SELECT value FROM system_counters WHERE key = ?"
+    ).bind(ipHourlyKey).first<{value: number}>();
+    if (ipCounter && ipCounter.value >= 5) {
+      return Response.json({ error: "error.ipRateLimit" }, { status: 429 });
+    }
   }
 
   const todayStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
@@ -308,6 +335,12 @@ export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionCont
     "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
   ).bind(dailyKey).run();
 
+  if (clientIp !== "unknown") {
+    await env.DB.prepare(
+      "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
+    ).bind(ipHourlyKey).run();
+  }
+
   return Response.json({ success: true });
 }
 
@@ -328,14 +361,30 @@ export async function handleMe(req: Request, env: Env) {
 export async function handleGitHubRedirect(req: Request, env: Env) {
   const urlObj = new URL(req.url);
   const action = urlObj.searchParams.get("action") || "login";
-  const url = await getGitHubAuthURL(env, action);
+  let userId: string | undefined;
+  if (action === 'bind') {
+    const session = await getSession(req, env);
+    if (!session || !session.userId) {
+      return Response.redirect(`${env.FRONTEND_URL}/login.html?error=unauthorized`);
+    }
+    userId = session.userId;
+  }
+  const url = await getGitHubAuthURL(env, action, userId);
   return Response.redirect(url, 302);
 }
 
 export async function handleGoogleRedirect(req: Request, env: Env) {
   const urlObj = new URL(req.url);
   const action = urlObj.searchParams.get("action") || "login";
-  const url = await getGoogleAuthURL(env, action);
+  let userId: string | undefined;
+  if (action === 'bind') {
+    const session = await getSession(req, env);
+    if (!session || !session.userId) {
+      return Response.redirect(`${env.FRONTEND_URL}/login.html?error=unauthorized`);
+    }
+    userId = session.userId;
+  }
+  const url = await getGoogleAuthURL(env, action, userId);
   return Response.redirect(url, 302);
 }
 
@@ -361,7 +410,8 @@ async function handleOAuthCallback(req: Request, env: Env, provider: 'github' | 
 
     // Check tombstone for OAuth ID
     const encoder = new TextEncoder();
-    const oauthData = encoder.encode(`${provider}:${profile.id}` + getPersistentSalt(env));
+    const persistentSalt = getPersistentSalt(env);
+    const oauthData = encoder.encode(`${provider}:${profile.id}` + persistentSalt);
     const oauthHashBuffer = await crypto.subtle.digest('SHA-256', oauthData);
     const oauthHash = Array.from(new Uint8Array(oauthHashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
     
@@ -370,12 +420,33 @@ async function handleOAuthCallback(req: Request, env: Env, provider: 'github' | 
       return Response.redirect(`${env.FRONTEND_URL}/login.html?error=account_cooldown`);
     }
 
+    // Check tombstone for profile email (NM-SEC-02)
+    if (profile.email && typeof profile.email === 'string') {
+      const emailData = encoder.encode(profile.email.toLowerCase().trim() + persistentSalt);
+      const emailHashBuffer = await crypto.subtle.digest('SHA-256', emailData);
+      const emailHash = Array.from(new Uint8Array(emailHashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+      const emailTombstone = await env.DB.prepare("SELECT expires_at FROM account_tombstones WHERE hash_id = ? AND expires_at > datetime('now')").bind(emailHash).first();
+      if (emailTombstone) {
+        return Response.redirect(`${env.FRONTEND_URL}/login.html?error=account_cooldown`);
+      }
+    }
+
     let activeUser = null;
     if (session && session.userId) {
       activeUser = await env.DB.prepare("SELECT user_id, avatar_url FROM users WHERE user_id = ?").bind(session.userId).first<any>();
     }
 
-    if (isBindAction && activeUser) {
+    if (isBindAction) {
+      // NM-SEC-01: CSRF & Session Hijack Prevention
+      // State MUST contain payload.userId and MUST match the current session's userId
+      if (!payload.userId || !session || !session.userId || payload.userId !== session.userId) {
+        return Response.redirect(`${env.FRONTEND_URL}/settings.html?error=bind_csrf_rejected`);
+      }
+
+      if (!activeUser) {
+        return Response.redirect(`${env.FRONTEND_URL}/settings.html?error=user_not_found`);
+      }
+
       // Track 2: User explicitly clicked "Bind" from Settings while logged in
       userId = activeUser.user_id;
       await env.DB.prepare("INSERT OR IGNORE INTO user_oauth_bindings (user_id, provider, provider_id) VALUES (?, ?, ?)")
