@@ -60,6 +60,10 @@ export async function getAdminSession(request: Request, env: Env) {
 }
 
 export async function handleAdminLogin(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
+  if (request.method !== "POST") {
+    return new Response("Method not allowed", { status: 405 });
+  }
+
   // Opportunistic cleanup of stale admin login attempts (> 1 day old)
   const cleanupPromise = env.DB.prepare("DELETE FROM admin_login_attempts WHERE created_at < datetime('now', '-1 day')").run().catch(() => {});
   if (ctx && typeof ctx.waitUntil === 'function') {
@@ -115,6 +119,9 @@ export async function handleAdminLogin(request: Request, env: Env, ctx?: Executi
 }
 
 export async function handleAdminLogout(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") {
+    return new Response("Method not allowed", { status: 405 });
+  }
   const headers = new Headers();
   headers.set("Set-Cookie", "admin_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax; Secure");
   headers.set("Content-Type", "application/json");
@@ -1058,7 +1065,9 @@ export async function handleAdminUpdateModel(request: Request, env: Env): Promis
     return Response.json({ success: true, upload_id: id, status: body.status });
   } catch (err: any) {
     console.error("handleAdminUpdateModel error:", err);
-    return Response.json({ error: err.message || "Failed to update model status" }, { status: 500 });
+    const isDev = env.ENVIRONMENT === "development";
+    const errorMessage = isDev ? (err?.message || "Failed to update model status") : "Failed to update model status";
+    return Response.json({ error: errorMessage }, { status: 500 });
   }
 }
 

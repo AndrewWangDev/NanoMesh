@@ -4,6 +4,12 @@ import { getSession } from "../auth/middleware";
 export function getPersistentSalt(env: Env): string {
   if (env.PERSISTENT_DATA_SALT) return env.PERSISTENT_DATA_SALT;
   if (env.GIFT_CARD_SALT) return env.GIFT_CARD_SALT;
+
+  // NM-INFO-03: In production environment, strictly require dedicated salt to prevent data corruption upon JWT_SECRET rotation
+  if (env.ENVIRONMENT === "production") {
+    throw new Error("[FATAL_SECURITY_CONFIG] PERSISTENT_DATA_SALT is strictly required in production environment! Aborting to prevent data corruption.");
+  }
+
   console.warn("[SECURITY_ARCHITECTURE_WARNING] PERSISTENT_DATA_SALT is unset! Falling back to JWT_SECRET. Key rotation will invalidate stored gift cards and account tombstones!");
   return env.JWT_SECRET;
 }
@@ -26,6 +32,9 @@ export function normalizeGiftCode(raw: string): string {
 }
 
 export async function handleGetLedger(req: Request, env: Env) {
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    return new Response("Method not allowed", { status: 405 });
+  }
   const session = await getSession(req, env);
   if (!session) return Response.json({ error: "Unauthorized" }, { status: 401 });
 

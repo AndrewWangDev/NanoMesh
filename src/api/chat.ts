@@ -312,6 +312,27 @@ export async function handleChatContinue(
     });
   }
 
+  // NM-BUG-03: Explicit security boundary on continuation step outputs to prevent Worker 128MB OOM
+  const MAX_CONTINUATION_PAYLOAD_CHARS = 512 * 1024;
+  if (typeof body.client_step_output === 'string' && body.client_step_output.length > MAX_CONTINUATION_PAYLOAD_CHARS) {
+    return new Response(JSON.stringify({ 
+      error: "payload_too_large", 
+      message: "Client step output exceeds maximum allowed limit (512KB)" 
+    }), { 
+      status: 413, 
+      headers: { "Content-Type": "application/json" } 
+    });
+  }
+  if (typeof body.upstream_context === 'string' && body.upstream_context.length > MAX_CONTINUATION_PAYLOAD_CHARS) {
+    return new Response(JSON.stringify({ 
+      error: "payload_too_large", 
+      message: "Upstream context exceeds maximum allowed limit (512KB)" 
+    }), { 
+      status: 413, 
+      headers: { "Content-Type": "application/json" } 
+    });
+  }
+
   // 1. Verify continuation JWT token
   const claims = await verifyJWT(body.continuation_token, env.JWT_SECRET);
   if (!claims || !claims.jti || !claims.sub || claims.nxt === undefined) {

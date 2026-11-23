@@ -44,7 +44,9 @@ export async function handleGetHistory(request: Request, env: Env): Promise<Resp
     });
   } catch (err: any) {
     console.error("Failed to fetch history:", err);
-    return new Response(JSON.stringify({ error: err.message || "Failed to fetch history" }), {
+    const isDev = env.ENVIRONMENT === "development";
+    const errorMessage = isDev ? (err?.message || "Failed to fetch history") : "Failed to fetch history";
+    return new Response(JSON.stringify({ error: errorMessage }), {
       status: 500,
       headers: { "Content-Type": "application/json" }
     });
@@ -121,7 +123,9 @@ export async function handleSaveHistory(request: Request, env: Env): Promise<Res
     });
   } catch (err: any) {
     console.error("Failed to save history:", err);
-    return new Response(JSON.stringify({ error: err.message || "Failed to save history" }), {
+    const isDev = env.ENVIRONMENT === "development";
+    const errorMessage = isDev ? (err?.message || "Failed to save history") : "Failed to save history";
+    return new Response(JSON.stringify({ error: errorMessage }), {
       status: 500,
       headers: { "Content-Type": "application/json" }
     });
@@ -171,7 +175,9 @@ export async function handleUpdateHistoryItem(request: Request, env: Env, sessio
     });
   } catch (err: any) {
     console.error("Failed to update history item:", err);
-    return new Response(JSON.stringify({ error: err.message || "Failed to update history" }), {
+    const isDev = env.ENVIRONMENT === "development";
+    const errorMessage = isDev ? (err?.message || "Failed to update history") : "Failed to update history";
+    return new Response(JSON.stringify({ error: errorMessage }), {
       status: 500,
       headers: { "Content-Type": "application/json" }
     });
@@ -197,7 +203,9 @@ export async function handleDeleteHistoryItem(request: Request, env: Env, sessio
     });
   } catch (err: any) {
     console.error("Failed to delete history item:", err);
-    return new Response(JSON.stringify({ error: err.message || "Failed to delete history" }), {
+    const isDev = env.ENVIRONMENT === "development";
+    const errorMessage = isDev ? (err?.message || "Failed to delete history") : "Failed to delete history";
+    return new Response(JSON.stringify({ error: errorMessage }), {
       status: 500,
       headers: { "Content-Type": "application/json" }
     });

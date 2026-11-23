@@ -185,6 +185,9 @@ export async function handleChatUpload(request: Request, env: Env): Promise<Resp
 }
 
 export async function handleGetAsset(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return new Response("Method not allowed", { status: 405 });
+  }
   const url = new URL(request.url);
   let key = url.searchParams.get("key");
   if (!key) {

@@ -22,7 +22,10 @@ export async function handleGetPublicModels(request: Request, env: Env): Promise
 
     return Response.json({ models: results || [] });
   } catch (err: any) {
-    return new Response(JSON.stringify({ error: err.message || "Failed to load models" }), {
+    console.error("Failed to load models:", err);
+    const isDev = env.ENVIRONMENT === "development";
+    const errorMessage = isDev ? (err?.message || "Failed to load models") : "Failed to load models";
+    return new Response(JSON.stringify({ error: errorMessage }), {
       status: 500,
       headers: { "Content-Type": "application/json" }
     });
