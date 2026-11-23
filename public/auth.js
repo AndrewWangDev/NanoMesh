@@ -798,6 +798,109 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('btn-passkey')?.addEventListener('click', handlePasskeyLogin);
 
+  // Forgot Password Modal
+  document.getElementById('link-forgot-password')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.innerHTML = `
+      <div class="modal" style="background:var(--surface-color); border:1px solid var(--border-color); padding:1.5rem; border-radius:12px; max-width:420px; width:90%; text-align:left;">
+        <h3 style="margin-bottom:1rem; color:var(--text-primary); font-size:1.1rem; text-align:center;">${t('auth.resetPassword')}</h3>
+        
+        <div style="margin-bottom:1rem;">
+          <label style="font-size:0.85rem; color:var(--text-secondary); display:block; margin-bottom:0.25rem;">${t('auth.email')}</label>
+          <input type="email" id="reset-email" class="input-field" style="width:100%; box-sizing:border-box;" placeholder="${t('auth.email')}" value="${document.getElementById('email')?.value || ''}">
+        </div>
+
+        <div style="display:flex; gap:0.5rem; margin-bottom:1rem;">
+          <input type="text" id="reset-code" class="input-field" style="flex:1;" placeholder="${t('auth.enterCode')}">
+          <button type="button" id="btn-send-reset-code" class="btn btn-outline" style="white-space:nowrap; font-size:0.85rem;">${t('auth.sendResetCode')}</button>
+        </div>
+
+        <div style="margin-bottom:1.5rem;">
+          <label style="font-size:0.85rem; color:var(--text-secondary); display:block; margin-bottom:0.25rem;">${t('auth.newPassword')}</label>
+          <input type="password" id="reset-new-password" class="input-field" style="width:100%; box-sizing:border-box;" placeholder="${t('auth.passwordRule')}">
+        </div>
+
+        <div style="display:flex; gap:0.75rem; justify-content:flex-end;">
+          <button type="button" class="btn btn-outline" id="btn-cancel-reset">${t('auth.backToLogin')}</button>
+          <button type="button" class="btn btn-primary" id="btn-submit-reset">${t('auth.resetPassword')}</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    overlay.querySelector('#btn-cancel-reset').onclick = () => overlay.remove();
+
+    const btnSendCode = overlay.querySelector('#btn-send-reset-code');
+    btnSendCode.onclick = async () => {
+      const email = overlay.querySelector('#reset-email').value.trim();
+      if (!email) return showToast(t('auth.invalidEmail'));
+      const turnstileToken = document.querySelector('[name="cf-turnstile-response"]')?.value || '';
+      btnSendCode.disabled = true;
+      try {
+        const res = await fetch('/api/auth/forgot-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, turnstile_token: turnstileToken, lang: getLocale() })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+          showToast(t('auth.codeSent'), 'success');
+          let s = 60;
+          btnSendCode.textContent = `${s}s`;
+          const intv = setInterval(() => {
+            s--;
+            btnSendCode.textContent = `${s}s`;
+            if (s <= 0) {
+              clearInterval(intv);
+              btnSendCode.disabled = false;
+              btnSendCode.textContent = t('auth.sendResetCode');
+            }
+          }, 1000);
+        } else {
+          showToast(t(data.error || 'error.emailSendFailed'));
+          btnSendCode.disabled = false;
+        }
+      } catch {
+        showToast(t('error.networkError'));
+        btnSendCode.disabled = false;
+      }
+    };
+
+    const btnSubmit = overlay.querySelector('#btn-submit-reset');
+    btnSubmit.onclick = async () => {
+      const email = overlay.querySelector('#reset-email').value.trim();
+      const code = overlay.querySelector('#reset-code').value.trim();
+      const newPassword = overlay.querySelector('#reset-new-password').value;
+      if (!email) return showToast(t('auth.invalidEmail'));
+      if (!code) return showToast(t('auth.enterCode'));
+      if (!newPassword || newPassword.length < 8) return showToast(t('auth.passwordRule'));
+
+      btnSubmit.disabled = true;
+      try {
+        const res = await fetch('/api/auth/reset-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, code, newPassword })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+          showToast(t('auth.resetPasswordSuccess'), 'success');
+          overlay.remove();
+          const emailInput = document.getElementById('email');
+          if (emailInput) emailInput.value = email;
+        } else {
+          showToast(t(data.error || 'error.loginFailed'));
+          btnSubmit.disabled = false;
+        }
+      } catch {
+        showToast(t('error.networkError'));
+        btnSubmit.disabled = false;
+      }
+    };
+  });
+
   // OAuth
   document.getElementById('btn-github')?.addEventListener('click', (e) => {
     if (!checkTermsAgreed()) {

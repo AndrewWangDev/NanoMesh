@@ -1032,11 +1032,24 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  // Helper: Parse CSV to Markdown table
+  // Helper: Parse CSV to Markdown table (RFC 4180 compliant with pipe escaping)
   function parseCsvToMarkdown(csvText) {
     const lines = csvText.trim().split(/\r?\n/).slice(0, 100);
     if (!lines.length) return '';
-    const rows = lines.map(l => l.split(',').map(c => c.trim().replace(/^"|"$/g, '')));
+
+    function parseCsvLine(line) {
+      const cells = [];
+      const re = /(?:^|,)(?:"((?:[^"]|"")*)"|([^,]*))/g;
+      let match;
+      while ((match = re.exec(line)) !== null) {
+        let val = match[1] !== undefined ? match[1].replace(/""/g, '"') : match[2];
+        cells.push((val || '').trim().replace(/\|/g, '\\|'));
+      }
+      return cells;
+    }
+
+    const rows = lines.map(parseCsvLine);
+    if (!rows.length || !rows[0].length) return '';
     let md = '| ' + rows[0].join(' | ') + ' |\n';
     md += '| ' + rows[0].map(() => '---').join(' | ') + ' |\n';
     for (let i = 1; i < rows.length; i++) {
