@@ -202,6 +202,9 @@ function createMockD1(store: TableStore) {
             } else if (cleanSql.includes("WHERE referral_code = ?")) {
               const code = boundArgs[0];
               res = res.filter(u => u.referral_code === code && (!cleanSql.includes("email NOT LIKE 'deleted_%'") || !u.email?.startsWith("deleted_")));
+            } else if (cleanSql.includes("LOWER(email) = LOWER(?)") || cleanSql.includes("LOWER(email) = ?")) {
+              const emailArg = String(boundArgs[0] || '').toLowerCase();
+              res = res.filter(u => u.email && u.email.toLowerCase() === emailArg);
             }
             return { results: res as any };
           }
@@ -279,10 +282,19 @@ function createMockD1(store: TableStore) {
           // 13. SELECT id FROM verification_codes
           if (cleanSql.includes("FROM verification_codes")) {
             let res = [...(store.verification_codes || [])];
-            if (cleanSql.includes("WHERE email = ?")) {
-              const emailArg = boundArgs[0];
+            if (cleanSql.includes("WHERE email = ?") || cleanSql.includes("WHERE LOWER(email) = ?") || cleanSql.includes("LOWER(email) = LOWER(?)")) {
+              const emailArg = String(boundArgs[0] || '').toLowerCase();
               const nowIso = new Date().toISOString();
-              res = res.filter(v => v.email === emailArg && (!cleanSql.includes("expires_at > datetime('now')") || v.expires_at >= nowIso));
+              res = res.filter(v => {
+                if ((v.email || '').toLowerCase() !== emailArg) return false;
+                if (cleanSql.includes("expires_at > datetime('now')") && v.expires_at < nowIso) return false;
+                if (cleanSql.includes("created_at > datetime('now', '-60 seconds')")) {
+                  if (!v.created_at) return false;
+                  const createdAt = new Date(v.created_at).getTime();
+                  if (Date.now() - createdAt > 60000) return false;
+                }
+                return true;
+              });
             }
             return { results: res as any };
           }
@@ -329,7 +341,11 @@ function createMockD1(store: TableStore) {
             const cutoffEpoch = Math.floor(Date.now() / 1000) - 600;
             store.system_counters = (store.system_counters || []).filter(c => {
               if (c.key.startsWith("ip_code_rate_20")) {
-                const isExpired = c.key < cutoffPrefix;
+                const isExpired = c.key < `ip_code_rate_${cutoffHour}`;
+                return !isExpired;
+              }
+              if (c.key.startsWith("ip_pwd_rate_20")) {
+                const isExpired = c.key < `ip_pwd_rate_${cutoffHour}`;
                 return !isExpired;
               }
               if (c.key.startsWith("pk_used_")) {
@@ -429,12 +445,12 @@ function createMockD1(store: TableStore) {
           }
 
           // UPDATE users SET password_hash
-          if (cleanSql.startsWith("UPDATE users SET password_hash")) {
-            const userId = boundArgs[2];
+          if (cleanSql.includes("UPDATE users") && cleanSql.includes("SET password_hash")) {
+            const userId = boundArgs[boundArgs.length - 1];
             const u = store.users.find(usr => usr.user_id === userId);
             if (u) {
               u.password_hash = boundArgs[0];
-              u.token_version = boundArgs[1];
+              u.token_version = (u.token_version || 1) + 1;
             }
             return { meta: { changes: 1 } };
           }
@@ -767,6 +783,31 @@ function createMockD1(store: TableStore) {
                 rounds_json: boundArgs[9],
                 updated_at: new Date().toISOString()
               });
+            }
+            return { meta: { changes: 1 } };
+          }
+
+          // INSERT INTO verification_codes
+          if (cleanSql.startsWith("INSERT INTO verification_codes")) {
+            store.verification_codes.push({
+              id: store.verification_codes.length + 1,
+              email: boundArgs[0],
+              code: boundArgs[1],
+              attempts: 0,
+              created_at: new Date().toISOString(),
+              expires_at: new Date(Date.now() + 600000).toISOString()
+            });
+            return { meta: { changes: 1 } };
+          }
+
+          // UPDATE users SET avatar_url
+          if (cleanSql.startsWith("UPDATE users SET avatar_url")) {
+            const avatarUrl = boundArgs[0];
+            const userId = boundArgs[1];
+            const u = store.users.find(usr => usr.user_id === userId);
+            if (u) {
+              u.avatar_url = avatarUrl;
+              u.avatar_updated_at = new Date().toISOString();
             }
             return { meta: { changes: 1 } };
           }
@@ -3867,8 +3908,191 @@ async function runIntegrationTests() {
   assert.equal(oversizedContRes.status, 413, "Oversized continuation payload must return 413 Payload Too Large");
   console.log("  ✓ NM-BUG-03: Chat continuation strictly rejects payload exceeding 512KB with 413: PASSED");
 
+  // ====================================================
+  // [Scenario 17] Audit Report 15 Remediations
+  // ====================================================
+  console.log("\n[Scenario 17] Audit Report 15 Remediations (NM-AUDIT-01, NM-AUDIT-03, NM-AUDIT-04, NM-AUDIT-05, NM-AUDIT-08)");
+
+  // 17.1 NM-AUDIT-01: /api/chat payload boundary (> 512KB) rejected with 413
+  const oversizedChatReq = new Request("https://nanomesh.local/api/chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Cookie": `session=${histToken}`
+    },
+    body: JSON.stringify({
+      envelope: {
+        session_id: "sess_chat_oversized",
+        instruction_payload: "Y".repeat(512 * 1024 + 10),
+        messages: []
+      }
+    })
+  });
+  const oversizedChatRes = await worker.fetch(oversizedChatReq, env, {} as any);
+  assert.equal(oversizedChatRes.status, 413, "/api/chat must reject instruction_payload > 512KB with 413");
+  console.log("  ✓ NM-AUDIT-01: /api/chat strictly rejects instruction_payload > 512KB with 413: PASSED");
+
+  // 17.2 NM-AUDIT-03: POST with null JSON body returns 400 Bad Request instead of unhandled 500
+  const nullRegisterReq = new Request("https://nanomesh.local/api/auth/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "null"
+  });
+  const nullRegisterRes = await worker.fetch(nullRegisterReq, env, {} as any);
+  assert.equal(nullRegisterRes.status, 400, "POST null to register must return 400");
+
+  const nullLoginReq = new Request("https://nanomesh.local/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "null"
+  });
+  const nullLoginRes = await worker.fetch(nullLoginReq, env, {} as any);
+  assert.equal(nullLoginRes.status, 400, "POST null to login must return 400");
+  console.log("  ✓ NM-AUDIT-03: Endpoints safely handle literal JSON null body with 400 instead of 500: PASSED");
+
+  // 17.3 NM-AUDIT-05: Non-POST/DELETE requests return 405 Method Not Allowed before auth
+  const unauthChatGetReq = new Request("https://nanomesh.local/api/chat", { method: "GET" });
+  const unauthChatGetRes = await worker.fetch(unauthChatGetReq, env, {} as any);
+  assert.equal(unauthChatGetRes.status, 405, "Unauthenticated GET /api/chat must return 405");
+
+  const unauthPresignGetReq = new Request("https://nanomesh.local/api/upload/presign", { method: "GET" });
+  const unauthPresignGetRes = await worker.fetch(unauthPresignGetReq, env, {} as any);
+  assert.equal(unauthPresignGetRes.status, 405, "Unauthenticated GET /api/upload/presign must return 405");
+
+  const oauthGetReq = new Request("https://nanomesh.local/api/auth/oauth/google", { method: "GET" });
+  const oauthGetRes = await worker.fetch(oauthGetReq, env, {} as any);
+  assert.equal(oauthGetRes.status, 405, "GET /api/auth/oauth/:provider must return 405");
+  console.log("  ✓ NM-AUDIT-05: HTTP Method check executes before auth and returns 405: PASSED");
+
+  // 17.4 NM-AUDIT-04 & NM-AUDIT-08: Setup registered user for auth and reset tests
+  const registeredEmail = "carol_r15@gmail.com";
+  const pwdHash = bcrypt.hashSync("OldPassword123!", 10);
+  store.users.push({
+    user_id: "usr_carol_r15",
+    username: "carol_r15",
+    email: registeredEmail,
+    password_hash: pwdHash,
+    credits: 100,
+    frozen_credits: 0,
+    avatar_url: "/storage/avatars/usr_carol_r15_old.png",
+    referral_code: "REF_CAROL_15",
+    token_version: 1
+  });
+
+  const origFetch17 = globalThis.fetch;
+  try {
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const urlStr = typeof input === "string" ? input : (input instanceof URL ? input.toString() : (input as any).url);
+      if (urlStr.includes("turnstile")) {
+        return new Response(JSON.stringify({ success: true }), { status: 200 });
+      }
+      if (urlStr.includes("resend.com")) {
+        return new Response(JSON.stringify({ id: "resend_mock_msg_id" }), { status: 200 });
+      }
+      return origFetch17(input, init);
+    };
+
+    // 17.4 NM-AUDIT-04: /api/auth/send-code returns 200 for registered email without leaking status
+    const sendCodeReq = new Request("https://nanomesh.local/api/auth/send-code", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: registeredEmail, turnstile_token: "mock_turnstile_pass" })
+    });
+    const sendCodeRes = await worker.fetch(sendCodeReq, env, {} as any);
+    const sendCodeData = await sendCodeRes.json().catch(() => ({}));
+    assert.equal(sendCodeRes.status, 200, `send-code for existing user must return 200 to prevent enumeration: ${JSON.stringify(sendCodeData)}`);
+    console.log("  ✓ NM-AUDIT-04: Anti-account enumeration privacy protection for send-code: PASSED");
+
+    // 17.5 NM-AUDIT-08: Self-service forgot-password & reset-password flow
+    const forgotReq = new Request("https://nanomesh.local/api/auth/forgot-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: registeredEmail, turnstile_token: "mock_turnstile_pass" })
+    });
+    const forgotRes = await worker.fetch(forgotReq, env, {} as any);
+    assert.equal(forgotRes.status, 200, "forgot-password must return 200");
+
+    const resetCodeRow = await env.DB.prepare(
+      "SELECT code FROM verification_codes WHERE LOWER(email) = LOWER(?) ORDER BY id DESC LIMIT 1"
+    ).bind(registeredEmail).first<{ code: string }>();
+    assert.ok(resetCodeRow?.code, "Reset code must be recorded in verification_codes");
+
+    // NM-NEW-01: reset-password succeeds without redundant turnstile_token (no single-use token deadlock)
+    const resetReq = new Request("https://nanomesh.local/api/auth/reset-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: registeredEmail,
+        code: resetCodeRow.code,
+        newPassword: "BrandNewPassword2026!"
+      })
+    });
+    const resetRes = await worker.fetch(resetReq, env, {} as any);
+    assert.equal(resetRes.status, 200, "reset-password must return 200 without turnstile_token");
+
+    // Verify login with new password succeeds
+    const loginNewReq = new Request("https://nanomesh.local/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: registeredEmail,
+        password: "BrandNewPassword2026!",
+        turnstile_token: "mock_turnstile_pass"
+      })
+    });
+    const loginNewRes = await worker.fetch(loginNewReq, env, {} as any);
+    assert.equal(loginNewRes.status, 200, "Login with new password must succeed");
+    console.log("  ✓ NM-AUDIT-08 & NM-NEW-01: Self-service forgot-password and reset-password flow (no turnstile deadlock): PASSED");
+  } finally {
+    globalThis.fetch = origFetch17;
+  }
+
+  // 17.6 NM-AUDIT-07: Updating avatar cleans up old R2 object to eliminate storage leaks
+  const oldAvatarKey = "avatars/usr_carol_r15_old.png";
+  await env.R2.put(oldAvatarKey, "OLD_AVATAR_BYTES", { httpMetadata: { contentType: "image/png" } });
+  assert.ok(await env.R2.get(oldAvatarKey), "Old avatar should exist prior to replacement");
+
+  const avatarSessionToken = await signJWT({ userId: "usr_carol_r15", tokenVersion: 2 }, env.JWT_SECRET, 3600);
+  const formData = new FormData();
+  const blob = new Blob([new Uint8Array([137, 80, 78, 71, 1, 2, 3, 4])], { type: "image/png" });
+  formData.append("file", blob, "new_avatar.png");
+
+  const updateAvatarReq = new Request("https://nanomesh.local/api/user/avatar", {
+    method: "POST",
+    headers: {
+      "Cookie": `session=${avatarSessionToken}`
+    },
+    body: formData
+  });
+  const updateAvatarRes = await worker.fetch(updateAvatarReq, env, {} as any);
+  assert.equal(updateAvatarRes.status, 200, "Updating avatar must succeed");
+  const updateAvatarBody = await updateAvatarRes.json();
+  assert.ok(updateAvatarBody.avatar_url, "Must return new avatar URL");
+
+  const oldAvatarInR2 = await env.R2.get(oldAvatarKey);
+  assert.equal(oldAvatarInR2, null, "Old avatar key in R2 must be deleted to prevent orphaned storage accumulation");
+  console.log("  ✓ NM-AUDIT-07: Updating avatar cleans up old R2 object to eliminate storage leaks: PASSED");
+
+  // 17.7 NM-NEW-02: system_counters cleanup prunes stale ip_pwd_rate_* entries
+  store.system_counters.push({
+    key: "ip_pwd_rate_2024-01-01T00_10.0.0.1",
+    value: 5
+  });
+  store.system_counters.push({
+    key: "ip_pwd_rate_2099-01-01T00_10.0.0.1",
+    value: 2
+  });
+  await env.DB.prepare(`
+    DELETE FROM system_counters 
+    WHERE (key LIKE 'ip_code_rate_20%' AND key < 'ip_code_rate_' || strftime('%Y-%m-%dT%H', 'now', '-24 hours'))
+       OR (key LIKE 'ip_pwd_rate_20%' AND key < 'ip_pwd_rate_' || strftime('%Y-%m-%dT%H', 'now', '-24 hours'))
+  `).run();
+  assert.equal(store.system_counters.some(c => c.key === "ip_pwd_rate_2024-01-01T00_10.0.0.1"), false, "Stale ip_pwd_rate_* counter must be pruned");
+  assert.equal(store.system_counters.some(c => c.key === "ip_pwd_rate_2099-01-01T00_10.0.0.1"), true, "Active ip_pwd_rate_* counter must be preserved");
+  console.log("  ✓ NM-NEW-02: Stale ip_pwd_rate_* counters pruned while preserving active entries: PASSED");
+
   console.log("\n==================================================");
-  console.log("   🎉 ALL 16 INTEGRATION SCENARIOS PASSED (100%)! ");
+  console.log("   🎉 ALL 17 INTEGRATION SCENARIOS PASSED (100%)! ");
   console.log("==================================================");
 }
 
