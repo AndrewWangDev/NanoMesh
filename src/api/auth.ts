@@ -5,6 +5,7 @@ import { getSession } from "../auth/middleware";
 import { getGitHubAuthURL, getGoogleAuthURL, handleGitHubCallback as ghCallback, handleGoogleCallback as goCallback } from "../auth/oauth";
 import { getPersistentSalt } from "./billing";
 import * as bcrypt from "bcryptjs";
+import { safeJsonBody } from "../lib/utils";
 
 export const VALID_EMAIL_DOMAINS = ["gmail.com", "outlook.com", "yahoo.com", "protonmail.com", "icloud.com", "hotmail.com"];
 
@@ -77,7 +78,7 @@ async function generateOAuthUsername(db: D1Database, rawName?: string, rawEmail?
 
 export async function handleRegister(req: Request, env: Env) {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
-  const body: any = await req.json().catch(() => ({}));
+  const body: any = await safeJsonBody(req);
   
   let { username, email, password, code, turnstile_token, referral_code } = body;
   if (typeof email === 'string') email = email.toLowerCase().trim();
@@ -200,7 +201,7 @@ export async function handleRegister(req: Request, env: Env) {
 
 export async function handleLogin(req: Request, env: Env) {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
-  const body: any = await req.json().catch(() => ({}));
+  const body: any = await safeJsonBody(req);
   
   let { email, password, turnstile_token } = body;
   if (typeof email === 'string') email = email.toLowerCase().trim();
@@ -240,14 +241,14 @@ export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionCont
   // Opportunistic cleanup of expired verification codes (> 1 day old), stale IP rate limits (> 24h old), and stale passkey challenge CAS entries (> 10m old)
   const cleanupPromise = Promise.all([
     env.DB.prepare("DELETE FROM verification_codes WHERE expires_at < datetime('now', '-1 day')").run().catch(() => {}),
-    env.DB.prepare("DELETE FROM system_counters WHERE key LIKE 'ip_code_rate_20%' AND key < 'ip_code_rate_' || strftime('%Y-%m-%dT%H', 'now', '-24 hours')").run().catch(() => {}),
+    env.DB.prepare("DELETE FROM system_counters WHERE (key LIKE 'ip_code_rate_20%' AND key < 'ip_code_rate_' || strftime('%Y-%m-%dT%H', 'now', '-24 hours')) OR (key LIKE 'ip_pwd_rate_20%' AND key < 'ip_pwd_rate_' || strftime('%Y-%m-%dT%H', 'now', '-24 hours'))").run().catch(() => {}),
     env.DB.prepare("DELETE FROM system_counters WHERE key LIKE 'pk_used_%' AND value < strftime('%s', 'now', '-10 minutes')").run().catch(() => {})
   ]);
   if (ctx && typeof ctx.waitUntil === 'function') {
     ctx.waitUntil(cleanupPromise);
   }
 
-  const body: any = await req.json().catch(() => ({}));
+  const body: any = await safeJsonBody(req);
   let { email, turnstile_token, lang } = body;
   
   if (typeof email === 'string') email = email.toLowerCase().trim();
@@ -286,6 +287,72 @@ export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionCont
   const recent = await env.DB.prepare("SELECT id FROM verification_codes WHERE LOWER(email) = ? AND created_at > datetime('now', '-60 seconds')").bind(email || '').first();
   if (recent) {
     return Response.json({ error: "error.wait60s" }, { status: 429 });
+  }
+
+  // NM-AUDIT-04: Anti-Account Enumeration Privacy-Preserving Check
+  // Check if email already belongs to an existing user or is in deletion cooldown
+  const existingUser = await env.DB.prepare(
+    "SELECT user_id, email FROM users WHERE LOWER(email) = LOWER(?)"
+  ).bind(email).first<{ user_id: string; email: string }>();
+
+  let inCooldown = false;
+  try {
+    const persistentSalt = getPersistentSalt(env);
+    const encoder = new TextEncoder();
+    const emailData = encoder.encode(email + persistentSalt);
+    const emailHashBuffer = await crypto.subtle.digest('SHA-256', emailData);
+    const emailHash = Array.from(new Uint8Array(emailHashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+    const activeTombstone = await env.DB.prepare(
+      "SELECT expires_at FROM account_tombstones WHERE hash_id = ? AND expires_at > datetime('now')"
+    ).bind(emailHash).first();
+    if (activeTombstone) inCooldown = true;
+  } catch (err) {
+    // If salt check throws in production when not configured, fallback gracefully
+  }
+
+  if (existingUser || inCooldown) {
+    if (clientIp !== "unknown") {
+      await env.DB.prepare(
+        "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
+      ).bind(ipHourlyKey).run();
+    }
+    await env.DB.prepare(
+      "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
+    ).bind(dailyKey).run();
+
+    const isZh = lang === 'zh';
+    const noticeSubject = isZh ? "[NanoMesh] 账户注册提醒" : "[NanoMesh] Account Notice";
+    const noticeGreeting = isZh ? "您好！" : "Hello!";
+    const noticeBody = isZh 
+      ? "我们收到了使用您邮箱注册 NanoMesh 的请求。但检测到该邮箱已注册或处于注销冷静期。如果您忘记密码，请前往登录页使用“找回密码”功能。如非您本人操作，请忽略此邮件。"
+      : "We received a registration attempt for NanoMesh using your email address. However, this email is already registered or in deletion cooldown. If you forgot your password, please use 'Forgot Password' on the sign-in page. If this was not you, please ignore this email.";
+    const noticeFooter = isZh ? "&copy; 2026 NanoMesh 灵微络. 保留所有权利。" : "&copy; 2026 NanoMesh. All rights reserved.";
+
+    const noticeHtml = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
+        <h2 style="color: #00e5ff; margin-bottom: 24px; font-weight: normal;">NanoMesh ${isZh ? '灵微络' : ''}</h2>
+        <p style="font-size: 16px; margin-bottom: 16px;">${noticeGreeting}</p>
+        <p style="font-size: 14px; color: #4b5563; line-height: 1.6; margin-bottom: 24px;">${noticeBody}</p>
+        <hr style="border: none; border-top: 1px solid #e5e7eb; margin-bottom: 16px;">
+        <p style="font-size: 12px; color: #9ca3af; text-align: center;">${noticeFooter}</p>
+      </div>
+    `;
+
+    await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${env.RESEND_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        from: `NanoMesh <${env.RESEND_FROM_EMAIL}>`,
+        to: email,
+        subject: noticeSubject,
+        html: noticeHtml
+      })
+    }).catch(err => console.error("Failed to send notice email:", err));
+
+    return Response.json({ success: true, message: "Code sent" });
   }
 
   const code = generateSecureVerificationCode();
@@ -560,4 +627,208 @@ export async function handleUnbindOAuth(req: Request, env: Env, provider: string
   await env.DB.prepare("DELETE FROM user_oauth_bindings WHERE user_id = ? AND provider = ?").bind(session.userId, provider).run();
   
   return Response.json({ success: true });
+}
+
+export async function handleForgotPassword(req: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
+  if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+
+  // Opportunistic cleanup of expired verification codes (> 1 day old) and stale IP rate limits (> 24h old)
+  const cleanupPromise = Promise.all([
+    env.DB.prepare("DELETE FROM verification_codes WHERE expires_at < datetime('now', '-1 day')").run().catch(() => {}),
+    env.DB.prepare("DELETE FROM system_counters WHERE (key LIKE 'ip_code_rate_20%' AND key < 'ip_code_rate_' || strftime('%Y-%m-%dT%H', 'now', '-24 hours')) OR (key LIKE 'ip_pwd_rate_20%' AND key < 'ip_pwd_rate_' || strftime('%Y-%m-%dT%H', 'now', '-24 hours'))").run().catch(() => {})
+  ]);
+  if (ctx && typeof ctx.waitUntil === 'function') {
+    ctx.waitUntil(cleanupPromise);
+  }
+
+  const body: any = await safeJsonBody(req);
+  let { email, turnstile_token, lang } = body;
+  if (typeof email === 'string') email = email.toLowerCase().trim();
+
+  const clientIp = req.headers.get("CF-Connecting-IP") || req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+  if (!await verifyTurnstile(turnstile_token, env.TURNSTILE_SECRET_KEY, clientIp !== "unknown" ? clientIp : null)) {
+    return Response.json({ error: "error.invalidCaptcha" }, { status: 400 });
+  }
+
+  if (typeof email !== 'string' || !isValidEmailDomain(email)) {
+    return Response.json({ error: "error.unsupportedEmailDomain" }, { status: 400 });
+  }
+
+  // Rate limiting (IP rate limit)
+  const currentHourStr = new Date().toISOString().slice(0, 13);
+  const ipHourlyKey = `ip_pwd_rate_${currentHourStr}_${clientIp}`;
+  if (clientIp !== "unknown") {
+    const ipCounter = await env.DB.prepare(
+      "SELECT value FROM system_counters WHERE key = ?"
+    ).bind(ipHourlyKey).first<{value: number}>();
+    if (ipCounter && ipCounter.value >= 5) {
+      return Response.json({ error: "error.ipRateLimit" }, { status: 429 });
+    }
+  }
+
+  // 60-second cooldown per email
+  const recent = await env.DB.prepare(
+    "SELECT id FROM verification_codes WHERE LOWER(email) = ? AND created_at > datetime('now', '-60 seconds')"
+  ).bind(email).first();
+  if (recent) {
+    return Response.json({ error: "error.wait60s" }, { status: 429 });
+  }
+
+  // Check if user exists and has a password
+  const user = await env.DB.prepare(
+    "SELECT user_id, email, password_hash FROM users WHERE LOWER(email) = LOWER(?)"
+  ).bind(email).first<{ user_id: string; email: string; password_hash: string | null }>();
+
+  // If user does not exist or has deleted account, return success to prevent account enumeration
+  if (!user || user.email.startsWith("deleted_")) {
+    return Response.json({ success: true, message: "If this email is registered, a reset code has been sent." });
+  }
+
+  // Update IP hourly counter
+  if (clientIp !== "unknown") {
+    await env.DB.prepare(
+      "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
+    ).bind(ipHourlyKey).run();
+  }
+
+  const isZh = lang === 'zh';
+
+  if (!user.password_hash) {
+    // User is OAuth-only, send helpful email
+    const subject = isZh ? "[NanoMesh] 重置密码提醒" : "[NanoMesh] Password Reset Notice";
+    const greeting = isZh ? "您好！" : "Hello!";
+    const bodyText = isZh 
+      ? "您的账号是通过第三方快捷登录（Google / GitHub）创建的，未设置过密码。请直接在登录页面使用第三方快捷登录。"
+      : "Your account was created via third-party login (Google / GitHub) and does not have a password. Please sign in directly using your third-party provider.";
+    const footer = isZh ? "&copy; 2026 NanoMesh 灵微络. 保留所有权利。" : "&copy; 2026 NanoMesh. All rights reserved.";
+
+    await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${env.RESEND_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        from: `NanoMesh <${env.RESEND_FROM_EMAIL}>`,
+        to: email,
+        subject: subject,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
+            <h2 style="color: #00e5ff; margin-bottom: 24px; font-weight: normal;">NanoMesh ${isZh ? '灵微络' : ''}</h2>
+            <p style="font-size: 16px; margin-bottom: 16px;">${greeting}</p>
+            <p style="font-size: 14px; color: #4b5563; line-height: 1.6; margin-bottom: 24px;">${bodyText}</p>
+            <hr style="border: none; border-top: 1px solid #e5e7eb; margin-bottom: 16px;">
+            <p style="font-size: 12px; color: #9ca3af; text-align: center;">${footer}</p>
+          </div>
+        `
+      })
+    }).catch(err => console.error("Failed to send oauth reset notice email:", err));
+
+    return Response.json({ success: true, message: "If this email is registered, a reset code has been sent." });
+  }
+
+  // Generate 6-digit reset code
+  const code = generateSecureVerificationCode();
+  await env.DB.prepare(`
+    INSERT INTO verification_codes (email, code, expires_at) 
+    VALUES (?, ?, datetime('now', '+10 minutes'))
+  `).bind(email, code).run();
+
+  const subject = isZh ? "[NanoMesh] 您的重置密码验证码" : "[NanoMesh] Your Password Reset Code";
+  const greeting = isZh ? "您好！" : "Hello!";
+  const hint = isZh 
+    ? "您正在申请重置 NanoMesh 账号密码。该验证码将在 10 分钟后过期。如非本人操作，请立即检查账号安全并忽略此邮件。" 
+    : "You requested to reset your NanoMesh password. This code will expire in 10 minutes. If you did not request this, please ignore this email.";
+  const footer = isZh ? "&copy; 2026 NanoMesh 灵微络. 保留所有权利。" : "&copy; 2026 NanoMesh. All rights reserved.";
+
+  const htmlContent = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
+      <h2 style="color: #00e5ff; margin-bottom: 24px; font-weight: normal;">NanoMesh ${isZh ? '灵微络' : ''}</h2>
+      <p style="font-size: 16px; margin-bottom: 16px;">${greeting}</p>
+      <div style="background-color: #f3f4f6; border-radius: 8px; padding: 24px; text-align: center; margin-bottom: 24px;">
+        <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #111827;">${code}</span>
+      </div>
+      <p style="font-size: 14px; color: #6b7280; margin-bottom: 32px;">${hint}</p>
+      <hr style="border: none; border-top: 1px solid #e5e7eb; margin-bottom: 16px;">
+      <p style="font-size: 12px; color: #9ca3af; text-align: center;">${footer}</p>
+    </div>
+  `;
+
+  await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${env.RESEND_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      from: `NanoMesh <${env.RESEND_FROM_EMAIL}>`,
+      to: email,
+      subject: subject,
+      html: htmlContent
+    })
+  }).catch(err => console.error("Failed to send reset code email:", err));
+
+  return Response.json({ success: true, message: "If this email is registered, a reset code has been sent." });
+}
+
+export async function handleResetPassword(req: Request, env: Env): Promise<Response> {
+  if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+  const body: any = await safeJsonBody(req);
+  let { email, code, newPassword } = body;
+  if (typeof email === 'string') email = email.toLowerCase().trim();
+
+  if (typeof email !== 'string' || !isValidEmailDomain(email)) {
+    return Response.json({ error: "error.unsupportedEmailDomain" }, { status: 400 });
+  }
+
+  if (!code || typeof code !== 'string') {
+    return Response.json({ error: "error.invalidCode" }, { status: 400 });
+  }
+
+  if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 8 || newPassword.length > 64 || !/[a-zA-Z]/.test(newPassword) || !/[0-9]/.test(newPassword)) {
+    return Response.json({ error: "error.invalidPasswordFormat" }, { status: 400 });
+  }
+
+  // Check code with anti-brute force tracking
+  const activeCode = await env.DB.prepare(
+    "SELECT id, code, attempts FROM verification_codes WHERE LOWER(email) = ? AND expires_at > datetime('now') ORDER BY id DESC LIMIT 1"
+  ).bind(email).first<{ id: number; code: string; attempts: number }>();
+
+  if (!activeCode) {
+    return Response.json({ error: "error.invalidCode" }, { status: 400 });
+  }
+
+  if (activeCode.attempts >= 5) {
+    await env.DB.prepare("DELETE FROM verification_codes WHERE id = ?").bind(activeCode.id).run();
+    return Response.json({ error: "error.codeLockedTooManyAttempts" }, { status: 400 });
+  }
+
+  if (activeCode.code !== code.trim()) {
+    await env.DB.prepare("UPDATE verification_codes SET attempts = attempts + 1 WHERE id = ?").bind(activeCode.id).run();
+    return Response.json({ error: "error.invalidCode" }, { status: 400 });
+  }
+
+  // Find user
+  const user = await env.DB.prepare(
+    "SELECT user_id, email FROM users WHERE LOWER(email) = LOWER(?)"
+  ).bind(email).first<{ user_id: string; email: string }>();
+
+  if (!user || user.email.startsWith("deleted_")) {
+    return Response.json({ error: "error.userNotFound" }, { status: 404 });
+  }
+
+  // Hash new password using bcrypt
+  const hash = bcrypt.hashSync(newPassword, 10);
+
+  // Update password and increment token_version to invalidate all existing sessions
+  await env.DB.prepare(`
+    UPDATE users 
+    SET password_hash = ?, token_version = token_version + 1 
+    WHERE user_id = ?
+  `).bind(hash, user.user_id).run();
+
+  // Delete all verification codes for this email
+  await env.DB.prepare("DELETE FROM verification_codes WHERE LOWER(email) = ?").bind(email).run();
+
+  return Response.json({ success: true, message: "Password reset successful" });
 }

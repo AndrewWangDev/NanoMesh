@@ -3,7 +3,8 @@ import {
   handleRegister, handleLogin, handleSendCode, 
   handleLogout, handleMe, handleGitHubRedirect, 
   handleGoogleRedirect, handleGitHubCallback, 
-  handleGoogleCallback, handleGetBindings, handleUnbindOAuth 
+  handleGoogleCallback, handleGetBindings, handleUnbindOAuth,
+  handleForgotPassword, handleResetPassword
 } from "./api/auth";
 import { getSession } from "./auth/middleware";
 
@@ -50,9 +51,13 @@ export default {
           ? url.pathname.replace(/\/+$/, "")
           : url.pathname;
 
-        if (cleanPath.startsWith("/api/auth/oauth/") && request.method === "DELETE") {
-           const provider = cleanPath.split("/").pop();
-           res = await handleUnbindOAuth(request, env, provider || "");
+        if (cleanPath.startsWith("/api/auth/oauth/")) {
+          if (request.method !== "DELETE") {
+            res = Response.json({ error: "Method not allowed" }, { status: 405 });
+          } else {
+            const provider = cleanPath.split("/").pop();
+            res = await handleUnbindOAuth(request, env, provider || "");
+          }
         } else if (cleanPath.startsWith("/api/admin/")) {
            const admin = await import("./api/admin");
            const adminPath = cleanPath;
@@ -159,6 +164,10 @@ export default {
               res = await handleLogout(request, env); break;
             case "/api/auth/send-code":
               res = await handleSendCode(request, env, ctx); break;
+            case "/api/auth/forgot-password":
+              res = await handleForgotPassword(request, env, ctx); break;
+            case "/api/auth/reset-password":
+              res = await handleResetPassword(request, env); break;
             case "/api/auth/me":
               res = await handleMe(request, env); break;
             case "/api/user/bindings":
@@ -189,7 +198,7 @@ export default {
             }
             case "/api/user/avatar": {
               const { handleUpdateAvatar } = await import("./api/user");
-              res = await handleUpdateAvatar(request, env); break;
+              res = await handleUpdateAvatar(request, env, ctx); break;
             }
             case "/api/user/password": {
               const { handleUpdatePassword } = await import("./api/user");
