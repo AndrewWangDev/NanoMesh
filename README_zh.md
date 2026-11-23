@@ -322,7 +322,7 @@ NanoMesh 内置基于 `@huggingface/transformers` (v3.8.1) 的浏览器端微模
 
 #### 10.1 环境要求
 
-- [Node.js](https://nodejs.org/) v18+
+- [Node.js](https://nodejs.org/) >= 22.12.0 (推荐 Node.js 22 LTS)
 - [Cloudflare Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/)
 - Cloudflare D1 数据库与 R2 存储桶
 

@@ -38,7 +38,7 @@ NanoMesh 采用 **轻·中·重分级算力拓扑** 与 **无状态流量塑形�
 ## 二、 15 分钟极速边缘部署
 
 ### 前置环境准备
-- [Node.js 20.x 或更高版本](https://nodejs.org/)
+- [Node.js 22.12.0 或更高版本 (推荐 Node.js 22 LTS)](https://nodejs.org/)
 - [Cloudflare 免费账户](https://dash.cloudflare.com/)
 - 本地安装 Cloudflare CLI 工具 Wrangler：
   ```bash
@@ -51,7 +51,7 @@ NanoMesh 采用 **轻·中·重分级算力拓扑** 与 **无状态流量塑形�
 ### Step 1: 克隆仓库与安装依赖
 ```bash
 git clone https://github.com/AndrewWangDev/NanoMesh.git
-cd NanoMesh/NanoMesh-Frontend
+cd NanoMesh
 npm install
 ```
 
@@ -120,7 +120,7 @@ FRONTEND_URL = "https://nano.yourdomain.com"              # 你的前端访问�
 ```bash
 npx wrangler d1 migrations apply nanomesh-db --remote
 ```
-*(确认提示按 `y` 即可，系统将自动依次执行 `0001` 到 `0017` 的全部结构与种子数据迁移)*
+*(确认提示按 `y` 即可，系统将自动依次执行 `0001` 到 `0022` 的全部结构与种子数据迁移)*
 
 ---
 
@@ -144,9 +144,14 @@ wrangler secret put TURNSTILE_SECRET_KEY
 wrangler secret put RESEND_API_KEY
 
 # Cloudflare 账户与 R2 S3 鉴权凭证 (用于轻节点模型上传与多模态素材传输, 必填)
+# (注：系统已支持 Cloudflare_Account_ID 与全大写 CLOUDFLARE_ACCOUNT_ID 双向容错兼容)
 wrangler secret put Cloudflare_Account_ID
 wrangler secret put R2_ACCESS_KEY_ID
 wrangler secret put R2_SECRET_ACCESS_KEY
+
+# 敏感数据持久化盐值 (用于礼品卡哈希与关键数据派生，至少 32 字符随机串, 推荐配置)
+# (注：系统支持 PERSISTENT_DATA_SALT，未配置时回退至 GIFT_CARD_SALT 或 JWT_SECRET，但强烈建议生产显式配置独立盐值以隔离密钥轮转)
+wrangler secret put PERSISTENT_DATA_SALT
 ```
 
 ---
@@ -234,7 +239,7 @@ NanoMesh 统一抽象了标准化协议接口，支持自建算力与第三方�
 在本地开发调试或提交 PR 之前，可运行本地全量自动化测试：
 
 ```bash
-# 执行全量 6 大单元测试套件 + 6 大端到端集成测试场景
+# 执行全量 14 大单元测试套件 + 12 大端到端集成测试场景
 npm test
 
 # 仅做 TypeScript 静态类型编译检查
@@ -245,21 +250,34 @@ npm run dev
 ```
 
 ### 测试用例覆盖范畴
-- **单元测试 (`tests/unit_test.ts`)**：
-  - JWT 签发、验签、防篡改、过期拦截；
-  - 礼品卡 Crockford Base32 规范化与 SHA-256 哈希校验；
-  - SSRF 网络防护（回环地址、RFC1918 私网段、云厂商元数据接口拦截）；
-  - 4K 滑窗保护（历史冗余折叠与尾部最高优先级指令留存）；
-  - 温饱定律硬过滤与模态闭环；
-  - 胜任定律矩阵计算与标签降级提示词补偿；
-  - Serverless 无状态算分体系（上下文贴合度 + 能级偏好 + 会话哈希抖动）。
-- **集成测试 (`tests/integration_test.ts`)**：
-  - 用户注册推荐码与双向积分账本的 D1 `batch` 原子事务；
-  - R2 资产下载隔离（轻节点公开免鉴权 vs 私有临时素材多租户隔离）；
-  - 管理员节点注册与敏感凭据脱敏防泄露；
-  - 线性流水线拼接器三大门禁拦截验证；
-  - 端到端 SSE 流式执行、心跳保活与最终扣费结算；
-  - 客户端提前断流主动取消与预扣积分安全退还。
+- **单元测试 (`tests/unit_test.ts` - 14 大测试套件)**：
+  - [Suite 1] 身份认证与 Token 密码学校验（JWT 签名、验签、防篡改、过期拦截）；
+  - [Suite 2] 礼品卡 Crockford Base32 规范化与 SHA-256 哈希校验；
+  - [Suite 3] SSRF 网络防护（回环地址、RFC1918 私网段、云厂商元数据接口拦截）与 4K 滑窗保护；
+  - [Suite 4] 广义温饱定律（$\Omega_i$ 累加供给与无孤儿资产公理）硬过滤与模态闭环；
+  - [Suite 5] 解耦胜任定律矩阵计算与标签降级提示词补偿；
+  - [Suite 6] Serverless-Native 无状态算分体系（上下文贴合度 + 能级偏好 + 会话哈希抖动）；
+  - [Suite 7] 信任边界隔离与衍生管理员专用签名密钥；
+  - [Suite 8] 持久化盐值解耦与高性能二进制数据流转；
+  - [Suite 9] 任意 WebGPU 拓扑、注意力汇聚（Attention-Sink）线形压缩与防越界提示词拼装；
+  - [Suite 10] 规范化时间比对、续接令牌锁步 Phase 2 执行与下游重节点附件穿透；
+  - [Suite 11] 多模态编排、定向认领法则（P0 上游介质优先认领与 P1 用户附件穿透）；
+  - [Suite 12] 认知文档向下继承、SSRF 严格拦截与文档模态统一规范化；
+  - [Suite 13] Passkeys (WebAuthn) RS256/ES256 签名校验、Origin 精准防欺骗与 OAuth 墓碑哈希隔离；
+  - [Suite 14] UTF-16 代理对保护、Session ID 防路径穿越与输入类型边界安全守卫。
+- **集成测试 (`tests/integration_test.ts` - 12 大集成场景)**：
+  - [Scenario 1] 用户注册、推荐码奖励、双向积分账本原子事务与输入类型畸形拦截；
+  - [Scenario 2] R2 资产下载隔离（轻节点公开免鉴权 vs 私有临时素材多租户隔离）；
+  - [Scenario 3] 管理员节点注册、SSRF 守卫与敏感凭据脱敏防泄露；
+  - [Scenario 4] 线性流水线拼接器三大语法与模态门禁校验；
+  - [Scenario 5] 端到端 SSE 流式执行、心跳保活与最终扣费原子结算；
+  - [Scenario 6] 客户端提前断流主动取消与预扣积分安全退还；
+  - [Scenario 7] 用户注销物理擦除隐私会话、R2 资产与幂等墓碑插入；
+  - [Scenario 8] 密码更新刷新凭证、Passkey 激活时安全解绑 OAuth、模型发布校验；
+  - [Scenario 9] 任意 WebGPU 拓扑调度、D1 CAS 原子防重放与端云透明容灾转移；
+  - [Scenario 10] 多模态 ASR 音频识别、商业绘图生成与 0 字节容灾兜底；
+  - [Scenario 11] 零额度 WebGPU 降级越权拦截与二阶段 2PC 握手状态维护；
+  - [Scenario 12] 云端向端侧 WebGPU 逆向切换、未映射路由严格 404 与外部 Fetch 302 重定向坚决拦截。
 
 ---
 
