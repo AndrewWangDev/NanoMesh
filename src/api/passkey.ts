@@ -1,4 +1,5 @@
 import { Env } from "../types";
+import { safeJsonBody } from "../lib/utils";
 import { requireAuth } from "../auth/middleware";
 import { signJWT } from "../auth/jwt";
 import {
@@ -91,7 +92,7 @@ export async function handlePasskeyRegisterVerify(request: Request, env: Env): P
   const auth = await requireAuth(request, env);
   if (auth instanceof Response) return auth;
 
-  const body: any = await request.json().catch(() => ({}));
+  const body: any = await safeJsonBody(request);
   const { id, rawId, response, deviceName } = body;
 
   if (!id || !response || !response.clientDataJSON || !response.attestationObject) {
@@ -276,7 +277,7 @@ export async function handlePasskeyDelete(
 }
 
 export async function handlePasskeyLoginOptions(request: Request, env: Env): Promise<Response> {
-  const body: any = await request.json().catch(() => ({}));
+  const body: any = await safeJsonBody(request);
   let email = body?.email;
   if (typeof email === "string") email = email.toLowerCase().trim();
 
@@ -331,7 +332,7 @@ export async function handlePasskeyLoginOptions(request: Request, env: Env): Pro
 }
 
 export async function handlePasskeyLoginVerify(request: Request, env: Env): Promise<Response> {
-  const body: any = await request.json().catch(() => ({}));
+  const body: any = await safeJsonBody(request);
   const { id, rawId, response } = body;
 
   if (!id || !response || !response.clientDataJSON || !response.authenticatorData || !response.signature) {

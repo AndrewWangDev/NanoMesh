@@ -1,4 +1,5 @@
 import { Env } from "../types";
+import { safeJsonBody } from "../lib/utils";
 import { getSession } from "../auth/middleware";
 import { getAdminSession } from "./admin";
 
@@ -225,7 +226,7 @@ export async function handleAdminSendNotification(req: Request, env: Env): Promi
   const session = await getAdminSession(req, env);
   if (!session) return new Response("Unauthorized", { status: 401 });
 
-  const body = (await req.json().catch(() => ({}))) as {
+  const body = (await safeJsonBody(req)) as {
     target?: 'all' | 'user';
     targetUser?: string; // email or user_id
     category?: 'system' | 'model' | 'billing' | 'quota' | 'task';

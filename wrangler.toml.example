@@ -11,6 +11,7 @@
 #    npx wrangler d1 migrations apply nanomesh-db --remote
 # 5. Set your secrets:
 #    wrangler secret put JWT_SECRET
+#    wrangler secret put PERSISTENT_DATA_SALT
 #    wrangler secret put TURNSTILE_SECRET_KEY
 #    wrangler secret put RESEND_API_KEY
 #    wrangler secret put ADMIN_PASSWORD
@@ -43,8 +44,11 @@ binding = "R2"
 bucket_name = "nanomesh-assets"
 
 [vars]
+ENVIRONMENT = "production"
 TURNSTILE_SITE_KEY = "your-turnstile-site-key-here"
 RESEND_FROM_EMAIL = "noreply@yourdomain.com"
 FRONTEND_URL = "https://nano.yourdomain.com"
+# Persistent data salt for long-term hashes (gift cards & account tombstones) - MUST be configured in production:
+# wrangler secret put PERSISTENT_DATA_SALT
 # Heavy Node JWT ephemeral authentication secret should be set via wrangler secret:
 # wrangler secret put HEAVY_JWT_SECRET

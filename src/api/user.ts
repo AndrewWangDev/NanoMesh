@@ -3,13 +3,14 @@ import { getSession } from "../auth/middleware";
 import { signJWT } from "../auth/jwt";
 import { getPersistentSalt } from "./billing";
 import * as bcrypt from "bcryptjs";
+import { safeJsonBody } from "../lib/utils";
 
 export async function handleUpdateProfile(req: Request, env: Env) {
   if (req.method !== "PUT") return new Response("Method not allowed", { status: 405 });
   const session = await getSession(req, env);
   if (!session) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
-  const body: any = await req.json().catch(() => ({}));
+  const body: any = await safeJsonBody(req);
   const { username } = body;
 
   if (!username || !/^[a-zA-Z0-9_-]{3,20}$/.test(username)) {
@@ -32,7 +33,7 @@ export async function handleUpdatePassword(req: Request, env: Env) {
   const session = await getSession(req, env);
   if (!session) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
-  const body: any = await req.json().catch(() => ({}));
+  const body: any = await safeJsonBody(req);
   const { oldPassword, newPassword } = body;
 
   if (!newPassword || newPassword.length < 8 || newPassword.length > 64 || !/[a-zA-Z]/.test(newPassword) || !/[0-9]/.test(newPassword)) {
@@ -64,13 +65,15 @@ export async function handleUpdatePassword(req: Request, env: Env) {
   return response;
 }
 
-export async function handleUpdateAvatar(req: Request, env: Env) {
+export async function handleUpdateAvatar(req: Request, env: Env, ctx?: ExecutionContext) {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
   const session = await getSession(req, env);
   if (!session) return Response.json({ error: "error.unauthorized" }, { status: 401 });
 
-  const userRow = await env.DB.prepare("SELECT avatar_updated_at FROM users WHERE user_id = ?").bind(session.userId).first<{avatar_updated_at: string | null}>();
+  const userRow = await env.DB.prepare("SELECT avatar_url, avatar_updated_at FROM users WHERE user_id = ?").bind(session.userId).first<{avatar_url: string | null; avatar_updated_at: string | null}>();
   if (!userRow) return Response.json({ error: "error.userNotFound" }, { status: 404 });
+
+  const previousAvatarUrl = userRow.avatar_url;
 
   if (userRow.avatar_updated_at) {
     const lastUpdate = new Date(userRow.avatar_updated_at.replace(' ', 'T') + 'Z').getTime();
@@ -113,6 +116,21 @@ export async function handleUpdateAvatar(req: Request, env: Env) {
   const avatarUrl = `/storage/${objectKey}`;
 
   await env.DB.prepare("UPDATE users SET avatar_url = ?, avatar_updated_at = datetime('now') WHERE user_id = ?").bind(avatarUrl, session.userId).run();
+
+  // NM-AUDIT-07: Asynchronously clean up previous avatar from R2 to eliminate orphaned storage accumulation
+  if (previousAvatarUrl && previousAvatarUrl.startsWith("/storage/avatars/")) {
+    const oldKey = previousAvatarUrl.replace("/storage/", "");
+    if (oldKey && oldKey !== objectKey && env.R2 && typeof env.R2.delete === 'function') {
+      const deletePromise = env.R2.delete(oldKey).catch(err => {
+        console.warn("[R2_CLEANUP_WARN] Failed to delete old avatar:", oldKey, err);
+      });
+      if (ctx && typeof ctx.waitUntil === 'function') {
+        ctx.waitUntil(deletePromise);
+      } else {
+        await deletePromise;
+      }
+    }
+  }
 
   return Response.json({ success: true, avatar_url: avatarUrl });
 }

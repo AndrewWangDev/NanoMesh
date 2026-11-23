@@ -1,5 +1,6 @@
 import { Env } from "../types";
 import { getSession } from "../auth/middleware";
+import { safeJsonBody } from "../lib/utils";
 
 export function getPersistentSalt(env: Env): string {
   if (env.PERSISTENT_DATA_SALT) return env.PERSISTENT_DATA_SALT;
@@ -91,7 +92,7 @@ export async function handleRedeem(req: Request, env: Env, ctx?: ExecutionContex
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const body: any = await req.json().catch(() => ({}));
+  const body: any = await safeJsonBody(req);
   const rawCode = typeof body.code === "string" ? body.code : "";
   if (!rawCode.trim()) {
     return Response.json({ error: "error.redeem.empty" }, { status: 400 });

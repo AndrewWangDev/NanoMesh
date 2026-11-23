@@ -72,16 +72,16 @@ function checkRateLimit(userId: string): { allowed: boolean; retryAfter: number 
 }
 
 export async function handleChat(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
+  if (request.method !== "POST") {
+    return new Response("Method not allowed", { status: 405 });
+  }
+
   const session = await getSession(request, env);
   if (!session) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), { 
       status: 401, 
       headers: { "Content-Type": "application/json" } 
     });
-  }
-
-  if (request.method !== "POST") {
-    return new Response("Method not allowed", { status: 405 });
   }
 
   // 1. Sliding-Window Rate Limit Check (Non-aggressive Demo Protection)
@@ -139,6 +139,7 @@ export async function handleChat(request: Request, env: Env, ctx?: ExecutionCont
 
   try {
     body = await request.json();
+    if (!body || typeof body !== 'object') throw new Error("Not an object");
   } catch (err) {
     return new Response(JSON.stringify({ error: "Invalid JSON" }), { 
       status: 400, 
@@ -150,6 +151,18 @@ export async function handleChat(request: Request, env: Env, ctx?: ExecutionCont
   if (!envelope || !envelope.instruction_payload || typeof envelope.instruction_payload !== 'string' || !envelope.instruction_payload.trim()) {
     return new Response(JSON.stringify({ error: "Missing or invalid instruction_payload: must be a non-empty string" }), { 
       status: 400, 
+      headers: { "Content-Type": "application/json" } 
+    });
+  }
+
+  // NM-AUDIT-01: Hard security limit on chat instruction payload to prevent Worker 128MB OOM / DoS
+  const MAX_INSTRUCTION_PAYLOAD_CHARS = 512 * 1024; // 512KB
+  if (envelope.instruction_payload.length > MAX_INSTRUCTION_PAYLOAD_CHARS) {
+    return new Response(JSON.stringify({ 
+      error: "payload_too_large", 
+      message: "instruction_payload exceeds maximum allowed limit (512KB)" 
+    }), { 
+      status: 413, 
       headers: { "Content-Type": "application/json" } 
     });
   }
@@ -273,16 +286,16 @@ export async function handleChatContinue(
   env: Env, 
   ctx?: ExecutionContext
 ): Promise<Response> {
+  if (request.method !== "POST") {
+    return new Response("Method not allowed", { status: 405 });
+  }
+
   const session = await getSession(request, env);
   if (!session) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), { 
       status: 401, 
       headers: { "Content-Type": "application/json" } 
     });
-  }
-
-  if (request.method !== "POST") {
-    return new Response("Method not allowed", { status: 405 });
   }
 
   let body: {
@@ -298,6 +311,7 @@ export async function handleChatContinue(
 
   try {
     body = await request.json();
+    if (!body || typeof body !== 'object') throw new Error("Not an object");
   } catch (err) {
     return new Response(JSON.stringify({ error: "Invalid JSON" }), { 
       status: 400, 

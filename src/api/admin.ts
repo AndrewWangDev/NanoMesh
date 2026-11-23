@@ -1,4 +1,5 @@
 import type { Env } from "../types";
+import { safeJsonBody } from "../lib/utils";
 import { signJWT, verifyJWT } from "../auth/jwt";
 import { AwsClient } from "aws4fetch";
 import { getCloudflareAccountId } from "../lib/r2s3";
@@ -93,7 +94,7 @@ export async function handleAdminLogin(request: Request, env: Env, ctx?: Executi
     });
   }
 
-  const body = await request.json().catch(() => ({})) as { password?: string };
+  const body = await safeJsonBody(request) as { password?: string };
   const enc = new TextEncoder();
   const inputBuffer = enc.encode(body.password || "");
   const passBuffer = enc.encode(adminPass);
@@ -191,7 +192,7 @@ export async function handleAdminCreateNode(request: Request, env: Env): Promise
   const session = await getAdminSession(request, env);
   if (!session) return new Response("Unauthorized", { status: 401 });
 
-  const body = await request.json().catch(() => ({})) as any;
+  const body = await safeJsonBody(request) as any;
   const modelId = (body.model_id || "").trim();
   const displayName = (body.display_name || "").trim();
   const provider = (body.provider || "").trim();
@@ -293,7 +294,7 @@ export async function handleAdminUpdateNode(request: Request, env: Env, nodeId: 
   const existing = await env.DB.prepare("SELECT * FROM models WHERE model_id = ?").bind(nodeId).first<any>();
   if (!existing) return Response.json({ error: "Node not found" }, { status: 404 });
 
-  const body = await request.json().catch(() => ({})) as any;
+  const body = await safeJsonBody(request) as any;
 
   const displayName = body.display_name !== undefined ? body.display_name.trim() : existing.display_name;
   const provider = body.provider !== undefined ? body.provider.trim() : existing.provider;
@@ -418,7 +419,7 @@ export async function handleAdminUploadLightNode(request: Request, env: Env): Pr
   const session = await getAdminSession(request, env);
   if (!session) return new Response("Unauthorized", { status: 401 });
 
-  const body = await request.json().catch(() => ({})) as { filename?: string };
+  const body = await safeJsonBody(request) as { filename?: string };
   const filename = (body.filename || "").replace(/[^a-zA-Z0-9_\-\.]/g, "_");
   if (!filename) return Response.json({ error: "Missing filename" }, { status: 400 });
 
@@ -474,7 +475,7 @@ export async function handleAdminCreateOrUpdateRole(request: Request, env: Env):
   const session = await getAdminSession(request, env);
   if (!session) return new Response("Unauthorized", { status: 401 });
 
-  const body = await request.json().catch(() => ({})) as any;
+  const body = await safeJsonBody(request) as any;
   const roleId = (body.role_id || "").trim();
   const nameZh = (body.name_zh || "").trim();
   const nameEn = (body.name_en || roleId).trim();
@@ -631,7 +632,7 @@ export async function handleAdminCreateOrUpdateTemplate(request: Request, env: E
   const session = await getAdminSession(request, env);
   if (!session) return new Response("Unauthorized", { status: 401 });
 
-  const body = await request.json().catch(() => ({})) as any;
+  const body = await safeJsonBody(request) as any;
   const nameZh = (body.name_zh || body.name || "").trim();
   const nameEn = (body.name_en || body.name || nameZh).trim();
   const descZh = (body.desc_zh || body.description || "").trim();
@@ -787,7 +788,7 @@ export async function handleAdminToggleTemplate(request: Request, env: Env, temp
 
   if (!templateId) return Response.json({ error: "Missing template_id" }, { status: 400 });
 
-  const body = await request.json().catch(() => ({})) as any;
+  const body = await safeJsonBody(request) as any;
   const newStatus = body.status ? (body.status === 'active' ? 'active' : 'disabled') : (body.is_active === false || body.is_active === 0 ? 'disabled' : 'active');
 
   await env.DB.prepare("UPDATE dag_templates SET status = ? WHERE template_id = ?").bind(newStatus, templateId).run();
@@ -883,7 +884,7 @@ export async function handleAdminUpdateModel(request: Request, env: Env): Promis
     const id = url.pathname.replace(/\/+$/, "").split("/").pop();
     if (!id) return Response.json({ error: "Missing model id" }, { status: 400 });
 
-    const body = (await request.json().catch(() => ({}))) as {
+    const body = (await safeJsonBody(request)) as {
       status: string;
       reason?: string;
       endpoint?: string;
@@ -1077,7 +1078,7 @@ export async function handleAdminCreateGiftCodes(request: Request, env: Env): Pr
   const session = await getAdminSession(request, env);
   if (!session) return new Response("Unauthorized", { status: 401 });
 
-  const body = (await request.json().catch(() => ({}))) as {
+  const body = (await safeJsonBody(request)) as {
     amount?: number;
     count?: number;
     expires_at?: string | null; // ISO string from client e.g. "2026-12-31T15:00:00.000Z"
@@ -1276,7 +1277,7 @@ export async function handleAdminRevokeBatch(request: Request, env: Env): Promis
   const session = await getAdminSession(request, env);
   if (!session) return new Response("Unauthorized", { status: 401 });
 
-  const body = (await request.json().catch(() => ({}))) as { batch_id?: string };
+  const body = (await safeJsonBody(request)) as { batch_id?: string };
   if (!body.batch_id) {
     return Response.json({ error: "Missing batch_id" }, { status: 400 });
   }

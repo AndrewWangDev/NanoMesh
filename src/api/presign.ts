@@ -5,16 +5,16 @@ import { getSinglePresignedPutUrl } from "../lib/r2s3";
 const MAX_CHAT_FILE_SIZE = 25 * 1024 * 1024; // 25MB hard limit
 
 export async function handleChatPresign(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") {
+    return new Response("Method not allowed", { status: 405 });
+  }
+
   const session = await getSession(request, env);
   if (!session) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), { 
       status: 401, 
       headers: { "Content-Type": "application/json" } 
     });
-  }
-
-  if (request.method !== "POST") {
-    return new Response("Method not allowed", { status: 405 });
   }
 
   // 1. Quota check: Query DB for user credits
@@ -37,6 +37,7 @@ export async function handleChatPresign(request: Request, env: Env): Promise<Res
   let body: { file_name?: string; file_size?: number; mime_type?: string; modality?: string };
   try {
     body = await request.json();
+    if (!body || typeof body !== 'object') throw new Error("Not an object");
   } catch (e) {
     return new Response(JSON.stringify({ error: "Invalid JSON body" }), { 
       status: 400, 
