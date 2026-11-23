@@ -142,7 +142,7 @@ export async function handleRegister(req: Request, env: Env) {
   // Validate referral code if provided
   let referrerId: string | null = null;
   if (referral_code && typeof referral_code === 'string' && referral_code.trim()) {
-    const referrer = await env.DB.prepare("SELECT user_id FROM users WHERE referral_code = ?").bind(referral_code.trim().toUpperCase()).first<{user_id: string}>();
+    const referrer = await env.DB.prepare("SELECT user_id FROM users WHERE referral_code = ? AND email NOT LIKE 'deleted_%'").bind(referral_code.trim().toUpperCase()).first<{user_id: string}>();
     if (!referrer) {
       return Response.json({ error: "error.invalidReferralCode" }, { status: 400 });
     }
@@ -347,10 +347,16 @@ export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionCont
 }
 
 export async function handleLogout(req: Request, env: Env) {
+  if (req.method !== "POST") {
+    return new Response("Method not allowed", { status: 405 });
+  }
   return new Response(JSON.stringify({ success: true }), { headers: setCookieHeaders(null) });
 }
 
 export async function handleMe(req: Request, env: Env) {
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    return new Response("Method not allowed", { status: 405 });
+  }
   const session = await getSession(req, env);
   if (!session) return Response.json({ error: "Unauthorized" }, { status: 401 });
 

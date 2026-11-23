@@ -175,6 +175,7 @@ export async function handleDeleteAccount(req: Request, env: Env) {
           username = 'del_' || substr(user_id, 1, 12), 
           password_hash = NULL, 
           avatar_url = NULL, 
+          referral_code = NULL, 
           credits = 0,
           token_version = token_version + 1
       WHERE user_id = ?
