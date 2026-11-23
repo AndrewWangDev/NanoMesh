@@ -149,8 +149,8 @@ wrangler secret put Cloudflare_Account_ID
 wrangler secret put R2_ACCESS_KEY_ID
 wrangler secret put R2_SECRET_ACCESS_KEY
 
-# 敏感数据持久化盐值 (用于礼品卡哈希与关键数据派生，至少 32 字符随机串, 推荐配置)
-# (注：系统支持 PERSISTENT_DATA_SALT，未配置时回退至 GIFT_CARD_SALT 或 JWT_SECRET，但强烈建议生产显式配置独立盐值以隔离密钥轮转)
+# 敏感数据持久化专用盐值 (用于礼品卡哈希与账号注销墓碑哈希派生，至少 32 字符随机串, 生产环境必填)
+# (重要：切勿与 JWT_SECRET 复用！独立盐值可确保日常轮转 JWT 密钥时，已存礼品卡和注销冷静期哈希永久有效)
 wrangler secret put PERSISTENT_DATA_SALT
 ```
 
@@ -161,6 +161,13 @@ wrangler secret put PERSISTENT_DATA_SALT
 npm run deploy
 ```
 部署成功后，控制台将输出你的 Worker 线上访问地址（例如 `https://nanomesh-frontend.your-username.workers.dev`）。
+
+---
+
+### Step 7: (推荐) 配置 Cloudflare WAF 全网全局频控 (Rate Limiting)
+NanoMesh 采用分层防御模型：Worker 内部运行 L1 零延迟防抖限流，并通过 D1 数据库执行原子扣费保障经济安全。针对全网跨机房的恶意调用与 DDoS 缓解，推荐在 Cloudflare Dashboard 中开启 WAF 规则：
+- **入口路径**：`/api/chat*` 及 `/api/auth/*`
+- **限频规则**：限制同一 IP 每 10 秒不超过 20 次请求，超出时执行 Cloudflare 托管质询（Managed Challenge）或拦截。
 
 ---
 
