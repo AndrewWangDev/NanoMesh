@@ -357,12 +357,13 @@ export async function handlePasskeyLoginVerify(request: Request, env: Env): Prom
     return Response.json({ error: "error.passkeyNotFound" }, { status: 401 });
   }
 
-  // 2. Fetch user
+  // 2. Fetch user (with tombstone / deleted account check)
   const user = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?")
     .bind(passkey.user_id)
     .first<any>();
 
-  if (!user) {
+  // NM-SEC-02: Block deactivated / tombstoned accounts
+  if (!user || (user.email && user.email.startsWith("deleted_"))) {
     return Response.json({ error: "error.userNotFound" }, { status: 401 });
   }
 

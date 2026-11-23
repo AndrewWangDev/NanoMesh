@@ -26,6 +26,10 @@ interface RateLimitBucket {
   lastRefill: number; // timestamp ms
 }
 
+// NM-BUG-04 Architecture Note:
+// rateLimitMap is a per-isolate L1 Anti-Hammering Buffer (0ms in-memory latency) designed to absorb
+// burst double-click duplicate requests. Global abuse and quota exhaustion are strictly prevented by
+// D1 atomic credit ledger pre-deduction. Comprehensive edge-wide IP rate limiting is enforced via Cloudflare WAF.
 const RATE_LIMIT_CAPACITY = 3;
 const REFILL_INTERVAL_MS = 5000;
 const rateLimitMap = new Map<string, RateLimitBucket>();

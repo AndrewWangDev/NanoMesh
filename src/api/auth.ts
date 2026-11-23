@@ -82,7 +82,8 @@ export async function handleRegister(req: Request, env: Env) {
   let { username, email, password, code, turnstile_token, referral_code } = body;
   if (typeof email === 'string') email = email.toLowerCase().trim();
   
-  if (!await verifyTurnstile(turnstile_token, env.TURNSTILE_SECRET_KEY)) {
+  const clientIp = req.headers.get("CF-Connecting-IP") || req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null;
+  if (!await verifyTurnstile(turnstile_token, env.TURNSTILE_SECRET_KEY, clientIp)) {
     return Response.json({ error: "error.invalidCaptcha" }, { status: 400 });
   }
 
@@ -204,7 +205,8 @@ export async function handleLogin(req: Request, env: Env) {
   let { email, password, turnstile_token } = body;
   if (typeof email === 'string') email = email.toLowerCase().trim();
   
-  if (!await verifyTurnstile(turnstile_token, env.TURNSTILE_SECRET_KEY)) {
+  const clientIp = req.headers.get("CF-Connecting-IP") || req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null;
+  if (!await verifyTurnstile(turnstile_token, env.TURNSTILE_SECRET_KEY, clientIp)) {
     return Response.json({ error: "Invalid captcha" }, { status: 400 });
   }
 
@@ -250,7 +252,8 @@ export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionCont
   
   if (typeof email === 'string') email = email.toLowerCase().trim();
 
-  if (!await verifyTurnstile(turnstile_token, env.TURNSTILE_SECRET_KEY)) {
+  const clientIp = req.headers.get("CF-Connecting-IP") || req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+  if (!await verifyTurnstile(turnstile_token, env.TURNSTILE_SECRET_KEY, clientIp !== "unknown" ? clientIp : null)) {
     return Response.json({ error: "error.invalidCaptcha" }, { status: 400 });
   }
 
@@ -258,7 +261,6 @@ export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionCont
     return Response.json({ error: "error.unsupportedEmailDomain" }, { status: 400 });
   }
 
-  const clientIp = req.headers.get("CF-Connecting-IP") || req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
   const currentHourStr = new Date().toISOString().slice(0, 13); // YYYY-MM-DDTHH
   const ipHourlyKey = `ip_code_rate_${currentHourStr}_${clientIp}`;
 
@@ -522,6 +524,9 @@ export async function handleGoogleCallback(req: Request, env: Env) {
 }
 
 export async function handleGetBindings(req: Request, env: Env) {
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    return new Response("Method not allowed", { status: 405 });
+  }
   const session = await getSession(req, env);
   if (!session) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
