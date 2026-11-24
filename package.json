@@ -10,6 +10,11 @@
     "deploy": "wrangler deploy",
     "types": "wrangler types",
     "typecheck": "tsc --noEmit",
+    "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
+    "typecheck:all": "npm run typecheck && npm run typecheck:test",
+    "lint": "eslint src/ tests/ --max-warnings=0",
+    "format:check": "prettier --check \"src/**/*.{ts,js}\" \"tests/**/*.{ts,js}\"",
+    "format": "prettier --write \"src/**/*.{ts,js}\" \"tests/**/*.{ts,js}\"",
     "test": "npx tsx tests/unit_test.ts && npx tsx tests/integration_test.ts"
   },
   "dependencies": {
@@ -19,7 +24,11 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261113.1",
     "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^26.6.6",
+    "eslint": "^10.15.0",
+    "prettier": "^3.10.1",
     "typescript": "^5.0.0",
+    "typescript-eslint": "^8.74.0",
     "wrangler": "^4.161.0"
   }
 }
