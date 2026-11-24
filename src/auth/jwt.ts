@@ -30,23 +30,27 @@ async function importKey(secret: string): Promise<CryptoKey> {
   );
 }
 
-export async function signJWT(payload: any, secret: string, expiresInSeconds: number): Promise<string> {
+export async function signJWT(
+  payload: any,
+  secret: string,
+  expiresInSeconds: number
+): Promise<string> {
   const header = { alg: "HS256", typ: "JWT" };
   const now = Math.floor(Date.now() / 1000);
-  
+
   const actualPayload = {
     ...payload,
     iat: now,
-    exp: now + expiresInSeconds,
+    exp: now + expiresInSeconds
   };
 
   const encodedHeader = base64UrlEncode(enc.encode(JSON.stringify(header)).buffer);
   const encodedPayload = base64UrlEncode(enc.encode(JSON.stringify(actualPayload)).buffer);
-  
+
   const dataToSign = `${encodedHeader}.${encodedPayload}`;
   const key = await importKey(secret);
   const signature = await crypto.subtle.sign("HMAC", key, enc.encode(dataToSign));
-  
+
   const encodedSignature = base64UrlEncode(signature);
   return `${dataToSign}.${encodedSignature}`;
 }
@@ -55,10 +59,10 @@ export async function verifyJWT(token: string, secret: string): Promise<any | nu
   try {
     const parts = token.split(".");
     if (parts.length !== 3) return null;
-    
+
     const [header, payload, signature] = parts;
     const dataToVerify = `${header}.${payload}`;
-    
+
     const key = await importKey(secret);
     const isValid = await crypto.subtle.verify(
       "HMAC",
@@ -66,21 +70,34 @@ export async function verifyJWT(token: string, secret: string): Promise<any | nu
       base64UrlDecode(signature),
       enc.encode(dataToVerify)
     );
-    
+
     if (!isValid) return null;
-    
+
     const decodedPayload = JSON.parse(new TextDecoder().decode(base64UrlDecode(payload)));
-    
+
     if (decodedPayload.exp && decodedPayload.exp < Math.floor(Date.now() / 1000)) {
       return null;
     }
-    
+
     return decodedPayload;
   } catch (e) {
     return null;
   }
 }
 
+/**
+ * Signs an ephemeral, tamper-proof JWT credential for delegating heavy compute tasks to VPS nodes.
+ *
+ * Security & Anti-Replay Contract:
+ * 1. Cryptographic Authenticity: HMAC-SHA256 signature binding payload, envelope, session, and role IDs.
+ * 2. Short Ephemeral Window: Strict 60-second validity (exp = now + 60s) minimizes exposure window.
+ * 3. Anti-Replay Primitives (jti): Embeds crypto.randomUUID() as a single-use invocation nonce.
+ *
+ * Trust Boundary Note:
+ * While the Edge Worker generates cryptographic single-use nonces (jti), end-to-end anti-replay
+ * enforcement requires receiving compute nodes to maintain stateful one-time token consumption
+ * (e.g., Redis TTL cache or Bloom filter) rejecting repeated presentation within the 60s window.
+ */
 export async function signHeavyNodeToken(
   claims: {
     sub: string;

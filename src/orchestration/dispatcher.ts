@@ -1,12 +1,18 @@
 // src/orchestration/dispatcher.ts
 import { Env } from "../types";
 import { sliceEnvelopeForNode } from "./slicing";
-import { 
-  computeDeterministicSignature, 
-  lookupDeterministicCache, 
-  storeDeterministicCache 
+import {
+  computeDeterministicSignature,
+  lookupDeterministicCache,
+  storeDeterministicCache
 } from "./signature";
-import { ArtifactBundle, InstantiatedDAG, MediaArtifact, ModelMetadata, UnifiedProtocolEnvelope } from "./types";
+import {
+  ArtifactBundle,
+  InstantiatedDAG,
+  MediaArtifact,
+  ModelMetadata,
+  UnifiedProtocolEnvelope
+} from "./types";
 import { signHeavyNodeToken, signJWT } from "../auth/jwt";
 import { checkAndNotifyLowBalance } from "../api/notifications";
 
@@ -26,7 +32,9 @@ function triggerLowBalanceCheckAsync(env: Env, userId: string, ctx?: ExecutionCo
   if (!userId) return;
   const task = (async () => {
     try {
-      const user = await env.DB.prepare("SELECT credits FROM users WHERE user_id = ?").bind(userId).first<{ credits: number }>();
+      const user = await env.DB.prepare("SELECT credits FROM users WHERE user_id = ?")
+        .bind(userId)
+        .first<{ credits: number }>();
       if (user && user.credits < 500) {
         await checkAndNotifyLowBalance(env, userId, user.credits);
       }
@@ -41,7 +49,7 @@ function triggerLowBalanceCheckAsync(env: Env, userId: string, ctx?: ExecutionCo
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
-  let binary = '';
+  let binary = "";
   const chunkSize = 16384;
   for (let i = 0; i < bytes.length; i += chunkSize) {
     const chunk = bytes.subarray(i, i + chunkSize);
@@ -52,16 +60,16 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 
 async function computeSha256Hex(data: string): Promise<string> {
   const msgUint8 = new TextEncoder().encode(data);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", msgUint8);
   const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function isPrivateIPv4Octets(o1: number, o2: number): boolean {
   if (o1 === 10 || o1 === 127 || (o1 === 169 && o2 === 254)) return true;
-  if (o1 === 172 && (o2 >= 16 && o2 <= 31)) return true;
+  if (o1 === 172 && o2 >= 16 && o2 <= 31) return true;
   if (o1 === 192 && o2 === 168) return true;
-  if (o1 === 100 && (o2 >= 64 && o2 <= 127)) return true;
+  if (o1 === 100 && o2 >= 64 && o2 <= 127) return true;
   if (o1 === 0) return true;
   return false;
 }
@@ -69,16 +77,35 @@ function isPrivateIPv4Octets(o1: number, o2: number): boolean {
 export function isSafeExternalUrl(urlStr: string): boolean {
   try {
     const parsed = new URL(urlStr);
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+
+    // Disallow embedded user credentials (e.g. http://user:pass@evil.com)
+    if (parsed.username || parsed.password) return false;
+
+    // Disallow dangerous internal service ports (SSH, SMTP, DNS, SMB, DBs)
+    if (parsed.port) {
+      const portNum = parseInt(parsed.port, 10);
+      const forbiddenPorts = [
+        21, 22, 23, 25, 53, 110, 143, 445, 1433, 1521, 3306, 5432, 6379, 27017
+      ];
+      if (forbiddenPorts.includes(portNum)) return false;
+    }
 
     // Clean IPv6 host brackets (e.g. "[::1]" -> "::1")
-    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
 
     // Loopback, all-interfaces, and unroutable addresses (IPv4 & IPv6)
-    if (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host === '::1' || host === '::') return false;
-    if (host.endsWith('.local') || host.endsWith('.internal')) return false;
+    if (
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host === "0.0.0.0" ||
+      host === "::1" ||
+      host === "::"
+    )
+      return false;
+    if (host.endsWith(".local") || host.endsWith(".internal")) return false;
 
-    // Wildcard dynamic DNS rebinding services commonly used to proxy to localhost/private IPs (NM-SEC-01)
+    // Wildcard dynamic DNS rebinding services commonly used to proxy to localhost/private IPs
     const WILDCARD_DNS_PATTERNS = [
       /\.nip\.io$/i,
       /\.sslip\.io$/i,
@@ -88,27 +115,31 @@ export function isSafeExternalUrl(urlStr: string): boolean {
       /\.lacolhost\.com$/i,
       /\.spoofed\.net$/i
     ];
-    if (WILDCARD_DNS_PATTERNS.some(pat => pat.test(host))) return false;
+    if (WILDCARD_DNS_PATTERNS.some((pat) => pat.test(host))) return false;
 
     // Block hosts that embed private IPs in dynamic DNS naming schemes (e.g., 127.0.0.1.x, 127-0-0-1.x, 10-0-0-1.x)
     // Note: Must require digits following the separator to avoid false-flagging legitimate domains (e.g., 10-ai.com, 0-shot.ai)
-    if (/^(127[-.]\d+|10[-.]\d+|192[-.]168[-.]\d+|172[-.](1[6-9]|2[0-9]|3[01])[-.]\d+|169[-.]254[-.]\d+|0[-.]\d+)/i.test(host)) {
+    if (
+      /^(127[-.]\d+|10[-.]\d+|192[-.]168[-.]\d+|172[-.](1[6-9]|2[0-9]|3[01])[-.]\d+|169[-.]254[-.]\d+|0[-.]\d+)/i.test(
+        host
+      )
+    ) {
       return false;
     }
 
     // IPv6 Private & Link-Local Ranges:
     // - fc00::/7 (Unique Local Address, covers fc00:: to fdff::)
     // - fe80::/10 (Link-Local)
-    if (host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe80:')) return false;
+    if (host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:")) return false;
 
     // IPv4-Mapped IPv6 (e.g. ::ffff:127.0.0.1 or WHATWG hex format ::ffff:7f00:1)
-    if (host.startsWith('::ffff:')) {
+    if (host.startsWith("::ffff:")) {
       const remainder = host.slice(7);
       const dotMatch = remainder.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
       if (dotMatch) {
         if (isPrivateIPv4Octets(parseInt(dotMatch[1], 10), parseInt(dotMatch[2], 10))) return false;
       } else {
-        const hexParts = remainder.split(':');
+        const hexParts = remainder.split(":");
         if (hexParts.length === 2) {
           const hi = parseInt(hexParts[0], 16);
           const o1 = (hi >> 8) & 0xff;
@@ -133,66 +164,65 @@ export function isSafeExternalUrl(urlStr: string): boolean {
 }
 
 export function sanitizeLLMOutput(text: string): string {
-  if (!text) return '';
+  if (!text) return "";
   let cleaned = text;
-  // Strip trailing pseudo-metadata blocks (e.g. 铁律, 输出语言, 内容详略, etc.)
+  // Strip trailing pseudo-metadata blocks (e.g. prompt rules, system instructions, or style confessions)
   cleaned = cleaned.replace(
     /(?:\n+|\r\n)+(?:[#* -]*\**【?(?:铁律|输出语言|内容详略|系统守则|指令规则|全局预设|规则说明|交付铁律)】?\**[:：]?[\s\S]*)$/i,
-    ''
+    ""
   );
-  // Strip trailing isolated "铁律" or meta confession bullet points
-  cleaned = cleaned.replace(
-    /(?:\n+|\r\n)+[#* -]*(?:铁律|Ironclad Rule)[:：]?\s*[\s\S]*$/i,
-    ''
-  );
+  // Strip trailing isolated rule bullet points or meta-confession markers
+  cleaned = cleaned.replace(/(?:\n+|\r\n)+[#* -]*(?:铁律|Ironclad Rule)[:：]?\s*[\s\S]*$/i, "");
   return cleaned.trim();
 }
 
 function buildConstraintDirective(targetLang?: string, outputStyle?: string): string {
-  const lang = targetLang === 'zh'
-    ? '始终使用规范清晰的中文回复。'
-    : targetLang === 'en'
-    ? 'Always reply in fluent, natural English.'
-    : '若用户指定了特定语言（如英文、中文等），必须严格使用该语言回复；未指定时与用户指令保持一致。';
+  const lang =
+    targetLang === "zh"
+      ? "始终使用规范清晰的中文回复。"
+      : targetLang === "en"
+        ? "Always reply in fluent, natural English."
+        : "若用户指定了特定语言（如英文、中文等），必须严格使用该语言回复；未指定时与用户指令保持一致。";
 
-  const style = outputStyle === 'detailed'
-    ? '深入详尽分析，层级清晰。'
-    : outputStyle === 'creative'
-    ? '富有创意与启发性。'
-    : '简洁精炼，直击重点。';
+  const style =
+    outputStyle === "detailed"
+      ? "深入详尽分析，层级清晰。"
+      : outputStyle === "creative"
+        ? "富有创意与启发性。"
+        : "简洁精炼，直击重点。";
 
   return `\n\n系统执行指示（仅供内部遵从，绝对禁止在回答末尾复述本条或打印为小标题）：\n- 语言偏好：${lang}\n- 详略偏好：${style}\n- 直接输出最终业务成果，严禁在正文附带规则声明、策略说明或思考自白。`;
 }
 
 /**
- * O(N) Zero-CPU Attention-Sink Compaction
- * Uses native String.prototype.slice() to preserve head (30%) intent and tail (70%) conclusion.
- * Zero AST parsing, zero regex backtracking, benchmarked < 0.05ms in V8 for 50k chars.
+ * Heuristic head-and-tail context window compaction.
+ * Uses native String.prototype.slice() to preserve head intent (30%) and trailing conclusions (70%).
+ * Fast constant-time operation with zero AST parsing and zero regex backtracking.
  */
 export function applyAttentionSinkCompaction(text: string, maxChars: number = 1600): string {
-  if (!text || text.length <= maxChars) return text || '';
-  let headLen = Math.floor(maxChars * 0.3); // 30% 头部意图
-  let tailLen = Math.floor(maxChars * 0.7); // 70% 尾部结论
+  if (!text || text.length <= maxChars) return text || "";
+  let headLen = Math.floor(maxChars * 0.3); // Allocate 30% of character budget to preserve head intent
+  let tailLen = Math.floor(maxChars * 0.7); // Allocate 70% of character budget to preserve trailing conclusions
 
-  // 边界保护：防止在 UTF-16 高位代理 (0xD800-0xDBFF) 处截断 head
+  // Surrogate guard: prevent truncating within a UTF-16 high surrogate (0xD800-0xDBFF)
   if (headLen > 0 && headLen < text.length) {
     const code = text.charCodeAt(headLen - 1);
-    if (code >= 0xD800 && code <= 0xDBFF) {
+    if (code >= 0xd800 && code <= 0xdbff) {
       headLen -= 1;
     }
   }
 
-  // 边界保护：防止在 UTF-16 低位代理 (0xDC00-0xDFFF) 处开始 tail
+  // Surrogate guard: prevent slicing within a UTF-16 low surrogate (0xDC00-0xDFFF)
   if (tailLen > 0 && tailLen < text.length) {
     const tailStart = text.length - tailLen;
     const code = text.charCodeAt(tailStart);
-    if (code >= 0xDC00 && code <= 0xDFFF) {
+    if (code >= 0xdc00 && code <= 0xdfff) {
       tailLen -= 1;
     }
   }
 
   const head = text.slice(0, headLen);
-  const tail = tailLen > 0 ? text.slice(-tailLen) : '';
+  const tail = tailLen > 0 ? text.slice(-tailLen) : "";
   const omitted = text.length - headLen - tailLen;
   return `${head}\n\n[=== 平台协同优化：中间过程性细节共 ${omitted} 字已智能折叠，核心前提与最终事实完整保留 ===]\n\n${tail}`;
 }
@@ -202,12 +232,15 @@ export function applyAttentionSinkCompaction(text: string, maxChars: number = 16
  * Strips special tokens (<|im_start|>, <|im_end|>, etc.) and system prompt override attempts.
  */
 export function sanitizeClientStepOutput(text: string): string {
-  if (!text) return '';
+  if (!text) return "";
   let cleaned = text;
   // 1. Strip special token boundaries (ChatML, Llama 3/3.1 headers, Gemma turn markers, Mistral/Llama 2 instruction brackets)
-  cleaned = cleaned.replace(/<\|(?:im_start|im_end|endoftext|end|system|user|assistant|start_header_id|end_header_id|eot_id)\|>/gi, '');
-  cleaned = cleaned.replace(/<(?:start|end)_of_turn>/gi, '');
-  cleaned = cleaned.replace(/\[\/?INST\]/gi, '');
+  cleaned = cleaned.replace(
+    /<\|(?:im_start|im_end|endoftext|end|system|user|assistant|start_header_id|end_header_id|eot_id)\|>/gi,
+    ""
+  );
+  cleaned = cleaned.replace(/<(?:start|end)_of_turn>/gi, "");
+  cleaned = cleaned.replace(/\[\/?INST\]/gi, "");
   // 2. Strip standard LLM trailing rules / confessions via sanitizeLLMOutput
   cleaned = sanitizeLLMOutput(cleaned);
   return cleaned;
@@ -236,26 +269,36 @@ export function buildDownstreamMessages(
   openaiMessages: Array<{ role: string; content: any }>;
   geminiContents: Array<{ role: string; parts: Array<any> }>;
 } {
-  const isHeavy = target.inference_target === 'heavy';
-  const hasUpstream = !!parts.sanitizedIntermediateOutput && parts.sanitizedIntermediateOutput.trim().length > 0;
+  const isHeavy = target.inference_target === "heavy";
+  const hasUpstream =
+    !!parts.sanitizedIntermediateOutput && parts.sanitizedIntermediateOutput.trim().length > 0;
 
   let imagePartForGemini: any = null;
   if (parts.imageB64) {
-    const cleanB64 = parts.imageB64.includes('base64,') ? parts.imageB64.split('base64,')[1] : parts.imageB64;
+    const cleanB64 = parts.imageB64.includes("base64,")
+      ? parts.imageB64.split("base64,")[1]
+      : parts.imageB64;
     imagePartForGemini = {
       inlineData: {
-        mimeType: parts.imageMimeType || 'image/jpeg',
+        mimeType: parts.imageMimeType || "image/jpeg",
         data: cleanB64
       }
     };
   }
 
   if (isHeavy && hasUpstream) {
-    const userPromptWithDocs = [parts.initialUserDirective || '请处理以下输入材料', parts.attachedDocsContent].filter(Boolean).join('\n\n');
-    const userContentOpenAI = parts.imageB64 ? [
-      { type: 'text', text: userPromptWithDocs },
-      { type: 'image_url', image_url: { url: parts.imageB64 } }
-    ] : userPromptWithDocs;
+    const userPromptWithDocs = [
+      parts.initialUserDirective || "请处理以下输入材料",
+      parts.attachedDocsContent
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    const userContentOpenAI = parts.imageB64
+      ? [
+          { type: "text", text: userPromptWithDocs },
+          { type: "image_url", image_url: { url: parts.imageB64 } }
+        ]
+      : userPromptWithDocs;
 
     const userGeminiParts: any[] = [{ text: userPromptWithDocs }];
     if (imagePartForGemini) {
@@ -264,23 +307,31 @@ export function buildDownstreamMessages(
 
     return {
       openaiMessages: [
-        { role: 'system', content: parts.systemPrompt },
-        { role: 'user', content: userContentOpenAI },
-        { role: 'assistant', content: parts.sanitizedIntermediateOutput },
-        { role: 'user', content: parts.currentTaskDirective || '请基于前置产出完成当前岗位的执行任务' }
+        { role: "system", content: parts.systemPrompt },
+        { role: "user", content: userContentOpenAI },
+        { role: "assistant", content: parts.sanitizedIntermediateOutput },
+        {
+          role: "user",
+          content: parts.currentTaskDirective || "请基于前置产出完成当前岗位的执行任务"
+        }
       ],
       geminiContents: [
-        { role: 'user', parts: userGeminiParts },
-        { role: 'model', parts: [{ text: parts.sanitizedIntermediateOutput }] },
-        { role: 'user', parts: [{ text: parts.currentTaskDirective || '请基于前置产出完成当前岗位的执行任务' }] }
+        { role: "user", parts: userGeminiParts },
+        { role: "model", parts: [{ text: parts.sanitizedIntermediateOutput }] },
+        {
+          role: "user",
+          parts: [{ text: parts.currentTaskDirective || "请基于前置产出完成当前岗位的执行任务" }]
+        }
       ]
     };
   }
 
-  const flatUserContentOpenAI = parts.imageB64 ? [
-    { type: 'text', text: parts.flatPromptContent },
-    { type: 'image_url', image_url: { url: parts.imageB64 } }
-  ] : parts.flatPromptContent;
+  const flatUserContentOpenAI = parts.imageB64
+    ? [
+        { type: "text", text: parts.flatPromptContent },
+        { type: "image_url", image_url: { url: parts.imageB64 } }
+      ]
+    : parts.flatPromptContent;
 
   const flatGeminiParts: any[] = [{ text: parts.flatPromptContent }];
   if (imagePartForGemini) {
@@ -289,12 +340,10 @@ export function buildDownstreamMessages(
 
   return {
     openaiMessages: [
-      { role: 'system', content: parts.systemPrompt },
-      { role: 'user', content: flatUserContentOpenAI }
+      { role: "system", content: parts.systemPrompt },
+      { role: "user", content: flatUserContentOpenAI }
     ],
-    geminiContents: [
-      { role: 'user', parts: flatGeminiParts }
-    ]
+    geminiContents: [{ role: "user", parts: flatGeminiParts }]
   };
 }
 
@@ -311,7 +360,10 @@ export function applyContextWindowGuard(
   reserveOutputTokens: number = 1024
 ): { systemPrompt: string; promptContent: string } {
   // Approximate 1 token ~= 3.5 characters for mixed multilingual/code
-  const maxAllowedInputChars = Math.max(1000, Math.floor((contextWindow - reserveOutputTokens) * 3.5));
+  const maxAllowedInputChars = Math.max(
+    1000,
+    Math.floor((contextWindow - reserveOutputTokens) * 3.5)
+  );
   const currentTotalChars = systemPrompt.length + promptContent.length;
 
   if (currentTotalChars <= maxAllowedInputChars) {
@@ -324,7 +376,9 @@ export function applyContextWindowGuard(
   if (promptContent.length > availableForPrompt) {
     // Preserve the tail (most recent instructions) rather than the head
     const truncatedHead = promptContent.slice(promptContent.length - availableForPrompt);
-    const guardedPrompt = `[...前序冗余历史上下文已自动滑窗折叠，保留核心提炼实体与当轮最高优先级指令...]\n` + truncatedHead;
+    const guardedPrompt =
+      `[...前序冗余历史上下文已自动滑窗折叠，保留核心提炼实体与当轮最高优先级指令...]\n` +
+      truncatedHead;
     return { systemPrompt, promptContent: guardedPrompt };
   }
 
@@ -348,44 +402,47 @@ export async function buildAuthHeaders(
     roleId?: string;
   }
 ): Promise<Record<string, string>> {
-  const authMode = model.auth_mode || (model.endpoint.startsWith('http') ? 'jwt_ephemeral' : 'none');
+  const authMode =
+    model.auth_mode || (model.endpoint.startsWith("http") ? "jwt_ephemeral" : "none");
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'User-Agent': 'NanoMesh-Edge-Dispatcher/1.0'
+    "Content-Type": "application/json",
+    "User-Agent": "NanoMesh-Edge-Dispatcher/1.0"
   };
 
-  if (authMode === 'none') {
+  if (authMode === "none") {
     return headers;
   }
 
-  if (authMode === 'bearer_static') {
-    const token = model.auth_secret || '';
+  if (authMode === "bearer_static") {
+    const token = model.auth_secret || "";
     if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-      headers['x-goog-api-key'] = token;
+      headers["Authorization"] = `Bearer ${token}`;
+      headers["x-goog-api-key"] = token;
     }
     return headers;
   }
 
-  if (authMode === 'jwt_ephemeral') {
-    // 严禁回退至 env.JWT_SECRET，维护边缘控制面与外部异构算力节点间的严格信任隔离
+  if (authMode === "jwt_ephemeral") {
+    // Strictly disallow fallback to JWT_SECRET to maintain cryptographic trust boundary isolation between the edge control plane and external compute nodes
     const heavySecret = model.auth_secret || env.HEAVY_JWT_SECRET;
     if (!heavySecret) {
-      throw new Error(`[SECURITY_REJECTED] 算力节点【${model.display_name}】需要 jwt_ephemeral 鉴权，但节点未配置 auth_secret 且未配置系统全局 HEAVY_JWT_SECRET。禁止回退使用系统核心密钥！`);
+      throw new Error(
+        `[SECURITY_REJECTED] 算力节点【${model.display_name}】需要 jwt_ephemeral 鉴权，但节点未配置 auth_secret 且未配置系统全局 HEAVY_JWT_SECRET。禁止回退使用系统核心密钥！`
+      );
     }
     const bodyDigest = await computeSha256Hex(requestBodyStr);
     const heavyToken = await signHeavyNodeToken(
       {
-        sub: context.userId || 'anonymous',
-        sid: context.sessionId || 'session',
-        eid: context.envelopeId || 'envelope',
-        rid: context.roleId || 'role',
+        sub: context.userId || "anonymous",
+        sid: context.sessionId || "session",
+        eid: context.envelopeId || "envelope",
+        rid: context.roleId || "role",
         mid: model.model_id,
         bdg: bodyDigest
       },
       heavySecret
     );
-    headers['Authorization'] = `Bearer ${heavyToken}`;
+    headers["Authorization"] = `Bearer ${heavyToken}`;
     return headers;
   }
 
@@ -393,7 +450,7 @@ export async function buildAuthHeaders(
 }
 
 function extractChunkText(it: any): string {
-  if (!it || typeof it !== 'object') return '';
+  if (!it || typeof it !== "object") return "";
 
   // 1. OpenAI-compatible delta format (Workers AI LLaMA 3.2 emits delta.content)
   if (Array.isArray(it.choices) && it.choices.length > 0) {
@@ -407,7 +464,7 @@ function extractChunkText(it: any): string {
   if (Array.isArray(it.candidates) && it.candidates.length > 0) {
     const parts = it.candidates[0]?.content?.parts;
     if (Array.isArray(parts) && parts.length > 0) {
-      const text = parts.map((p: any) => p?.text || '').join('');
+      const text = parts.map((p: any) => p?.text || "").join("");
       if (text) {
         return text;
       }
@@ -429,13 +486,17 @@ function extractChunkText(it: any): string {
     return String(it.answer);
   }
 
-  return '';
+  return "";
 }
 
 async function parseAIResponse(aiRes: any, onChunk?: (chunk: string) => void): Promise<string> {
-  if (!aiRes) return '';
-  if (typeof aiRes === 'string') return sanitizeLLMOutput(aiRes);
-  if (aiRes.description !== undefined && aiRes.description !== null && String(aiRes.description).trim()) {
+  if (!aiRes) return "";
+  if (typeof aiRes === "string") return sanitizeLLMOutput(aiRes);
+  if (
+    aiRes.description !== undefined &&
+    aiRes.description !== null &&
+    String(aiRes.description).trim()
+  ) {
     return sanitizeLLMOutput(String(aiRes.description));
   }
   if (aiRes.response !== undefined && aiRes.response !== null && String(aiRes.response).trim()) {
@@ -457,7 +518,7 @@ async function parseAIResponse(aiRes: any, onChunk?: (chunk: string) => void): P
   if (Array.isArray(aiRes.candidates) && aiRes.candidates.length > 0) {
     const parts = aiRes.candidates[0]?.content?.parts;
     if (Array.isArray(parts) && parts.length > 0) {
-      const text = parts.map((p: any) => p?.text || '').join('');
+      const text = parts.map((p: any) => p?.text || "").join("");
       if (text.trim()) {
         return sanitizeLLMOutput(text);
       }
@@ -465,15 +526,15 @@ async function parseAIResponse(aiRes: any, onChunk?: (chunk: string) => void): P
   }
 
   // If aiRes is a ReadableStream (e.g. Workers AI streaming models)
-  if (typeof aiRes.getReader === 'function') {
+  if (typeof aiRes.getReader === "function") {
     try {
       const reader = aiRes.getReader();
       const decoder = new TextDecoder();
-      let streamBuffer = '';
-      let text = '';
-      let latestAnswer = '';
-      let latestReasoning = '';
-      let rawAccumulated = '';
+      let streamBuffer = "";
+      let text = "";
+      let latestAnswer = "";
+      let latestReasoning = "";
+      let rawAccumulated = "";
 
       while (true) {
         const { done, value } = await reader.read();
@@ -482,12 +543,12 @@ async function parseAIResponse(aiRes: any, onChunk?: (chunk: string) => void): P
         streamBuffer += decoded;
         rawAccumulated += decoded;
 
-        const lines = streamBuffer.split('\n');
-        streamBuffer = lines.pop() || ''; // Keep incomplete trailing fragment across chunk boundaries!
+        const lines = streamBuffer.split("\n");
+        streamBuffer = lines.pop() || ""; // Keep incomplete trailing fragment across chunk boundaries!
 
         for (const line of lines) {
           const trimmed = line.trim();
-          if (trimmed.startsWith('data: ') && trimmed !== 'data: [DONE]') {
+          if (trimmed.startsWith("data: ") && trimmed !== "data: [DONE]") {
             try {
               const parsed = JSON.parse(trimmed.slice(6));
               const items = Array.isArray(parsed) ? parsed : [parsed];
@@ -500,7 +561,7 @@ async function parseAIResponse(aiRes: any, onChunk?: (chunk: string) => void): P
                 if (it.answer !== undefined && it.answer !== null) {
                   latestAnswer += String(it.answer);
                 }
-                if (it.reasoning && typeof it.reasoning.text === 'string' && it.reasoning.text) {
+                if (it.reasoning && typeof it.reasoning.text === "string" && it.reasoning.text) {
                   latestReasoning = it.reasoning.text;
                 }
                 if (it.choices?.[0]?.delta?.reasoning_content) {
@@ -513,7 +574,7 @@ async function parseAIResponse(aiRes: any, onChunk?: (chunk: string) => void): P
       }
 
       // Check remaining tail buffer
-      if (streamBuffer.trim().startsWith('data: ') && streamBuffer.trim() !== 'data: [DONE]') {
+      if (streamBuffer.trim().startsWith("data: ") && streamBuffer.trim() !== "data: [DONE]") {
         try {
           const parsed = JSON.parse(streamBuffer.trim().slice(6));
           const items = Array.isArray(parsed) ? parsed : [parsed];
@@ -526,7 +587,8 @@ async function parseAIResponse(aiRes: any, onChunk?: (chunk: string) => void): P
             if (it.answer !== undefined && it.answer !== null) {
               latestAnswer += String(it.answer);
             }
-            if (it.reasoning && typeof it.reasoning.text === 'string') latestReasoning = it.reasoning.text;
+            if (it.reasoning && typeof it.reasoning.text === "string")
+              latestReasoning = it.reasoning.text;
             if (it.choices?.[0]?.delta?.reasoning_content) {
               latestReasoning += String(it.choices[0].delta.reasoning_content);
             }
@@ -535,13 +597,16 @@ async function parseAIResponse(aiRes: any, onChunk?: (chunk: string) => void): P
       }
 
       if (text.trim()) {
-        const full = (latestReasoning && !text.includes(latestReasoning)) ? `${latestReasoning}\n\n${text}` : text;
+        const full =
+          latestReasoning && !text.includes(latestReasoning)
+            ? `${latestReasoning}\n\n${text}`
+            : text;
         return sanitizeLLMOutput(full);
       }
 
       if (latestAnswer || latestReasoning) {
         const parts = [latestReasoning, latestAnswer].filter(Boolean);
-        return sanitizeLLMOutput(parts.join('\n\n'));
+        return sanitizeLLMOutput(parts.join("\n\n"));
       }
 
       if (text.trim()) return sanitizeLLMOutput(text);
@@ -567,7 +632,7 @@ async function parseAIResponse(aiRes: any, onChunk?: (chunk: string) => void): P
     }
   }
 
-  return '';
+  return "";
 }
 
 async function callWithTimeout<T>(
@@ -581,7 +646,7 @@ async function callWithTimeout<T>(
     if (parentSignal.aborted) {
       childController.abort();
     } else {
-      parentSignal.addEventListener('abort', onParentAbort, { once: true });
+      parentSignal.addEventListener("abort", onParentAbort, { once: true });
     }
   }
 
@@ -597,7 +662,7 @@ async function callWithTimeout<T>(
   } finally {
     clearTimeout(timer);
     if (parentSignal) {
-      parentSignal.removeEventListener('abort', onParentAbort);
+      parentSignal.removeEventListener("abort", onParentAbort);
     }
   }
 }
@@ -632,9 +697,9 @@ export async function executeDAGStream(
         if (options.hasPreDeducted) {
           options.hasPreDeducted = false;
           try {
-            await env.DB.prepare(
-              "UPDATE users SET credits = credits + 1 WHERE user_id = ?"
-            ).bind(options.userId).run();
+            await env.DB.prepare("UPDATE users SET credits = credits + 1 WHERE user_id = ?")
+              .bind(options.userId)
+              .run();
           } catch (refundErr) {
             console.error("[Dispatcher] Failed to refund reserved credit:", refundErr);
           }
@@ -648,13 +713,13 @@ export async function executeDAGStream(
           return;
         }
         try {
-          controller.enqueue(encoder.encode(': keep-alive\n\n'));
+          controller.enqueue(encoder.encode(": keep-alive\n\n"));
         } catch (e) {
           clearInterval(heartbeatTimer);
         }
       }, 2500);
 
-      let upstreamOutput = options.injectedUpstreamText || '';
+      let upstreamOutput = options.injectedUpstreamText || "";
       let totalCost = 0;
       const startTime = Date.now();
       const startIdx = options.startStepIndex || 0;
@@ -662,19 +727,19 @@ export async function executeDAGStream(
       try {
         if (startIdx === 0) {
           // 1. Send DAG Plan & Reasoning Trace to frontend
-          sendEvent('dag_plan', {
+          sendEvent("dag_plan", {
             template: {
               template_id: dag.template.template_id,
               name_zh: dag.template.name_zh,
               name_en: dag.template.name_en,
-              desc_zh: dag.template.desc_zh,
+              desc_zh: dag.template.desc_zh
             },
-            candidate_templates: (dag.candidate_templates || []).map(t => ({
+            candidate_templates: (dag.candidate_templates || []).map((t) => ({
               template_id: t.template_id,
               name_zh: t.name_zh,
               name_en: t.name_en
             })),
-            nodes: dag.nodes.map(n => ({
+            nodes: dag.nodes.map((n) => ({
               role_id: n.role.role_id,
               name_zh: n.role.name_zh,
               name_en: n.role.name_en,
@@ -686,15 +751,15 @@ export async function executeDAGStream(
                 model_id: n.selected_model.model_id,
                 display_name: n.selected_model.display_name,
                 cost: n.selected_model.cost_per_1k_tokens,
-                inference_target: n.selected_model.inference_target || 'cloud',
+                inference_target: n.selected_model.inference_target || "cloud",
                 browser_runtime: n.selected_model.browser_runtime,
                 download_size_bytes: n.selected_model.download_size_bytes
               },
-              standby_models: (n.standby_models || []).map(m => ({
+              standby_models: (n.standby_models || []).map((m) => ({
                 model_id: m.model_id,
                 display_name: m.display_name,
                 cost: m.cost_per_1k_tokens,
-                inference_target: m.inference_target || 'cloud',
+                inference_target: m.inference_target || "cloud",
                 browser_runtime: m.browser_runtime,
                 download_size_bytes: m.download_size_bytes
               })),
@@ -708,34 +773,36 @@ export async function executeDAGStream(
           });
         } else {
           // Resumed DAG from client-side WebGPU handover
-          sendEvent('dag_resume', {
+          sendEvent("dag_resume", {
             resumed_step: startIdx,
             handshake_id: options.continuationHandshakeId,
-            nodes: dag.nodes.map(n => ({
+            nodes: dag.nodes.map((n) => ({
               role_id: n.role.role_id,
               name_zh: n.role.name_zh,
               name_en: n.role.name_en,
               selected_model: {
                 model_id: n.selected_model.model_id,
                 display_name: n.selected_model.display_name,
-                inference_target: n.selected_model.inference_target || 'cloud'
+                inference_target: n.selected_model.inference_target || "cloud"
               }
             }))
           });
         }
 
-        // Fast-Failed Gateways (Security Violation or Capability Out-of-Bounds)
+        // Fail-fast gateways for security policy violations or out-of-bounds capabilities
         if (dag.is_security_violation) {
           await refundReservedCredit();
-          sendEvent('security_blocked', {
+          sendEvent("security_blocked", {
             is_blocked: true,
             duration_ms: Date.now() - startTime,
-            message_zh: '抱歉，您的指令经安全网关审计，涉及未授权系统攻击、入侵工具武器化或侵犯版权等违规行为。该请求已被终止执行，未扣除算力点数。请参阅 NanoMesh 服务条款。\n\n如为您自建环境的防御性安全配置或学术分析，请调整表述明确防御上下文。如果您持续进行违规活动，您的账号可能被暂停。',
-            message_en: 'Sorry, your instruction was audited by the Edge Firewall and flagged for unauthorized system attacks, weaponized exploits, or intellectual property infringements. Execution has been terminated without consuming compute credits. Please refer to NanoMesh Terms of Service.\n\nIf this was intended for defensive security configurations or academic research, please adjust your phrasing. Continued violations may lead to account suspension.'
+            message_zh:
+              "抱歉，您的指令经安全网关审计，涉及未授权系统攻击、入侵工具武器化或侵犯版权等违规行为。该请求已被终止执行，未扣除算力点数。请参阅 NanoMesh 服务条款。\n\n如为您自建环境的防御性安全配置或学术分析，请调整表述明确防御上下文。如果您持续进行违规活动，您的账号可能被暂停。",
+            message_en:
+              "Sorry, your instruction was audited by the Edge Firewall and flagged for unauthorized system attacks, weaponized exploits, or intellectual property infringements. Execution has been terminated without consuming compute credits. Please refer to NanoMesh Terms of Service.\n\nIf this was intended for defensive security configurations or academic research, please adjust your phrasing. Continued violations may lead to account suspension."
           });
 
-          sendEvent('dag_complete', {
-            final_output: '',
+          sendEvent("dag_complete", {
+            final_output: "",
             total_cost: 0,
             total_duration_ms: Date.now() - startTime,
             is_security_violation: true
@@ -745,15 +812,17 @@ export async function executeDAGStream(
 
         if (dag.is_unreachable) {
           await refundReservedCredit();
-          sendEvent('capability_unreachable', {
+          sendEvent("capability_unreachable", {
             is_unreachable: true,
             duration_ms: Date.now() - startTime,
-            message_zh: '当前工作流库未检索到能够胜任该业务意图的编排链路。NanoMesh 目前专精于多模态图文解析、实体信息抽取、跨语言重构与结构化表达润色。系统已在极短时间内快速熔断本轮执行，未消耗您的任何算力点数。\n\n*(建议：您可以尝试上传多模态图文材料，或细化您在文字润色、文档抽取方面的诉求)*',
-            message_en: 'No workflow template in the current catalog matches your specific intent. NanoMesh is currently specialized in multimodal visual understanding, entity extraction, cross-lingual translation, and structured polishing. The system has fast-failed to protect your compute credits with 0 charges.\n\n*(Tip: Try uploading multimodal materials or refining your text analysis goals)*'
+            message_zh:
+              "当前工作流库未检索到能够胜任该业务意图的编排链路。NanoMesh 目前专精于多模态图文解析、实体信息抽取、跨语言重构与结构化表达润色。系统已在极短时间内快速熔断本轮执行，未消耗您的任何算力点数。\n\n*(建议：您可以尝试上传多模态图文材料，或细化您在文字润色、文档抽取方面的诉求)*",
+            message_en:
+              "No workflow template in the current catalog matches your specific intent. NanoMesh is currently specialized in multimodal visual understanding, entity extraction, cross-lingual translation, and structured polishing. The system has fast-failed to protect your compute credits with 0 charges.\n\n*(Tip: Try uploading multimodal materials or refining your text analysis goals)*"
           });
 
-          sendEvent('dag_complete', {
-            final_output: '',
+          sendEvent("dag_complete", {
+            final_output: "",
             total_cost: 0,
             total_duration_ms: Date.now() - startTime,
             is_unreachable: true
@@ -764,11 +833,11 @@ export async function executeDAGStream(
         // Deep clone assets manifest for this DAG run so that node-level consumption is isolated
         const runEnvelope: UnifiedProtocolEnvelope = {
           ...envelope,
-          assets_manifest: envelope.assets_manifest.map(a => ({ ...a }))
+          assets_manifest: envelope.assets_manifest.map((a) => ({ ...a }))
         };
 
         const currentBundle: ArtifactBundle = {
-          text_context: upstreamOutput || '',
+          text_context: upstreamOutput || "",
           generated_media: [],
           inherited_assets: [...runEnvelope.assets_manifest]
         };
@@ -781,42 +850,54 @@ export async function executeDAGStream(
           const nodeStartTime = Date.now();
 
           // Envelope slicing with instruction masking and downstream metadata
-          const nodeCtx = sliceEnvelopeForNode(node, runEnvelope, upstreamOutput, parentRoleName, currentBundle);
+          const nodeCtx = sliceEnvelopeForNode(
+            node,
+            runEnvelope,
+            upstreamOutput,
+            parentRoleName,
+            currentBundle
+          );
 
           // 1. Prompt Assembly based on Role Responsibility
-          let systemPrompt = '';
-          let promptContent = '';
+          let systemPrompt = "";
+          let promptContent = "";
           let initialUserDirective = envelope.instruction_payload;
-          let currentStepDirective = '';
+          let currentStepDirective = "";
 
           // Extract attached text/document content from claimed assets if present
-          // BUG-02 Guard: If this node is a generative media node (e.g. image/audio generation tail),
-          // strictly isolate attached raw documents to prevent prompt dilution and context length overflow!
-          const isGenerativeMediaNode = node.role.out_modalities?.some(m => m === 'image' || m === 'audio')
-            || node.selected_model.out_modalities?.some(m => m === 'image' || m === 'audio');
+          // Generative media guard: if this node is a generative media node (e.g. image/audio generation tail),
+          // strictly isolate attached raw documents to prevent prompt dilution and context length overflow.
+          const isGenerativeMediaNode =
+            node.role.out_modalities?.some((m) => m === "image" || m === "audio") ||
+            node.selected_model.out_modalities?.some((m) => m === "image" || m === "audio");
 
           const docTextBlocks = nodeCtx.claimed_assets
-            .filter(a => a.in_memory_text && a.in_memory_text.trim())
-            .map(a => a.in_memory_text!.trim());
+            .filter((a) => a.in_memory_text && a.in_memory_text.trim())
+            .map((a) => a.in_memory_text!.trim());
 
-          let attachedDocsSection = (!isGenerativeMediaNode && docTextBlocks.length > 0) 
-            ? `【文档材料】\n${docTextBlocks.join('\n\n')}` 
-            : '';
+          let attachedDocsSection =
+            !isGenerativeMediaNode && docTextBlocks.length > 0
+              ? `【文档材料】\n${docTextBlocks.join("\n\n")}`
+              : "";
 
           // Sliding window token budget guard: cap attached docs to 50% of model context window
           if (attachedDocsSection && node.selected_model?.context_window) {
             const maxDocChars = Math.floor(node.selected_model.context_window * 2);
             if (attachedDocsSection.length > maxDocChars) {
-              attachedDocsSection = attachedDocsSection.slice(0, maxDocChars) + '\n\n[提示：附带文档材料过长，已根据模型上下文预算自动截断]';
+              attachedDocsSection =
+                attachedDocsSection.slice(0, maxDocChars) +
+                "\n\n[提示：附带文档材料过长，已根据模型上下文预算自动截断]";
             }
           }
 
           // Check if this run is an incremental refinement on previous round output (ANCHOR_TAIL)
           let isIncrementalRefinement = false;
-          let refinementBackground = '';
+          let refinementBackground = "";
           let refinementUserQuery = envelope.instruction_payload;
 
-          const bgMatch = envelope.instruction_payload.match(/^\[上轮产物背景:\s*([\s\S]*?)\]\n(?:用户追问|用户指令):\s*([\s\S]*)$/);
+          const bgMatch = envelope.instruction_payload.match(
+            /^\[上轮产物背景:\s*([\s\S]*?)\]\n(?:用户追问|用户指令):\s*([\s\S]*)$/
+          );
           if (bgMatch) {
             isIncrementalRefinement = true;
             refinementBackground = bgMatch[1].trim();
@@ -826,16 +907,19 @@ export async function executeDAGStream(
           if (nodeCtx.is_head_masked) {
             // Case A: Head Node (in_degree === 0 && out_degree > 0)
             // Strictly MASK user prompt! Pure physical/perceptual feature extraction!
-            systemPrompt = `You are NanoMesh Worker Role: ${node.role.name_zh}.\n` +
-              (nodeCtx.compensation_prompt || `请对输入的图像或多模态数据进行全要素解析与无损特征提取：逐字逐行提取所有可见文字内容（包括标题、正文、微小注释、Logo文字），客观分析画面排版布局、构图与设计风格。保持客观客观，严禁进行翻译、二次创作或格式删减。`);
-            
+            systemPrompt =
+              `You are NanoMesh Worker Role: ${node.role.name_zh}.\n` +
+              (nodeCtx.compensation_prompt ||
+                `请对输入的图像或多模态数据进行全要素解析与无损特征提取：逐字逐行提取所有可见文字内容（包括标题、正文、微小注释、Logo文字），客观分析画面排版布局、构图与设计风格。保持客观客观，严禁进行翻译、二次创作或格式删减。`);
+
             promptContent = `请对输入的图像进行全要素解析与无损特征提取：逐字逐行提取所有文字内容与排版风格细节。\nDescribe all text, visual elements, layout, and details in this image in detail.`;
             if (nodeCtx.custom_prompt) {
               promptContent += `\n\n[User Custom Directive]:\n${nodeCtx.custom_prompt}`;
             }
           } else if (nodeCtx.is_downstream) {
             // Case B: Downstream Node (in_degree > 0)
-            systemPrompt = `You are NanoMesh Worker Role: ${node.role.name_zh}.\n` +
+            systemPrompt =
+              `You are NanoMesh Worker Role: ${node.role.name_zh}.\n` +
               `你当前处于 NanoMesh 协作工作流的下游节点。\n` +
               `前置节点已为你完成了原始素材的物理感知与全要素解析，提取结果作为【前置提炼素材】提供给你。\n\n` +
               `【核心执行守则】：\n` +
@@ -850,22 +934,35 @@ export async function executeDAGStream(
             }
             systemPrompt += buildConstraintDirective(nodeCtx.target_language, nodeCtx.output_style);
 
-            const upstreamSections = [nodeCtx.upstream_text, attachedDocsSection].filter(Boolean).join('\n\n');
-            const finalUserDirective = isIncrementalRefinement ? refinementUserQuery : envelope.instruction_payload;
-            const nodeTweak = (nodeCtx.custom_prompt && nodeCtx.custom_prompt !== finalUserDirective) ? `[节点特定微调指令]: ${nodeCtx.custom_prompt}` : '';
-            const allDirectives = [finalUserDirective, nodeTweak].filter(Boolean).join('\n');
+            const upstreamSections = [nodeCtx.upstream_text, attachedDocsSection]
+              .filter(Boolean)
+              .join("\n\n");
+            const finalUserDirective = isIncrementalRefinement
+              ? refinementUserQuery
+              : envelope.instruction_payload;
+            const nodeTweak =
+              nodeCtx.custom_prompt && nodeCtx.custom_prompt !== finalUserDirective
+                ? `[节点特定微调指令]: ${nodeCtx.custom_prompt}`
+                : "";
+            const allDirectives = [finalUserDirective, nodeTweak].filter(Boolean).join("\n");
 
             initialUserDirective = finalUserDirective;
-            currentStepDirective = nodeTweak || `请作为【${node.role.name_zh}】，基于前置提炼素材执行当前任务。`;
+            currentStepDirective =
+              nodeTweak || `请作为【${node.role.name_zh}】，基于前置提炼素材执行当前任务。`;
 
             promptContent = `【用户当轮最高优先级指令 (Highest Priority Command)】\n${allDirectives}\n\n【前置提炼素材】\n${upstreamSections}`;
-            if (isIncrementalRefinement && refinementBackground && !upstreamSections.includes(refinementBackground)) {
+            if (
+              isIncrementalRefinement &&
+              refinementBackground &&
+              !upstreamSections.includes(refinementBackground)
+            ) {
               promptContent += `\n\n【历史背景补充】\n${refinementBackground}`;
             }
           } else {
             // Case C: Single-Node DAG (in_degree === 0 && out_degree === 0)
             if (isIncrementalRefinement) {
-              systemPrompt = `You are NanoMesh Worker Role: ${node.role.name_zh}.\n` +
+              systemPrompt =
+                `You are NanoMesh Worker Role: ${node.role.name_zh}.\n` +
                 `你当前承担对前置任务成果的【增量修改、翻译与多语言重构 (Incremental Refinement)】职责。\n\n` +
                 `【核心执行守则】：\n` +
                 `1. 增量重构与修改：你必须以【前序产物基础素材】为内容基准，严格贯彻【用户当轮最高优先级指令】进行精准处理（如多语言重构、风格润色、补充扩写、要点提炼等）。\n` +
@@ -875,16 +972,24 @@ export async function executeDAGStream(
               if (nodeCtx.compensation_prompt) {
                 systemPrompt += `\n${nodeCtx.compensation_prompt}`;
               }
-              systemPrompt += buildConstraintDirective(nodeCtx.target_language, nodeCtx.output_style);
+              systemPrompt += buildConstraintDirective(
+                nodeCtx.target_language,
+                nodeCtx.output_style
+              );
 
-              const nodeTweak = (nodeCtx.custom_prompt && nodeCtx.custom_prompt !== refinementUserQuery) ? `[节点特定微调指令]: ${nodeCtx.custom_prompt}` : '';
-              const userDirectives = [refinementUserQuery, nodeTweak].filter(Boolean).join('\n');
+              const nodeTweak =
+                nodeCtx.custom_prompt && nodeCtx.custom_prompt !== refinementUserQuery
+                  ? `[节点特定微调指令]: ${nodeCtx.custom_prompt}`
+                  : "";
+              const userDirectives = [refinementUserQuery, nodeTweak].filter(Boolean).join("\n");
 
-              promptContent = `【用户当轮最高优先级指令 (Highest Priority Command)】\n${userDirectives}\n\n` +
+              promptContent =
+                `【用户当轮最高优先级指令 (Highest Priority Command)】\n${userDirectives}\n\n` +
                 `【前序产物基础素材 (待处理素材)】\n${refinementBackground}` +
-                (attachedDocsSection ? `\n\n${attachedDocsSection}` : '');
+                (attachedDocsSection ? `\n\n${attachedDocsSection}` : "");
             } else {
-              systemPrompt = `You are NanoMesh Worker Role: ${node.role.name_zh}.\n` +
+              systemPrompt =
+                `You are NanoMesh Worker Role: ${node.role.name_zh}.\n` +
                 `【核心执行守则】：\n` +
                 `1. 语言遵从：若用户指令指定了特定输出语言（如英文、中文等），必须严格以该指定语言输出！\n` +
                 `2. 零元语言自白：严禁输出“基于上下文约束”、“根据您的要求”等任何客套自白或元分析，直接输出业务结果。\n` +
@@ -892,10 +997,13 @@ export async function executeDAGStream(
               if (nodeCtx.compensation_prompt) {
                 systemPrompt += `\n${nodeCtx.compensation_prompt}`;
               }
-              systemPrompt += buildConstraintDirective(nodeCtx.target_language, nodeCtx.output_style);
+              systemPrompt += buildConstraintDirective(
+                nodeCtx.target_language,
+                nodeCtx.output_style
+              );
 
-              promptContent = attachedDocsSection 
-                ? `${attachedDocsSection}\n\n【用户指令】\n${envelope.instruction_payload}` 
+              promptContent = attachedDocsSection
+                ? `${attachedDocsSection}\n\n【用户指令】\n${envelope.instruction_payload}`
                 : envelope.instruction_payload;
               if (nodeCtx.custom_prompt) {
                 promptContent += `\n\n[User Custom Directive]:\n${nodeCtx.custom_prompt}`;
@@ -904,14 +1012,16 @@ export async function executeDAGStream(
           }
 
           // Compute input digest
-          const assetDigests = nodeCtx.claimed_assets.map(a => a.source_digest).join('|');
+          const assetDigests = nodeCtx.claimed_assets.map((a) => a.source_digest).join("|");
           const inputDigest = `${nodeCtx.upstream_text}::${assetDigests}`;
           const fullPrompt = [
             nodeCtx.compensation_prompt,
             nodeCtx.injected_prompt,
-            nodeCtx.custom_prompt ? `[User Injected Prompt]:\n${nodeCtx.custom_prompt}` : '',
+            nodeCtx.custom_prompt ? `[User Injected Prompt]:\n${nodeCtx.custom_prompt}` : "",
             promptContent
-          ].filter(Boolean).join('\n');
+          ]
+            .filter(Boolean)
+            .join("\n");
 
           // Deterministic Signature Check
           let cacheKey = await computeDeterministicSignature(
@@ -921,28 +1031,30 @@ export async function executeDAGStream(
             fullPrompt
           );
 
-          const isTailNode = (node.role.out_degree === 0) || (idx === dag.nodes.length - 1);
+          const isTailNode = node.role.out_degree === 0 || idx === dag.nodes.length - 1;
 
-          sendEvent('node_start', {
+          sendEvent("node_start", {
             role_id: node.role.role_id,
             role_name: node.role.name_zh,
             role_name_en: node.role.name_en,
             node_index: idx,
             model_name: node.selected_model.display_name,
             model_id: node.selected_model.model_id,
-            inference_target: node.selected_model.inference_target || 'cloud',
+            inference_target: node.selected_model.inference_target || "cloud",
             claimed_assets_count: nodeCtx.claimed_assets.length
           });
 
-          if (node.selected_model.inference_target === 'browser') {
+          if (node.selected_model.inference_target === "browser") {
             if (isTailNode) {
               let continuationToken: string | undefined = undefined;
               let handshakeId: string | undefined = undefined;
 
-              // Tail Node Failover Credential (FINDING-NEW-02):
+              // Tail node failover credential delegation:
               // If the tail WebGPU node has available cloud standby models, generate a continuation handshake record
               // so that if the client crashes or times out on the tail node, it can failover via /api/chat/continue.
-              const hasCloudStandby = (node.standby_models || []).some(m => m.inference_target !== 'browser');
+              const hasCloudStandby = (node.standby_models || []).some(
+                (m) => m.inference_target !== "browser"
+              );
               if (hasCloudStandby) {
                 handshakeId = crypto.randomUUID();
                 const expiresAt = new Date(Date.now() + 300 * 1000).toISOString();
@@ -950,33 +1062,39 @@ export async function executeDAGStream(
                   `INSERT INTO dag_handshakes 
                    (handshake_id, user_id, session_id, template_id, next_step, status, expires_at)
                    VALUES (?, ?, ?, ?, ?, 'ISSUED', ?)`
-                ).bind(
-                  handshakeId,
-                  options.userId,
-                  envelope.session_id,
-                  dag.template.template_id,
-                  idx + 1,
-                  expiresAt
-                ).run();
+                )
+                  .bind(
+                    handshakeId,
+                    options.userId,
+                    envelope.session_id,
+                    dag.template.template_id,
+                    idx + 1,
+                    expiresAt
+                  )
+                  .run();
 
                 const arbitratedRoleModels: Record<string, string> = {};
-                dag.nodes.forEach(n => {
+                dag.nodes.forEach((n) => {
                   if (n.role?.role_id && n.selected_model?.model_id) {
                     arbitratedRoleModels[n.role.role_id] = n.selected_model.model_id;
                   }
                 });
 
-                continuationToken = await signJWT({
-                  jti: handshakeId,
-                  sub: options.userId,
-                  sid: envelope.session_id,
-                  tid: dag.template.template_id,
-                  nxt: idx + 1,
-                  mids: arbitratedRoleModels
-                }, env.JWT_SECRET, 300);
+                continuationToken = await signJWT(
+                  {
+                    jti: handshakeId,
+                    sub: options.userId,
+                    sid: envelope.session_id,
+                    tid: dag.template.template_id,
+                    nxt: idx + 1,
+                    mids: arbitratedRoleModels
+                  },
+                  env.JWT_SECRET,
+                  300
+                );
               }
 
-              sendEvent('client_exec_request', {
+              sendEvent("client_exec_request", {
                 role_id: node.role.role_id,
                 role_name: node.role.name_zh,
                 role_name_en: node.role.name_en,
@@ -988,7 +1106,7 @@ export async function executeDAGStream(
                 is_tail_node: true,
                 handshake_id: handshakeId,
                 continuation_token: continuationToken,
-                claimed_assets: nodeCtx.claimed_assets.map(a => ({
+                claimed_assets: nodeCtx.claimed_assets.map((a) => ({
                   asset_id: a.asset_id,
                   modality: a.modality,
                   mime_type: a.mime_type,
@@ -997,23 +1115,27 @@ export async function executeDAGStream(
                   source_digest: a.source_digest
                 }))
               });
-              upstreamOutput = '';
+              upstreamOutput = "";
               continue;
             } else {
               // Intermediate Browser Node!
               const supportsHandover = options.clientCapabilities?.webgpu_handover_v3 ?? true;
               if (!supportsHandover) {
                 // AC-08: Legacy client without webgpu_handover_v3 fallback
-                const cloudStandby = node.standby_models.find(m => m.inference_target !== 'browser');
+                const cloudStandby = node.standby_models.find(
+                  (m) => m.inference_target !== "browser"
+                );
                 if (cloudStandby) {
-                  // BUG-01 Fix: Check and atomically pre-deduct 1 credit if not already pre-deducted!
+                  // Ensure 1 credit is pre-deducted atomically prior to dispatch:
                   if (!options.hasPreDeducted) {
                     const reserveResult = await env.DB.prepare(
                       "UPDATE users SET credits = credits - 1 WHERE user_id = ? AND credits >= 1"
-                    ).bind(options.userId).run();
+                    )
+                      .bind(options.userId)
+                      .run();
 
                     if (!reserveResult.meta.changes || reserveResult.meta.changes === 0) {
-                      sendEvent('error', {
+                      sendEvent("error", {
                         message: `当前可用积分不足，无法降级调用云端备用模型【${cloudStandby.display_name}】，请先充值。`
                       });
                       if (options.hasPreDeducted) {
@@ -1025,7 +1147,7 @@ export async function executeDAGStream(
                   }
 
                   node.selected_model = cloudStandby;
-                  // Recompute deterministic cacheKey under the cloud standby model signature (BUG-07a)
+                  // Recompute deterministic cacheKey under the cloud standby model signature
                   cacheKey = await computeDeterministicSignature(
                     node.role.role_id,
                     node.selected_model.model_id,
@@ -1034,7 +1156,7 @@ export async function executeDAGStream(
                   );
                   // fall through to cloud execution logic!
                 } else {
-                  sendEvent('error', {
+                  sendEvent("error", {
                     message: `客户端未支持 WebGPU 中间握手协议，且未找到可用的云端备用模型。`
                   });
                   if (options.hasPreDeducted) {
@@ -1085,34 +1207,40 @@ export async function executeDAGStream(
                   `INSERT INTO dag_handshakes 
                    (handshake_id, user_id, session_id, template_id, next_step, status, expires_at)
                    VALUES (?, ?, ?, ?, ?, 'ISSUED', ?)`
-                ).bind(
-                  handshakeId,
-                  options.userId,
-                  envelope.session_id,
-                  dag.template.template_id,
-                  idx + 1,
-                  expiresAt
-                ).run();
+                )
+                  .bind(
+                    handshakeId,
+                    options.userId,
+                    envelope.session_id,
+                    dag.template.template_id,
+                    idx + 1,
+                    expiresAt
+                  )
+                  .run();
 
-                // Snapshot arbitrated model IDs across all roles to freeze selections into continuation (BUG-03)
+                // Snapshot arbitrated model IDs across all roles to freeze selections into continuation token
                 const arbitratedRoleModels: Record<string, string> = {};
-                dag.nodes.forEach(n => {
+                dag.nodes.forEach((n) => {
                   if (n.role?.role_id && n.selected_model?.model_id) {
                     arbitratedRoleModels[n.role.role_id] = n.selected_model.model_id;
                   }
                 });
 
                 // Sign continuation token (300s TTL)
-                const continuationToken = await signJWT({
-                  jti: handshakeId,
-                  sub: options.userId,
-                  sid: envelope.session_id,
-                  tid: dag.template.template_id,
-                  nxt: idx + 1,
-                  mids: arbitratedRoleModels
-                }, env.JWT_SECRET, 300);
+                const continuationToken = await signJWT(
+                  {
+                    jti: handshakeId,
+                    sub: options.userId,
+                    sid: envelope.session_id,
+                    tid: dag.template.template_id,
+                    nxt: idx + 1,
+                    mids: arbitratedRoleModels
+                  },
+                  env.JWT_SECRET,
+                  300
+                );
 
-                sendEvent('dag_handover', {
+                sendEvent("dag_handover", {
                   handshake_id: handshakeId,
                   continuation_token: continuationToken,
                   current_step: idx,
@@ -1127,7 +1255,7 @@ export async function executeDAGStream(
                   user_prompt: promptContent,
                   is_tail_node: false,
                   expires_in: 300,
-                  claimed_assets: nodeCtx.claimed_assets.map(a => ({
+                  claimed_assets: nodeCtx.claimed_assets.map((a) => ({
                     asset_id: a.asset_id,
                     modality: a.modality,
                     mime_type: a.mime_type,
@@ -1143,7 +1271,7 @@ export async function executeDAGStream(
             }
           }
 
-          let nodeOutput = '';
+          let nodeOutput = "";
           let actualExecutingModel: ModelMetadata = node.selected_model;
           let nodeCost = 0;
           const cachedOutput = await lookupDeterministicCache(env, cacheKey);
@@ -1152,13 +1280,13 @@ export async function executeDAGStream(
             // Cache Hit: 0 cost, instant return!
             nodeOutput = cachedOutput;
             if (isTailNode) {
-              sendEvent('text_chunk', {
+              sendEvent("text_chunk", {
                 role_id: node.role.role_id,
                 chunk: nodeOutput,
                 cache_hit: true
               });
             }
-            sendEvent('node_complete', {
+            sendEvent("node_complete", {
               role_id: node.role.role_id,
               role_name: node.role.name_zh,
               role_name_en: node.role.name_en,
@@ -1173,14 +1301,16 @@ export async function executeDAGStream(
             // 2. Fetch image from R2 bucket if required
             let imageB64: string | null = null;
             let imageBytes: Uint8Array | number[] | null = null;
-            const imageAsset = nodeCtx.claimed_assets.find(a => a.modality === 'image');
+            const imageAsset = nodeCtx.claimed_assets.find((a) => a.modality === "image");
 
             if (imageAsset) {
               if (imageAsset.r2_key && env.R2) {
                 // Security check (IDOR/BOLA prevention): Only allow access to current session's assets
-                const userSafePrefix = `tmp/${options.userId || envelope.user_id || 'anonymous'}/`;
+                const userSafePrefix = `tmp/${options.userId || envelope.user_id || "anonymous"}/`;
                 if (!imageAsset.r2_key.startsWith(userSafePrefix)) {
-                  console.error(`[Security IDOR] User ${options.userId} attempted to access unauthorized R2 key: ${imageAsset.r2_key}`);
+                  console.error(
+                    `[Security IDOR] User ${options.userId} attempted to access unauthorized R2 key: ${imageAsset.r2_key}`
+                  );
                   throw new Error(`安全违规：拒绝访问未经授权的资产对象`);
                 }
                 try {
@@ -1188,12 +1318,16 @@ export async function executeDAGStream(
                   if (r2Obj) {
                     const buf = await r2Obj.arrayBuffer();
                     if (buf.byteLength > 15 * 1024 * 1024) {
-                      throw new Error("图像资产体积超过 15MB 内存安全上限，已拒绝加载以防止 Worker 内存溢出。");
+                      throw new Error(
+                        "图像资产体积超过 15MB 内存安全上限，已拒绝加载以防止 Worker 内存溢出。"
+                      );
                     }
                     imageBytes = new Uint8Array(buf);
-                    imageB64 = `data:${imageAsset.mime_type || 'image/jpeg'};base64,${arrayBufferToBase64(buf)}`;
+                    imageB64 = `data:${imageAsset.mime_type || "image/jpeg"};base64,${arrayBufferToBase64(buf)}`;
                   } else {
-                    console.error(`[Dispatcher] Image object not found in R2 for key: ${imageAsset.r2_key}`);
+                    console.error(
+                      `[Dispatcher] Image object not found in R2 for key: ${imageAsset.r2_key}`
+                    );
                   }
                 } catch (r2Err) {
                   console.error("[Dispatcher] R2 asset retrieval error:", r2Err);
@@ -1203,13 +1337,15 @@ export async function executeDAGStream(
 
             // 2b. Fetch audio from R2 bucket if required
             let audioBytes: Uint8Array | null = null;
-            const audioAsset = nodeCtx.claimed_assets.find(a => a.modality === 'audio');
+            const audioAsset = nodeCtx.claimed_assets.find((a) => a.modality === "audio");
 
             if (audioAsset) {
               if (audioAsset.r2_key && env.R2) {
-                const userSafePrefix = `tmp/${options.userId || envelope.user_id || 'anonymous'}/`;
+                const userSafePrefix = `tmp/${options.userId || envelope.user_id || "anonymous"}/`;
                 if (!audioAsset.r2_key.startsWith(userSafePrefix)) {
-                  console.error(`[Security IDOR] User ${options.userId} attempted to access unauthorized R2 key: ${audioAsset.r2_key}`);
+                  console.error(
+                    `[Security IDOR] User ${options.userId} attempted to access unauthorized R2 key: ${audioAsset.r2_key}`
+                  );
                   throw new Error(`安全违规：拒绝访问未经授权的资产对象`);
                 }
                 try {
@@ -1217,11 +1353,15 @@ export async function executeDAGStream(
                   if (r2Obj) {
                     const buf = await r2Obj.arrayBuffer();
                     if (buf.byteLength > 25 * 1024 * 1024) {
-                      throw new Error("音频资产体积超过 25MB 内存安全上限，已拒绝加载以防止 Worker 内存溢出。");
+                      throw new Error(
+                        "音频资产体积超过 25MB 内存安全上限，已拒绝加载以防止 Worker 内存溢出。"
+                      );
                     }
                     audioBytes = new Uint8Array(buf);
                   } else {
-                    console.error(`[Dispatcher] Audio object not found in R2 for key: ${audioAsset.r2_key}`);
+                    console.error(
+                      `[Dispatcher] Audio object not found in R2 for key: ${audioAsset.r2_key}`
+                    );
                   }
                 } catch (r2Err) {
                   console.error("[Dispatcher] R2 audio asset retrieval error:", r2Err);
@@ -1229,25 +1369,37 @@ export async function executeDAGStream(
               }
             }
 
-            // 3. Fail-fast check: If node requires image, image MUST exist! Zero tolerance for missing assets!
-            const isImageNode = node.role.in_modalities.includes('image') || (node.selected_model.in_modalities?.includes('image') ?? node.selected_model.modalities.includes('image'));
+            // 3. Fail-fast check: if node requires image modality, valid image asset descriptor must be present
+            const isImageNode =
+              node.role.in_modalities.includes("image") ||
+              (node.selected_model.in_modalities?.includes("image") ??
+                node.selected_model.modalities.includes("image"));
             if (isImageNode && !imageB64 && !imageBytes) {
-              throw new Error(`工作流执行中断：岗位【${node.role.name_zh}】强依赖图像资产输入，但未能检索到图片实体（R2 Key: ${imageAsset?.r2_key || '未指定'}）。严禁越权降级或跳过执行。`);
+              throw new Error(
+                `工作流执行中断：岗位【${node.role.name_zh}】强依赖图像资产输入，但未能检索到图片实体（R2 Key: ${imageAsset?.r2_key || "未指定"}）。严禁越权降级或跳过执行。`
+              );
             }
 
-            // 3b. Fail-fast check: If node requires audio, audio MUST exist!
-            const isAudioNode = node.role.in_modalities.includes('audio') || (node.selected_model.in_modalities?.includes('audio') ?? node.selected_model.modalities.includes('audio'));
+            // 3b. Fail-fast check: if node requires audio modality, valid audio asset descriptor must be present
+            const isAudioNode =
+              node.role.in_modalities.includes("audio") ||
+              (node.selected_model.in_modalities?.includes("audio") ??
+                node.selected_model.modalities.includes("audio"));
             if (isAudioNode && !audioBytes) {
-              throw new Error(`工作流执行中断：岗位【${node.role.name_zh}】强依赖音频资产输入，但未能检索到音频实体（R2 Key: ${audioAsset?.r2_key || '未指定'}）。严禁越权降级或跳过执行。`);
+              throw new Error(
+                `工作流执行中断：岗位【${node.role.name_zh}】强依赖音频资产输入，但未能检索到音频实体（R2 Key: ${audioAsset?.r2_key || "未指定"}）。严禁越权降级或跳过执行。`
+              );
             }
 
-            // 4. Candidate Models: STRICTLY Top-1 Primary + Top-2/Top-3 Standby Models from Step 3 Arbitration!
-            // Mathematically pre-filtered by hardFilterModels and ranked by scoreAndRankRoleModels.
-            // ABSOLUTELY NO EXTERNAL ARBITRARY MODELS INJECTED!
+            // 4. Candidate Models: ordered pool composed of Primary model followed by Standby models.
+            // Pre-filtered by hardFilterModels and ranked deterministically by scoreAndRankRoleModels.
             const candidateModels: ModelMetadata[] = [
               node.selected_model,
               ...node.standby_models
-            ].filter((m, i, arr) => m && m.endpoint && arr.findIndex(x => x.model_id === m.model_id) === i);
+            ].filter(
+              (m, i, arr) =>
+                m && m.endpoint && arr.findIndex((x) => x.model_id === m.model_id) === i
+            );
 
             // 5. Execute candidate pool sequentially (Primary -> Standby Failover)
             let isExecutionSuccess = false;
@@ -1259,18 +1411,21 @@ export async function executeDAGStream(
               const currentCandidate = candidateModels[attemptIdx];
               const endpoint = currentCandidate.endpoint;
 
-              // [BUG-02 Symmetrical Heterogeneous Dynamic Handover]:
-              // If candidate is a client-side WebGPU model, dispatch via Dynamic Handover Protocol!
-              if (currentCandidate.inference_target === 'browser') {
+              // Dynamic client-side delegation protocol:
+              // If candidate is a client-side WebGPU model, dispatch via client delegation protocol
+              if (currentCandidate.inference_target === "browser") {
                 const supportsWebGPU = options.clientCapabilities?.webgpu_handover_v3 !== false;
                 if (!supportsWebGPU) {
-                  candidateErrors.push(`[${currentCandidate.display_name}]: 客户端未声明支持 WebGPU 端侧推理，跳过该备用模型`);
+                  candidateErrors.push(
+                    `[${currentCandidate.display_name}]: 客户端未声明支持 WebGPU 端侧推理，跳过该备用模型`
+                  );
                   continue;
                 }
 
                 // Symmetrical Failover Event
-                const previousCandidate = attemptIdx > 0 ? candidateModels[attemptIdx - 1] : node.selected_model;
-                sendEvent('node_failover', {
+                const previousCandidate =
+                  attemptIdx > 0 ? candidateModels[attemptIdx - 1] : node.selected_model;
+                sendEvent("node_failover", {
                   role_id: node.role.role_id,
                   role_name: node.role.name_zh,
                   failed_model: previousCandidate.display_name,
@@ -1330,33 +1485,39 @@ export async function executeDAGStream(
                       `INSERT INTO dag_handshakes 
                        (handshake_id, user_id, session_id, template_id, next_step, status, expires_at)
                        VALUES (?, ?, ?, ?, ?, 'ISSUED', ?)`
-                    ).bind(
-                      handshakeId,
-                      options.userId,
-                      envelope.session_id,
-                      dag.template.template_id,
-                      idx + 1,
-                      expiresAt
-                    ).run();
+                    )
+                      .bind(
+                        handshakeId,
+                        options.userId,
+                        envelope.session_id,
+                        dag.template.template_id,
+                        idx + 1,
+                        expiresAt
+                      )
+                      .run();
 
                     const arbitratedRoleModels: Record<string, string> = {};
-                    dag.nodes.forEach(n => {
+                    dag.nodes.forEach((n) => {
                       if (n.role?.role_id && n.selected_model?.model_id) {
                         arbitratedRoleModels[n.role.role_id] = n.selected_model.model_id;
                       }
                     });
 
-                    continuationToken = await signJWT({
-                      jti: handshakeId,
-                      sub: options.userId,
-                      sid: envelope.session_id,
-                      tid: dag.template.template_id,
-                      nxt: idx + 1,
-                      mids: arbitratedRoleModels
-                    }, env.JWT_SECRET, 300);
+                    continuationToken = await signJWT(
+                      {
+                        jti: handshakeId,
+                        sub: options.userId,
+                        sid: envelope.session_id,
+                        tid: dag.template.template_id,
+                        nxt: idx + 1,
+                        mids: arbitratedRoleModels
+                      },
+                      env.JWT_SECRET,
+                      300
+                    );
                   }
 
-                  sendEvent('client_exec_request', {
+                  sendEvent("client_exec_request", {
                     role_id: node.role.role_id,
                     role_name: node.role.name_zh,
                     role_name_en: node.role.name_en,
@@ -1369,7 +1530,7 @@ export async function executeDAGStream(
                     was_failover: true,
                     handshake_id: handshakeId,
                     continuation_token: continuationToken,
-                    claimed_assets: nodeCtx.claimed_assets.map(a => ({
+                    claimed_assets: nodeCtx.claimed_assets.map((a) => ({
                       asset_id: a.asset_id,
                       modality: a.modality,
                       mime_type: a.mime_type,
@@ -1379,7 +1540,7 @@ export async function executeDAGStream(
                     }))
                   });
 
-                  upstreamOutput = '';
+                  upstreamOutput = "";
                   actualExecutingModel = currentCandidate;
                   node.selected_model = currentCandidate;
                   isExecutionSuccess = true;
@@ -1426,32 +1587,38 @@ export async function executeDAGStream(
                     `INSERT INTO dag_handshakes 
                      (handshake_id, user_id, session_id, template_id, next_step, status, expires_at)
                      VALUES (?, ?, ?, ?, ?, 'ISSUED', ?)`
-                  ).bind(
-                    handshakeId,
-                    options.userId,
-                    envelope.session_id,
-                    dag.template.template_id,
-                    idx + 1,
-                    expiresAt
-                  ).run();
+                  )
+                    .bind(
+                      handshakeId,
+                      options.userId,
+                      envelope.session_id,
+                      dag.template.template_id,
+                      idx + 1,
+                      expiresAt
+                    )
+                    .run();
 
                   const arbitratedRoleModels: Record<string, string> = {};
-                  dag.nodes.forEach(n => {
+                  dag.nodes.forEach((n) => {
                     if (n.role?.role_id && n.selected_model?.model_id) {
                       arbitratedRoleModels[n.role.role_id] = n.selected_model.model_id;
                     }
                   });
 
-                  const continuationToken = await signJWT({
-                    jti: handshakeId,
-                    sub: options.userId,
-                    sid: envelope.session_id,
-                    tid: dag.template.template_id,
-                    nxt: idx + 1,
-                    mids: arbitratedRoleModels
-                  }, env.JWT_SECRET, 300);
+                  const continuationToken = await signJWT(
+                    {
+                      jti: handshakeId,
+                      sub: options.userId,
+                      sid: envelope.session_id,
+                      tid: dag.template.template_id,
+                      nxt: idx + 1,
+                      mids: arbitratedRoleModels
+                    },
+                    env.JWT_SECRET,
+                    300
+                  );
 
-                  sendEvent('dag_handover', {
+                  sendEvent("dag_handover", {
                     handshake_id: handshakeId,
                     continuation_token: continuationToken,
                     current_step: idx,
@@ -1467,7 +1634,7 @@ export async function executeDAGStream(
                     is_tail_node: false,
                     was_failover: true,
                     expires_in: 300,
-                    claimed_assets: nodeCtx.claimed_assets.map(a => ({
+                    claimed_assets: nodeCtx.claimed_assets.map((a) => ({
                       asset_id: a.asset_id,
                       modality: a.modality,
                       mime_type: a.mime_type,
@@ -1481,12 +1648,12 @@ export async function executeDAGStream(
                 }
               }
 
-              if (!env.AI && !endpoint.startsWith('http')) break;
+              if (!env.AI && !endpoint.startsWith("http")) break;
 
               // Transparent failover notice: notify frontend explicitly when falling back to Standby models
               if (attemptIdx > 0) {
                 const previousCandidate = candidateModels[attemptIdx - 1];
-                sendEvent('node_failover', {
+                sendEvent("node_failover", {
                   role_id: node.role.role_id,
                   role_name: node.role.name_zh,
                   failed_model: previousCandidate.display_name,
@@ -1501,16 +1668,19 @@ export async function executeDAGStream(
               }
 
               try {
-                // 1. Common Context Window Guard & Attention-Sink Linear Slice Compaction (BUG-02)
+                // 1. Context window guard & linear head-and-tail slice compaction
                 const candidateContextWindow = currentCandidate.context_window || 4096;
-                const { systemPrompt: guardedSysPrompt, promptContent: guardedPromptContent } = applyContextWindowGuard(
-                  systemPrompt,
-                  promptContent,
-                  candidateContextWindow,
-                  1024
-                );
+                const { systemPrompt: guardedSysPrompt, promptContent: guardedPromptContent } =
+                  applyContextWindowGuard(
+                    systemPrompt,
+                    promptContent,
+                    candidateContextWindow,
+                    1024
+                  );
 
-                const sanitizedUpstream = sanitizeLLMOutput(upstreamOutput || nodeCtx.upstream_text);
+                const sanitizedUpstream = sanitizeLLMOutput(
+                  upstreamOutput || nodeCtx.upstream_text
+                );
                 const compactedUpstream = applyAttentionSinkCompaction(
                   sanitizedUpstream,
                   Math.min(2000, Math.floor(candidateContextWindow * 1.5))
@@ -1522,30 +1692,37 @@ export async function executeDAGStream(
                   sanitizedIntermediateOutput: compactedUpstream,
                   currentTaskDirective: currentStepDirective,
                   flatPromptContent: guardedPromptContent,
-                  attachedDocsContent: attachedDocsSection || '',
+                  attachedDocsContent: attachedDocsSection || "",
                   imageB64: imageB64 || undefined,
-                  imageMimeType: imageAsset?.mime_type || 'image/jpeg'
+                  imageMimeType: imageAsset?.mime_type || "image/jpeg"
                 };
 
                 const builtMessages = buildDownstreamMessages(downstreamParts, currentCandidate);
 
-                if (endpoint.startsWith('http')) {
+                if (endpoint.startsWith("http")) {
                   if (!isSafeExternalUrl(endpoint)) {
-                    console.warn(`[Dispatcher Security] Blocked SSRF attempt to unsafe endpoint: ${endpoint}`);
-                    candidateErrors.push(`[${currentCandidate.display_name}]: 目标地址不安全或属于受保护的私有网络`);
+                    console.warn(
+                      `[Dispatcher Security] Blocked SSRF attempt to unsafe endpoint: ${endpoint}`
+                    );
+                    candidateErrors.push(
+                      `[${currentCandidate.display_name}]: 目标地址不安全或属于受保护的私有网络`
+                    );
                     continue;
                   }
 
                   // 2. Protocol Adapter: OpenAI Compatible vs Google AI Studio (Gemini)
-                  const apiFormat = currentCandidate.api_format || 'openai_compat';
+                  const apiFormat = currentCandidate.api_format || "openai_compat";
                   let targetUrl = endpoint;
                   let requestPayload: any;
 
-                  if (apiFormat === 'google_ai') {
+                  if (apiFormat === "google_ai") {
                     const isStream = isTailNode;
-                    if (!targetUrl.includes(':generateContent') && !targetUrl.includes(':streamGenerateContent')) {
-                      const baseUrl = targetUrl.replace(/\/+$/, '');
-                      const action = isStream ? 'streamGenerateContent?alt=sse' : 'generateContent';
+                    if (
+                      !targetUrl.includes(":generateContent") &&
+                      !targetUrl.includes(":streamGenerateContent")
+                    ) {
+                      const baseUrl = targetUrl.replace(/\/+$/, "");
+                      const action = isStream ? "streamGenerateContent?alt=sse" : "generateContent";
                       targetUrl = `${baseUrl}/${currentCandidate.model_id}:${action}`;
                     }
                     // Google AI Studio Key is passed securely via 'x-goog-api-key' HTTP header
@@ -1560,13 +1737,13 @@ export async function executeDAGStream(
                         maxOutputTokens: 2048
                       }
                     };
-                  } else if (currentCandidate.out_modalities?.includes('image')) {
-                    // BUG-04 Fix: OpenAI-compatible Images API payload format (e.g. /v1/images/generations)
+                  } else if (currentCandidate.out_modalities?.includes("image")) {
+                    // Format OpenAI-compatible Images API payload (e.g. /v1/images/generations)
                     requestPayload = {
                       model: currentCandidate.model_id || "dall-e-3",
                       prompt: promptContent,
-                      response_format: 'b64_json',
-                      size: '1024x1024'
+                      response_format: "b64_json",
+                      size: "1024x1024"
                     };
                   } else {
                     requestPayload = {
@@ -1579,160 +1756,178 @@ export async function executeDAGStream(
                   }
 
                   const payloadStr = JSON.stringify(requestPayload);
-                  const reqHeaders = await buildAuthHeaders(
-                    currentCandidate,
-                    env,
-                    payloadStr,
-                    {
-                      userId: options.userId,
-                      sessionId: envelope.session_id,
-                      envelopeId: envelope.envelope_id,
-                      roleId: node.role.role_id
-                    }
-                  );
+                  const reqHeaders = await buildAuthHeaders(currentCandidate, env, payloadStr, {
+                    userId: options.userId,
+                    sessionId: envelope.session_id,
+                    envelopeId: envelope.envelope_id,
+                    roleId: node.role.role_id
+                  });
 
-                  const parsed = await callWithTimeout(async (callSignal) => {
-                    const fRes = await fetch(targetUrl, {
-                      method: 'POST',
-                      headers: reqHeaders,
-                      body: payloadStr,
-                      signal: callSignal,
-                      redirect: 'manual'
-                    });
-
-                    // Defense-in-depth: Strictly block HTTP redirects to eliminate SSRF bypass
-                    if (fRes.status >= 300 && fRes.status < 400) {
-                      throw new Error(`[SECURITY_REJECTED] 算力终端禁止 HTTP 重定向 (Status ${fRes.status})`);
-                    }
-
-                    // Fail-fast on authentication/tampering violations (NEVER failover on security errors!)
-                    if (fRes.status === 401 || fRes.status === 403) {
-                      const errText = await fRes.text().catch(() => '');
-                      throw new Error(`[SECURITY_REJECTED] 算力网关鉴权拒绝 (HTTP ${fRes.status}): ${errText}`);
-                    }
-
-                    if (!fRes.ok) {
-                      const errText = await fRes.text().catch(() => '');
-                      throw new Error(`HTTP ${fRes.status}: ${errText || fRes.statusText}`);
-                    }
-
-                    const isMediaOut = currentCandidate.out_modalities?.some(m => m === 'image' || m === 'audio');
-                    if (isTailNode && fRes.body && !isMediaOut) {
-                      return await parseAIResponse(fRes.body, (chunkText) => {
-                        if (chunkText) {
-                          didStreamChunks = true;
-                          hasEmittedTokens = true;
-                          sendEvent('text_chunk', {
-                            role_id: node.role.role_id,
-                            chunk: chunkText,
-                            cache_hit: false
-                          });
-                        }
+                  const parsed = await callWithTimeout(
+                    async (callSignal) => {
+                      const fRes = await fetch(targetUrl, {
+                        method: "POST",
+                        headers: reqHeaders,
+                        body: payloadStr,
+                        signal: callSignal,
+                        redirect: "manual"
                       });
-                    } else {
-                      const jsonRes: any = await fRes.json().catch(() => ({}));
-                      if (currentCandidate.out_modalities?.includes('image')) {
-                        let b64Str = jsonRes.data?.[0]?.b64_json;
-                        let imgBuffer: ArrayBuffer | null = null;
-                        if (b64Str) {
-                          const binStr = atob(b64Str);
-                          const len = binStr.length;
-                          const u8 = new Uint8Array(len);
-                          for (let i = 0; i < len; i++) u8[i] = binStr.charCodeAt(i);
-                          imgBuffer = u8.buffer as ArrayBuffer;
-                        } else if (jsonRes.data?.[0]?.url) {
-                          const imageUrl = jsonRes.data[0].url;
-                          if (typeof imageUrl !== 'string' || !isSafeExternalUrl(imageUrl)) {
-                            throw new Error(`安全违规：拒绝访问未经授权或存在安全隐患的外部图片回源地址 (${imageUrl})`);
-                          }
-                          const fetched = await fetch(imageUrl, { redirect: 'manual' });
-                          if (fetched.status >= 300 && fetched.status < 400) {
-                            throw new Error(`安全违规：外部图片回源地址禁止 HTTP 重定向 (Status ${fetched.status})`);
-                          }
-                          if (!fetched.ok) {
-                            throw new Error(`外部图片拉取失败 (HTTP ${fetched.status})`);
-                          }
-                          const MAX_IMAGE_SIZE = 15 * 1024 * 1024;
-                          const contentLengthStr = fetched.headers.get('content-length');
-                          if (contentLengthStr && parseInt(contentLengthStr, 10) > MAX_IMAGE_SIZE) {
-                            throw new Error(`安全防御拦截：回源图片体积 (${contentLengthStr} bytes) 超过 15MB 安全上限`);
-                          }
-                          if (fetched.body) {
-                            const reader = fetched.body.getReader();
-                            const chunks: Uint8Array[] = [];
-                            let totalBytes = 0;
-                            while (true) {
-                              const { done, value } = await reader.read();
-                              if (done) break;
-                              if (value) {
-                                totalBytes += value.byteLength;
-                                if (totalBytes > MAX_IMAGE_SIZE) {
-                                  reader.cancel();
-                                  throw new Error(`安全防御拦截：回源图片数据流体积已超 15MB 阈值，强行熔断`);
-                                }
-                                chunks.push(value);
-                              }
-                            }
-                            const merged = new Uint8Array(totalBytes);
-                            let offset = 0;
-                            for (const c of chunks) {
-                              merged.set(c, offset);
-                              offset += c.byteLength;
-                            }
-                            imgBuffer = merged.buffer as ArrayBuffer;
-                          } else {
-                            const buf = await fetched.arrayBuffer();
-                            if (buf.byteLength > MAX_IMAGE_SIZE) {
-                              throw new Error(`安全防御拦截：回源图片体积超过 15MB 安全上限`);
-                            }
-                            imgBuffer = buf;
-                          }
-                        }
 
-                        if (imgBuffer && imgBuffer.byteLength > 0) {
-                          const generatedAssetId = crypto.randomUUID();
-                          const safeUserId = options.userId || envelope.user_id || 'anonymous';
-                          const cleanSessionId = (envelope.session_id || 'session').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
-                          const newAssetKey = `tmp/${safeUserId}/${cleanSessionId}/${generatedAssetId}.png`;
-                          if (env.R2) {
-                            await env.R2.put(newAssetKey, imgBuffer, {
-                              httpMetadata: { contentType: 'image/png' },
-                              customMetadata: {
-                                userId: safeUserId,
-                                sessionId: envelope.session_id,
-                                assetId: generatedAssetId,
-                                roleId: node.role.role_id
-                              }
+                      // Defense-in-depth: Strictly block HTTP redirects to eliminate SSRF bypass
+                      if (fRes.status >= 300 && fRes.status < 400) {
+                        throw new Error(
+                          `[SECURITY_REJECTED] 算力终端禁止 HTTP 重定向 (Status ${fRes.status})`
+                        );
+                      }
+
+                      // Fail-fast on authentication or tampering violations (do not failover on security errors)
+                      if (fRes.status === 401 || fRes.status === 403) {
+                        const errText = await fRes.text().catch(() => "");
+                        throw new Error(
+                          `[SECURITY_REJECTED] 算力网关鉴权拒绝 (HTTP ${fRes.status}): ${errText}`
+                        );
+                      }
+
+                      if (!fRes.ok) {
+                        const errText = await fRes.text().catch(() => "");
+                        throw new Error(`HTTP ${fRes.status}: ${errText || fRes.statusText}`);
+                      }
+
+                      const isMediaOut = currentCandidate.out_modalities?.some(
+                        (m) => m === "image" || m === "audio"
+                      );
+                      if (isTailNode && fRes.body && !isMediaOut) {
+                        return await parseAIResponse(fRes.body, (chunkText) => {
+                          if (chunkText) {
+                            didStreamChunks = true;
+                            hasEmittedTokens = true;
+                            sendEvent("text_chunk", {
+                              role_id: node.role.role_id,
+                              chunk: chunkText,
+                              cache_hit: false
                             });
                           }
+                        });
+                      } else {
+                        const jsonRes: any = await fRes.json().catch(() => ({}));
+                        if (currentCandidate.out_modalities?.includes("image")) {
+                          let b64Str = jsonRes.data?.[0]?.b64_json;
+                          let imgBuffer: ArrayBuffer | null = null;
+                          if (b64Str) {
+                            const binStr = atob(b64Str);
+                            const len = binStr.length;
+                            const u8 = new Uint8Array(len);
+                            for (let i = 0; i < len; i++) u8[i] = binStr.charCodeAt(i);
+                            imgBuffer = u8.buffer as ArrayBuffer;
+                          } else if (jsonRes.data?.[0]?.url) {
+                            const imageUrl = jsonRes.data[0].url;
+                            if (typeof imageUrl !== "string" || !isSafeExternalUrl(imageUrl)) {
+                              throw new Error(
+                                `安全违规：拒绝访问未经授权或存在安全隐患的外部图片回源地址 (${imageUrl})`
+                              );
+                            }
+                            const fetched = await fetch(imageUrl, { redirect: "manual" });
+                            if (fetched.status >= 300 && fetched.status < 400) {
+                              throw new Error(
+                                `安全违规：外部图片回源地址禁止 HTTP 重定向 (Status ${fetched.status})`
+                              );
+                            }
+                            if (!fetched.ok) {
+                              throw new Error(`外部图片拉取失败 (HTTP ${fetched.status})`);
+                            }
+                            const MAX_IMAGE_SIZE = 15 * 1024 * 1024;
+                            const contentLengthStr = fetched.headers.get("content-length");
+                            if (
+                              contentLengthStr &&
+                              parseInt(contentLengthStr, 10) > MAX_IMAGE_SIZE
+                            ) {
+                              throw new Error(
+                                `安全防御拦截：回源图片体积 (${contentLengthStr} bytes) 超过 15MB 安全上限`
+                              );
+                            }
+                            if (fetched.body) {
+                              const reader = fetched.body.getReader();
+                              const chunks: Uint8Array[] = [];
+                              let totalBytes = 0;
+                              while (true) {
+                                const { done, value } = await reader.read();
+                                if (done) break;
+                                if (value) {
+                                  totalBytes += value.byteLength;
+                                  if (totalBytes > MAX_IMAGE_SIZE) {
+                                    reader.cancel();
+                                    throw new Error(
+                                      `安全防御拦截：回源图片数据流体积已超 15MB 阈值，强行熔断`
+                                    );
+                                  }
+                                  chunks.push(value);
+                                }
+                              }
+                              const merged = new Uint8Array(totalBytes);
+                              let offset = 0;
+                              for (const c of chunks) {
+                                merged.set(c, offset);
+                                offset += c.byteLength;
+                              }
+                              imgBuffer = merged.buffer as ArrayBuffer;
+                            } else {
+                              const buf = await fetched.arrayBuffer();
+                              if (buf.byteLength > MAX_IMAGE_SIZE) {
+                                throw new Error(`安全防御拦截：回源图片体积超过 15MB 安全上限`);
+                              }
+                              imgBuffer = buf;
+                            }
+                          }
 
-                          const mediaArtifact: MediaArtifact = {
-                            asset_id: generatedAssetId,
-                            modality: 'image',
-                            mime_type: 'image/png',
-                            file_size: imgBuffer.byteLength,
-                            r2_key: newAssetKey,
-                            source_digest: `${generatedAssetId}-${imgBuffer.byteLength}`
-                          };
-                          currentBundle.generated_media.push(mediaArtifact);
+                          if (imgBuffer && imgBuffer.byteLength > 0) {
+                            const generatedAssetId = crypto.randomUUID();
+                            const safeUserId = options.userId || envelope.user_id || "anonymous";
+                            const cleanSessionId = (envelope.session_id || "session")
+                              .replace(/[^a-zA-Z0-9_-]/g, "_")
+                              .slice(0, 64);
+                            const newAssetKey = `tmp/${safeUserId}/${cleanSessionId}/${generatedAssetId}.png`;
+                            if (env.R2) {
+                              await env.R2.put(newAssetKey, imgBuffer, {
+                                httpMetadata: { contentType: "image/png" },
+                                customMetadata: {
+                                  userId: safeUserId,
+                                  sessionId: envelope.session_id,
+                                  assetId: generatedAssetId,
+                                  roleId: node.role.role_id
+                                }
+                              });
+                            }
 
-                          sendEvent('asset_chunk', {
-                            role_id: node.role.role_id,
-                            role_name: node.role.name_zh,
-                            asset_id: generatedAssetId,
-                            modality: 'image',
-                            mime_type: 'image/png',
-                            file_size: imgBuffer.byteLength,
-                            r2_key: newAssetKey,
-                            preview_url: `/api/assets/${generatedAssetId}?key=${encodeURIComponent(newAssetKey)}`
-                          });
+                            const mediaArtifact: MediaArtifact = {
+                              asset_id: generatedAssetId,
+                              modality: "image",
+                              mime_type: "image/png",
+                              file_size: imgBuffer.byteLength,
+                              r2_key: newAssetKey,
+                              source_digest: `${generatedAssetId}-${imgBuffer.byteLength}`
+                            };
+                            currentBundle.generated_media.push(mediaArtifact);
 
-                          return `[外部商业生图模型已存入账本: ${generatedAssetId}.png (体积: ${(imgBuffer.byteLength / 1024).toFixed(1)} KB)]\n提示词: ${promptContent}`;
+                            sendEvent("asset_chunk", {
+                              role_id: node.role.role_id,
+                              role_name: node.role.name_zh,
+                              asset_id: generatedAssetId,
+                              modality: "image",
+                              mime_type: "image/png",
+                              file_size: imgBuffer.byteLength,
+                              r2_key: newAssetKey,
+                              preview_url: `/api/assets/${generatedAssetId}?key=${encodeURIComponent(newAssetKey)}`
+                            });
+
+                            return `[外部商业生图模型已存入账本: ${generatedAssetId}.png (体积: ${(imgBuffer.byteLength / 1024).toFixed(1)} KB)]\n提示词: ${promptContent}`;
+                          }
                         }
+                        return await parseAIResponse(jsonRes);
                       }
-                      return await parseAIResponse(jsonRes);
-                    }
-                  }, 45000, abortController.signal);
+                    },
+                    45000,
+                    abortController.signal
+                  );
 
                   if (parsed && parsed.length > 5) {
                     nodeOutput = parsed;
@@ -1740,16 +1935,19 @@ export async function executeDAGStream(
                     isExecutionSuccess = true;
                     break;
                   } else {
-                    candidateErrors.push(`[${currentCandidate.display_name}]: 输出过短或空 (len=${parsed?.length || 0})`);
+                    candidateErrors.push(
+                      `[${currentCandidate.display_name}]: 输出过短或空 (len=${parsed?.length || 0})`
+                    );
                   }
-                } else if (endpoint.includes('moondream') && imageB64) {
+                } else if (endpoint.includes("moondream") && imageB64) {
                   // Moondream 3.1 Vision Language Model (MoE 9B/2B active)
                   const aiRes = await callWithTimeout(
-                    () => env.AI.run(endpoint as any, {
-                      task: 'query',
-                      prompt: promptContent,
-                      image: imageB64
-                    }),
+                    () =>
+                      env.AI.run(endpoint as any, {
+                        task: "query",
+                        prompt: promptContent,
+                        image: imageB64
+                      }),
                     35000,
                     abortController.signal
                   );
@@ -1760,16 +1958,19 @@ export async function executeDAGStream(
                     isExecutionSuccess = true;
                     break;
                   } else {
-                    candidateErrors.push(`[${currentCandidate.display_name}]: 解析输出过短或空 (len=${parsed?.length || 0})`);
+                    candidateErrors.push(
+                      `[${currentCandidate.display_name}]: 解析输出过短或空 (len=${parsed?.length || 0})`
+                    );
                   }
-                } else if (endpoint.includes('llava') && imageBytes) {
+                } else if (endpoint.includes("llava") && imageBytes) {
                   // LLaVA 1.5 7B Vision Model
                   const aiRes = await callWithTimeout(
-                    () => env.AI.run(endpoint as any, {
-                      prompt: promptContent,
-                      image: imageBytes,
-                      max_tokens: 512
-                    }),
+                    () =>
+                      env.AI.run(endpoint as any, {
+                        prompt: promptContent,
+                        image: imageBytes,
+                        max_tokens: 512
+                      }),
                     40000,
                     abortController.signal
                   );
@@ -1780,16 +1981,19 @@ export async function executeDAGStream(
                     isExecutionSuccess = true;
                     break;
                   } else {
-                    candidateErrors.push(`[${currentCandidate.display_name}]: 解析输出过短或空 (len=${parsed?.length || 0})`);
+                    candidateErrors.push(
+                      `[${currentCandidate.display_name}]: 解析输出过短或空 (len=${parsed?.length || 0})`
+                    );
                   }
                 } else if (isImageNode && imageBytes) {
                   // Other Workers AI Vision models (e.g. LLaMA Vision)
                   const aiRes = await callWithTimeout(
-                    () => env.AI.run(endpoint as any, {
-                      prompt: promptContent,
-                      image: imageBytes,
-                      max_tokens: 512
-                    }),
+                    () =>
+                      env.AI.run(endpoint as any, {
+                        prompt: promptContent,
+                        image: imageBytes,
+                        max_tokens: 512
+                      }),
                     40000,
                     abortController.signal
                   );
@@ -1800,51 +2004,66 @@ export async function executeDAGStream(
                     isExecutionSuccess = true;
                     break;
                   } else {
-                    candidateErrors.push(`[${currentCandidate.display_name}]: 解析输出过短或空 (len=${parsed?.length || 0})`);
+                    candidateErrors.push(
+                      `[${currentCandidate.display_name}]: 解析输出过短或空 (len=${parsed?.length || 0})`
+                    );
                   }
-                } else if ((endpoint.includes('whisper') || isAudioNode) && audioBytes) {
+                } else if ((endpoint.includes("whisper") || isAudioNode) && audioBytes) {
                   // Workers AI Whisper ASR Model
                   const aiRes: any = await callWithTimeout(
-                    () => env.AI.run(endpoint as any, {
-                      audio: audioBytes
-                    }),
+                    () =>
+                      env.AI.run(endpoint as any, {
+                        audio: audioBytes
+                      }),
                     45000,
                     abortController.signal
                   );
-                  const parsed = (aiRes && typeof aiRes.text === 'string') 
-                    ? sanitizeLLMOutput(aiRes.text) 
-                    : (await parseAIResponse(aiRes));
+                  const parsed =
+                    aiRes && typeof aiRes.text === "string"
+                      ? sanitizeLLMOutput(aiRes.text)
+                      : await parseAIResponse(aiRes);
                   if (parsed && parsed.length > 2) {
                     nodeOutput = parsed;
                     actualExecutingModel = currentCandidate;
                     isExecutionSuccess = true;
                     break;
                   } else {
-                    candidateErrors.push(`[${currentCandidate.display_name}]: 语音转写输出过短或为空`);
+                    candidateErrors.push(
+                      `[${currentCandidate.display_name}]: 语音转写输出过短或为空`
+                    );
                   }
-                } else if (endpoint.includes('flux') || currentCandidate.out_modalities?.includes('image')) {
+                } else if (
+                  endpoint.includes("flux") ||
+                  currentCandidate.out_modalities?.includes("image")
+                ) {
                   // Workers AI Flux Image Generation Model
                   const aiRes: any = await callWithTimeout(
-                    () => env.AI.run(endpoint as any, {
-                      prompt: promptContent,
-                      steps: 4
-                    }),
+                    () =>
+                      env.AI.run(endpoint as any, {
+                        prompt: promptContent,
+                        steps: 4
+                      }),
                     45000,
                     abortController.signal
                   );
                   if (aiRes) {
                     const generatedAssetId = crypto.randomUUID();
-                    const safeUserId = options.userId || envelope.user_id || 'anonymous';
-                    const cleanSessionId = (envelope.session_id || 'session').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+                    const safeUserId = options.userId || envelope.user_id || "anonymous";
+                    const cleanSessionId = (envelope.session_id || "session")
+                      .replace(/[^a-zA-Z0-9_-]/g, "_")
+                      .slice(0, 64);
                     const newAssetKey = `tmp/${safeUserId}/${cleanSessionId}/${generatedAssetId}.png`;
                     let imageBuffer: ArrayBuffer | null = null;
-                    if (aiRes instanceof ReadableStream || typeof aiRes.getReader === 'function') {
+                    if (aiRes instanceof ReadableStream || typeof aiRes.getReader === "function") {
                       const resp = new Response(aiRes);
                       imageBuffer = await resp.arrayBuffer();
                     } else if (aiRes instanceof ArrayBuffer) {
                       imageBuffer = aiRes;
                     } else if (aiRes instanceof Uint8Array) {
-                      imageBuffer = aiRes.buffer.slice(aiRes.byteOffset, aiRes.byteOffset + aiRes.byteLength) as ArrayBuffer;
+                      imageBuffer = aiRes.buffer.slice(
+                        aiRes.byteOffset,
+                        aiRes.byteOffset + aiRes.byteLength
+                      ) as ArrayBuffer;
                     } else if (aiRes.image) {
                       const binStr = atob(aiRes.image);
                       const len = binStr.length;
@@ -1859,7 +2078,7 @@ export async function executeDAGStream(
                     if (imageBuffer && imageBuffer.byteLength > 0) {
                       if (env.R2) {
                         await env.R2.put(newAssetKey, imageBuffer, {
-                          httpMetadata: { contentType: 'image/png' },
+                          httpMetadata: { contentType: "image/png" },
                           customMetadata: {
                             userId: safeUserId,
                             sessionId: envelope.session_id,
@@ -1871,8 +2090,8 @@ export async function executeDAGStream(
 
                       const mediaArtifact: MediaArtifact = {
                         asset_id: generatedAssetId,
-                        modality: 'image',
-                        mime_type: 'image/png',
+                        modality: "image",
+                        mime_type: "image/png",
                         file_size: imageBuffer.byteLength,
                         r2_key: newAssetKey,
                         source_digest: `${generatedAssetId}-${imageBuffer.byteLength}`
@@ -1880,12 +2099,12 @@ export async function executeDAGStream(
 
                       currentBundle.generated_media.push(mediaArtifact);
 
-                      sendEvent('asset_chunk', {
+                      sendEvent("asset_chunk", {
                         role_id: node.role.role_id,
                         role_name: node.role.name_zh,
                         asset_id: generatedAssetId,
-                        modality: 'image',
-                        mime_type: 'image/png',
+                        modality: "image",
+                        mime_type: "image/png",
                         file_size: imageBuffer.byteLength,
                         r2_key: newAssetKey,
                         preview_url: `/api/assets/${generatedAssetId}?key=${encodeURIComponent(newAssetKey)}`
@@ -1896,21 +2115,31 @@ export async function executeDAGStream(
                       isExecutionSuccess = true;
                       break;
                     } else {
-                      candidateErrors.push(`[${currentCandidate.display_name}]: 图像生成数据流为空 (byteLength=0)`);
+                      candidateErrors.push(
+                        `[${currentCandidate.display_name}]: 图像生成数据流为空 (byteLength=0)`
+                      );
                     }
                   } else {
-                    candidateErrors.push(`[${currentCandidate.display_name}]: 图像生成接口未返回有效数据`);
+                    candidateErrors.push(
+                      `[${currentCandidate.display_name}]: 图像生成接口未返回有效数据`
+                    );
                   }
-                } else if (!isImageNode && !isAudioNode && !currentCandidate.out_modalities?.includes('image') && endpoint.startsWith('@cf/')) {
+                } else if (
+                  !isImageNode &&
+                  !isAudioNode &&
+                  !currentCandidate.out_modalities?.includes("image") &&
+                  endpoint.startsWith("@cf/")
+                ) {
                   // Text Model Execution with token-by-token streaming on tail node (guarded against context window overflow)
-                  const timeoutMs = endpoint.includes('qwq') ? 45000 : 35000;
+                  const timeoutMs = endpoint.includes("qwq") ? 45000 : 35000;
                   const aiRes = await callWithTimeout(
-                    () => env.AI.run(endpoint as any, {
-                      messages: builtMessages.openaiMessages,
-                      stream: isTailNode,
-                      max_tokens: 2560,
-                      temperature: 0.2
-                    }),
+                    () =>
+                      env.AI.run(endpoint as any, {
+                        messages: builtMessages.openaiMessages,
+                        stream: isTailNode,
+                        max_tokens: 2560,
+                        temperature: 0.2
+                      }),
                     timeoutMs,
                     abortController.signal
                   );
@@ -1918,7 +2147,7 @@ export async function executeDAGStream(
                     if (isTailNode && chunkText) {
                       didStreamChunks = true;
                       hasEmittedTokens = true;
-                      sendEvent('text_chunk', {
+                      sendEvent("text_chunk", {
                         role_id: node.role.role_id,
                         chunk: chunkText,
                         cache_hit: false
@@ -1931,33 +2160,40 @@ export async function executeDAGStream(
                     isExecutionSuccess = true;
                     break;
                   } else {
-                    candidateErrors.push(`[${currentCandidate.display_name}]: 解析输出过短或空 (len=${parsed?.length || 0})`);
+                    candidateErrors.push(
+                      `[${currentCandidate.display_name}]: 解析输出过短或空 (len=${parsed?.length || 0})`
+                    );
                   }
                 }
               } catch (execErr: any) {
-                if (execErr.message?.includes('[SECURITY_REJECTED]')) {
+                if (execErr.message?.includes("[SECURITY_REJECTED]")) {
                   throw execErr;
                 }
                 candidateErrors.push(`[${currentCandidate.display_name}]: ${execErr.message}`);
-                console.warn(`Node [${node.role.name_zh}] candidate [${currentCandidate.display_name}] failed/timed out:`, execErr.message);
+                console.warn(
+                  `Node [${node.role.name_zh}] candidate [${currentCandidate.display_name}] failed/timed out:`,
+                  execErr.message
+                );
                 // Failover to next candidate in this role's arbitrated pool!
               }
             }
 
-            if (actualExecutingModel.inference_target === 'browser') {
+            if (actualExecutingModel.inference_target === "browser") {
               // Tail node browser execution was handed over to client; advance node loop
               continue;
             }
 
-            // 6. Fail-Fast: If all Top-3 models in this role's pool failed, ABORT! NO ARBITRARY FALLBACK!
+            // 6. Fail-fast: if all top candidate models in role pool failed, terminate without arbitrary fallback
             if (!isExecutionSuccess || !nodeOutput.trim()) {
-              throw new Error(`岗位【${node.role.name_zh}】的仲裁候选模型池（${candidateModels.map(m => m.display_name).join(', ')}）全部执行失败或超时。原因：${candidateErrors.join('；')}`);
+              throw new Error(
+                `岗位【${node.role.name_zh}】的仲裁候选模型池（${candidateModels.map((m) => m.display_name).join(", ")}）全部执行失败或超时。原因：${candidateErrors.join("；")}`
+              );
             }
 
             // Stream output chunk (only tail node or single-node outputs directly to final answer, if not already streamed)
             if (isTailNode && !didStreamChunks) {
               hasEmittedTokens = true;
-              sendEvent('text_chunk', {
+              sendEvent("text_chunk", {
                 role_id: node.role.role_id,
                 chunk: nodeOutput,
                 cache_hit: false
@@ -1967,21 +2203,23 @@ export async function executeDAGStream(
             // CACHE GATEKEEPER:
             // ONLY store in deterministic cache if execution actually succeeded and produced substantial content!
             // NEVER cache errors, exceptions, or fallback placeholders!
-            const isSuspiciousNoImage = nodeOutput.includes('Please provide the') || 
-                                        nodeOutput.includes("ready to assist you") || 
-                                        nodeOutput.includes("What's the task") ||
-                                        nodeOutput.startsWith('[执行未响应') ||
-                                        nodeOutput.startsWith('已基于输入完成');
+            const isSuspiciousNoImage =
+              nodeOutput.includes("Please provide the") ||
+              nodeOutput.includes("ready to assist you") ||
+              nodeOutput.includes("What's the task") ||
+              nodeOutput.startsWith("[执行未响应") ||
+              nodeOutput.startsWith("已基于输入完成");
 
             if (isExecutionSuccess && !isSuspiciousNoImage && nodeOutput.length > 20) {
-              const actualCacheKey = (actualExecutingModel.model_id === node.selected_model.model_id)
-                ? cacheKey
-                : await computeDeterministicSignature(
-                    node.role.role_id,
-                    actualExecutingModel.model_id,
-                    inputDigest,
-                    fullPrompt
-                  );
+              const actualCacheKey =
+                actualExecutingModel.model_id === node.selected_model.model_id
+                  ? cacheKey
+                  : await computeDeterministicSignature(
+                      node.role.role_id,
+                      actualExecutingModel.model_id,
+                      inputDigest,
+                      fullPrompt
+                    );
               await storeDeterministicCache(
                 env,
                 actualCacheKey,
@@ -1995,11 +2233,14 @@ export async function executeDAGStream(
 
             // Calculate cost (derived from actual executing model's cost + cost_per_invocation)
             const tokenCost = Math.max(0, Math.round(actualExecutingModel.cost_per_1k_tokens ?? 1));
-            const invocationCost = Math.max(0, Math.round(actualExecutingModel.cost_per_invocation ?? 0));
+            const invocationCost = Math.max(
+              0,
+              Math.round(actualExecutingModel.cost_per_invocation ?? 0)
+            );
             nodeCost = Math.max(1, tokenCost + invocationCost);
             totalCost += nodeCost;
 
-            sendEvent('node_complete', {
+            sendEvent("node_complete", {
               role_id: node.role.role_id,
               role_name: node.role.name_zh,
               role_name_en: node.role.name_en,
@@ -2093,39 +2334,42 @@ export async function executeDAGStream(
         }
 
         // 4. DAG Complete
-        sendEvent('dag_complete', {
+        sendEvent("dag_complete", {
           final_output: sanitizeLLMOutput(upstreamOutput),
           total_cost: totalCost,
           total_duration_ms: Date.now() - startTime,
-          has_client_exec: dag.nodes.some(n => n.selected_model.inference_target === 'browser')
+          has_client_exec: dag.nodes.some((n) => n.selected_model.inference_target === "browser")
         });
-
       } catch (err: any) {
-        if (isStreamCancelled || err.name === 'AbortError') {
+        if (isStreamCancelled || err.name === "AbortError") {
           // Client disconnected early, cancel() callback already triggered refund or ledger if eligible
           return;
         }
         // Unconditionally release pre-deducted reservation if DAG fails to deliver end-to-end (All-or-Nothing delivery)
         await refundReservedCredit();
-        sendEvent('dag_error', {
-          error: err.message || 'Execution error'
+        sendEvent("dag_error", {
+          error: err.message || "Execution error"
         });
       } finally {
         if (heartbeatTimer) clearInterval(heartbeatTimer);
-        try { controller.close(); } catch (e) {}
+        try {
+          controller.close();
+        } catch (e) {}
       }
     },
     async cancel(reason) {
       isStreamCancelled = true;
       if (heartbeatTimer) clearInterval(heartbeatTimer);
-      try { abortController.abort(); } catch (e) {}
+      try {
+        abortController.abort();
+      } catch (e) {}
       // If user aborted before any real tokens were generated, release pre-deducted reservation
       if (options.hasPreDeducted && !hasEmittedTokens) {
         options.hasPreDeducted = false;
         try {
-          await env.DB.prepare(
-            "UPDATE users SET credits = credits + 1 WHERE user_id = ?"
-          ).bind(options.userId).run();
+          await env.DB.prepare("UPDATE users SET credits = credits + 1 WHERE user_id = ?")
+            .bind(options.userId)
+            .run();
         } catch (refundErr) {
           console.error("[Dispatcher] Failed to refund reserved credit on cancel:", refundErr);
         }
@@ -2134,16 +2378,20 @@ export async function executeDAGStream(
         isLedgerSettled = true;
         try {
           const ledgerId = crypto.randomUUID();
-          await env.DB.prepare(`
+          await env.DB.prepare(
+            `
             INSERT INTO credit_ledger 
             (ledger_id, user_id, category, amount, balance, title, detail, created_at)
             VALUES (?, ?, 'compute_cost', -1, (SELECT credits FROM users WHERE user_id = ?), 'DAG智能编排调用', ?, datetime('now'))
-          `).bind(
-            ledgerId,
-            options.userId,
-            options.userId,
-            `中途断开连接算力保底扣费 (工序: ${dag.template.name_zh})`
-          ).run();
+          `
+          )
+            .bind(
+              ledgerId,
+              options.userId,
+              options.userId,
+              `中途断开连接算力保底扣费 (工序: ${dag.template.name_zh})`
+            )
+            .run();
         } catch (ledgerErr) {
           console.error("[Dispatcher] Failed to record credit ledger on cancel:", ledgerErr);
         }

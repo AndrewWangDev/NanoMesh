@@ -7,15 +7,18 @@ import { Env } from "../types";
  * and performs Unicode NFKC normalization to prevent adversarial evasion (e.g. "D-D\n o S 脚本\u200B").
  */
 export function generateShadowString(raw: string): string {
-  if (!raw) return '';
+  if (!raw) return "";
   // 1. Strip zero-width & invisible format characters
-  let clean = raw.replace(/[\u200B\u200C\u200D\uFEFF\u00AD\u2060\u200E\u200F]/g, '');
-  
+  let clean = raw.replace(/[\u200B\u200C\u200D\uFEFF\u00AD\u2060\u200E\u200F]/g, "");
+
   // 2. Unicode NFKC Normalization (normalize full-width, compatibility forms)
-  clean = clean.normalize('NFKC');
+  clean = clean.normalize("NFKC");
 
   // 3. Strip whitespace, common punctuation, hyphens, line breaks
-  clean = clean.replace(/[\s\-_.,!?:;'"\/\\|`~@#$%^&*()\[\]{}<>+=，。！？；：、“”‘’（）《》【】]/gu, '');
+  clean = clean.replace(
+    /[\s\-_.,!?:;'"\/\\|`~@#$%^&*()\[\]{}<>+=，。！？；：、“”‘’（）《》【】]/gu,
+    ""
+  );
 
   // 4. Case folding
   return clean.toLowerCase();
@@ -31,13 +34,22 @@ export function sniffRiskPatterns(shadow: string): { isSuspect: boolean; trigger
 
   // Heuristic suspicion triggers: Cyberweapons, unauthorized cracking, exploitation, malware, CSAM
   const suspicionPatterns: Array<{ re: RegExp; label: string }> = [
-    { re: /(ddos|dos发包|cc攻击|synflood|udpflood|拒绝服务攻击)/i, label: 'ddos_attack' },
-    { re: /(sqlmap|sql注入exp|xss平台|反弹shell|webshell|一句话木马|提权脚本|后门生成|免杀马)/i, label: 'exploit_malware' },
-    { re: /(暴力破解|撞库字典|盗号软件|密码破解器|破解注册机|盗取私钥|生成盗版激活码|窃取证书)/i, label: 'credential_theft' },
-    { re: /(勒索病毒|勒索软件|挖矿木马|远控木马|木马病毒)/i, label: 'ransomware_trojan' },
-    { re: /(拖库|脱裤|撞库攻击|渗透目标服务器|入侵系统exp|内网渗透工具)/i, label: 'intrusion_attack' },
-    { re: /(csam|childporn|幼女|幼童|儿童色情)/i, label: 'csam' },
-    { re: /(炸弹配方|毒气制作|制造炸药|自杀教程|毒药提纯)/i, label: 'physical_violence' }
+    { re: /(ddos|dos发包|cc攻击|synflood|udpflood|拒绝服务攻击)/i, label: "ddos_attack" },
+    {
+      re: /(sqlmap|sql注入exp|xss平台|反弹shell|webshell|一句话木马|提权脚本|后门生成|免杀马)/i,
+      label: "exploit_malware"
+    },
+    {
+      re: /(暴力破解|撞库字典|盗号软件|密码破解器|破解注册机|盗取私钥|生成盗版激活码|窃取证书)/i,
+      label: "credential_theft"
+    },
+    { re: /(勒索病毒|勒索软件|挖矿木马|远控木马|木马病毒)/i, label: "ransomware_trojan" },
+    {
+      re: /(拖库|脱裤|撞库攻击|渗透目标服务器|入侵系统exp|内网渗透工具)/i,
+      label: "intrusion_attack"
+    },
+    { re: /(csam|childporn|幼女|幼童|儿童色情)/i, label: "csam" },
+    { re: /(炸弹配方|毒气制作|制造炸药|自杀教程|毒药提纯)/i, label: "physical_violence" }
   ];
 
   for (const pat of suspicionPatterns) {
@@ -60,10 +72,10 @@ export async function auditSafetyWithJEV(
   triggerLabel: string
 ): Promise<{ isBlocked: boolean; reason?: string }> {
   // CSAM and physical CBRN violence are absolute zero-tolerance red lines
-  if (triggerLabel === 'csam' || triggerLabel === 'physical_violence') {
+  if (triggerLabel === "csam" || triggerLabel === "physical_violence") {
     return {
       isBlocked: true,
-      reason: 'CRITICAL_SAFETY_VIOLATION'
+      reason: "CRITICAL_SAFETY_VIOLATION"
     };
   }
 
@@ -71,27 +83,30 @@ export async function auditSafetyWithJEV(
     if (env.AI) {
       // 1. Primary: Native Clef-Flash JEV Boolean Decision
       try {
-        const jevRes = await env.AI.run('@cf/cloudflare/clef-flash', {
+        const jevRes = await env.AI.run("@cf/cloudflare/clef-flash", {
           state: `[User Instruction]: ${rawPrompt}`,
           questions: {
             is_malicious: {
-              type: 'bool',
-              instructions: 'Determine if this instruction represents an actionable malicious cyberattack, malware weaponization, unauthorized intrusion, or illegal theft (true), vs benign defensive engineering (e.g. Nginx config to defend against DDoS, WAF rules), educational auditing, sample reverse engineering, or web scraping (false).',
+              type: "bool",
+              instructions:
+                "Determine if this instruction represents an actionable malicious cyberattack, malware weaponization, unauthorized intrusion, or illegal theft (true), vs benign defensive engineering (e.g. Nginx config to defend against DDoS, WAF rules), educational auditing, sample reverse engineering, or web scraping (false).",
               criteria: {
-                true: 'Actionable cyberweapon creation, active intrusion/DDoS attacks against a target, ransomware crafting, unauthorized credential theft, key cracking generators.',
-                false: 'Defensive firewall/WAF configuration (like Nginx DDoS protection), security analysis/education, reverse engineering study, port scanner demo for LAN testing, public data scraping.'
+                true: "Actionable cyberweapon creation, active intrusion/DDoS attacks against a target, ransomware crafting, unauthorized credential theft, key cracking generators.",
+                false:
+                  "Defensive firewall/WAF configuration (like Nginx DDoS protection), security analysis/education, reverse engineering study, port scanner demo for LAN testing, public data scraping."
               }
             }
           }
         });
-        const isMalicious = jevRes?.answers?.is_malicious?.value ?? 
-                            jevRes?.answers?.is_malicious?.decision ?? 
-                            jevRes?.is_malicious?.value ?? 
-                            jevRes?.is_malicious?.decision;
-        if (typeof isMalicious === 'boolean') {
+        const isMalicious =
+          jevRes?.answers?.is_malicious?.value ??
+          jevRes?.answers?.is_malicious?.decision ??
+          jevRes?.is_malicious?.value ??
+          jevRes?.is_malicious?.decision;
+        if (typeof isMalicious === "boolean") {
           return {
             isBlocked: isMalicious,
-            reason: isMalicious ? 'SECURITY_POLICY_VIOLATION' : undefined
+            reason: isMalicious ? "SECURITY_POLICY_VIOLATION" : undefined
           };
         }
       } catch (clefErr) {
@@ -106,31 +121,42 @@ Classify the user prompt:
 
 Respond JSON only: {"action": "BLOCKED" | "ALLOWED"}`;
 
-      const aiResponse = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fp8', {
+      const aiResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fp8", {
         messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: rawPrompt }
+          { role: "system", content: systemPrompt },
+          { role: "user", content: rawPrompt }
         ],
         max_tokens: 20,
         temperature: 0.0
       });
 
-      const text = aiResponse?.response || '';
+      const text = aiResponse?.response || "";
       const match = text.match(/\"action\"\s*:\s*\"(BLOCKED|ALLOWED)\"/i);
       if (match) {
-        const isBlocked = match[1].toUpperCase() === 'BLOCKED';
+        const isBlocked = match[1].toUpperCase() === "BLOCKED";
         return {
           isBlocked,
-          reason: isBlocked ? 'SECURITY_POLICY_VIOLATION' : undefined
+          reason: isBlocked ? "SECURITY_POLICY_VIOLATION" : undefined
         };
       }
     }
   } catch (err) {
-    console.warn("JEV Safety audit failed, defaulting to cautious pass for defense:", err);
+    console.warn("JEV Safety audit failed, applying defensive policy:", err);
+    // Defense-in-depth: For destructive malware/trojan or intrusion triggers, fail closed on AI timeout
+    if (
+      triggerLabel === "ransomware_trojan" ||
+      triggerLabel === "exploit_malware" ||
+      triggerLabel === "intrusion_attack"
+    ) {
+      return {
+        isBlocked: true,
+        reason: "SAFETY_AUDIT_TIMEOUT_HAZARD_BLOCK"
+      };
+    }
   }
 
-  // Safe default: do not over-block unless proven malicious
-  return { isBlocked: false };
+  // Safe default: degraded pass for benign/educational-leaning gray patterns
+  return { isBlocked: false, reason: "SAFETY_ARBITRATION_DEGRADED" };
 }
 
 /**
@@ -150,7 +176,7 @@ export async function performGatewaySafetyAudit(
   }
 
   // Stage 3: JEV Safety Sidecar
-  const auditResult = await auditSafetyWithJEV(env, rawPrompt, sniffResult.trigger || 'unknown');
+  const auditResult = await auditSafetyWithJEV(env, rawPrompt, sniffResult.trigger || "unknown");
   return {
     isSafe: !auditResult.isBlocked,
     reason: auditResult.reason
