@@ -2,15 +2,27 @@ import { Env, User } from "../types";
 import { verifyTurnstile } from "../auth/turnstile";
 import { signJWT, verifyJWT } from "../auth/jwt";
 import { getSession } from "../auth/middleware";
-import { getGitHubAuthURL, getGoogleAuthURL, handleGitHubCallback as ghCallback, handleGoogleCallback as goCallback } from "../auth/oauth";
+import {
+  getGitHubAuthURL,
+  getGoogleAuthURL,
+  handleGitHubCallback as ghCallback,
+  handleGoogleCallback as goCallback
+} from "../auth/oauth";
 import { getPersistentSalt } from "./billing";
 import * as bcrypt from "bcryptjs";
 import { safeJsonBody } from "../lib/utils";
 
-export const VALID_EMAIL_DOMAINS = ["gmail.com", "outlook.com", "yahoo.com", "protonmail.com", "icloud.com", "hotmail.com"];
+export const VALID_EMAIL_DOMAINS = [
+  "gmail.com",
+  "outlook.com",
+  "yahoo.com",
+  "protonmail.com",
+  "icloud.com",
+  "hotmail.com"
+];
 
 export function isValidEmailDomain(email: unknown): boolean {
-  if (typeof email !== 'string' || !email.trim()) return false;
+  if (typeof email !== "string" || !email.trim()) return false;
   const parts = email.trim().split("@");
   if (parts.length !== 2) return false;
   if (!parts[0].trim() || !parts[1].trim()) return false;
@@ -22,7 +34,10 @@ const SESSION_TTL_SECONDS = 30 * 24 * 3600; // 30 days (2,592,000s)
 function setCookieHeaders(token: string | null): Headers {
   const headers = new Headers();
   if (token) {
-    headers.set("Set-Cookie", `session=${token}; HttpOnly; Path=/; Max-Age=${SESSION_TTL_SECONDS}; SameSite=Lax; Secure`);
+    headers.set(
+      "Set-Cookie",
+      `session=${token}; HttpOnly; Path=/; Max-Age=${SESSION_TTL_SECONDS}; SameSite=Lax; Secure`
+    );
   } else {
     headers.set("Set-Cookie", `session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax; Secure`);
   }
@@ -43,7 +58,10 @@ function generateReferralCode(): string {
 async function generateUniqueReferralCode(db: D1Database): Promise<string> {
   for (let attempt = 0; attempt < 5; attempt++) {
     const code = generateReferralCode();
-    const existing = await db.prepare("SELECT user_id FROM users WHERE referral_code = ?").bind(code).first();
+    const existing = await db
+      .prepare("SELECT user_id FROM users WHERE referral_code = ?")
+      .bind(code)
+      .first();
     if (!existing) return code;
   }
   return generateReferralCode();
@@ -59,18 +77,27 @@ function generateSecureVerificationCode(): string {
   return (100000 + (array[0] % max)).toString();
 }
 
-async function generateOAuthUsername(db: D1Database, rawName?: string, rawEmail?: string): Promise<string> {
-  let base = (rawName || rawEmail?.split('@')[0] || 'user')
-    .replace(/[^a-zA-Z0-9]/g, '')
+async function generateOAuthUsername(
+  db: D1Database,
+  rawName?: string,
+  rawEmail?: string
+): Promise<string> {
+  let base = (rawName || rawEmail?.split("@")[0] || "user")
+    .replace(/[^a-zA-Z0-9]/g, "")
     .toLowerCase()
     .substring(0, 12);
-  if (base.length < 3) base = 'user';
+  if (base.length < 3) base = "user";
 
   for (let i = 0; i < 5; i++) {
     const randBytes = crypto.getRandomValues(new Uint8Array(2));
-    const suffix = Array.from(randBytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    const suffix = Array.from(randBytes)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
     const candidate = `${base}_${suffix}`.substring(0, 20);
-    const exists = await db.prepare("SELECT user_id FROM users WHERE username = ?").bind(candidate).first();
+    const exists = await db
+      .prepare("SELECT user_id FROM users WHERE username = ?")
+      .bind(candidate)
+      .first();
     if (!exists) return candidate;
   }
   return `user_${crypto.randomUUID().substring(0, 8)}`;
@@ -79,35 +106,47 @@ async function generateOAuthUsername(db: D1Database, rawName?: string, rawEmail?
 export async function handleRegister(req: Request, env: Env) {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
   const body: any = await safeJsonBody(req);
-  
+
   let { username, email, password, code, turnstile_token, referral_code } = body;
-  if (typeof email === 'string') email = email.toLowerCase().trim();
-  
-  const clientIp = req.headers.get("CF-Connecting-IP") || req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null;
-  if (!await verifyTurnstile(turnstile_token, env.TURNSTILE_SECRET_KEY, clientIp)) {
+  if (typeof email === "string") email = email.toLowerCase().trim();
+
+  const clientIp =
+    req.headers.get("CF-Connecting-IP") ||
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    null;
+  if (!(await verifyTurnstile(turnstile_token, env.TURNSTILE_SECRET_KEY, clientIp))) {
     return Response.json({ error: "error.invalidCaptcha" }, { status: 400 });
   }
 
-  if (typeof email !== 'string' || !isValidEmailDomain(email)) {
+  if (typeof email !== "string" || !isValidEmailDomain(email)) {
     return Response.json({ error: "error.unsupportedEmailDomain" }, { status: 400 });
   }
-  
-  if (!username || typeof username !== 'string' || !/^[a-zA-Z0-9_-]{3,20}$/.test(username)) {
+
+  if (!username || typeof username !== "string" || !/^[a-zA-Z0-9_-]{3,20}$/.test(username)) {
     return Response.json({ error: "error.invalidUsernameFormat" }, { status: 400 });
   }
-  
-  if (!password || typeof password !== 'string' || password.length < 8 || password.length > 64 || !/[a-zA-Z]/.test(password) || !/[0-9]/.test(password)) {
+
+  if (
+    !password ||
+    typeof password !== "string" ||
+    password.length < 8 ||
+    password.length > 64 ||
+    !/[a-zA-Z]/.test(password) ||
+    !/[0-9]/.test(password)
+  ) {
     return Response.json({ error: "error.invalidPasswordFormat" }, { status: 400 });
   }
 
-  if (!code || typeof code !== 'string') {
+  if (!code || typeof code !== "string") {
     return Response.json({ error: "error.invalidCode" }, { status: 400 });
   }
 
   // Check code with anti-brute force tracking
   const activeCode = await env.DB.prepare(
     "SELECT id, code, attempts FROM verification_codes WHERE email = ? AND expires_at > datetime('now') ORDER BY id DESC LIMIT 1"
-  ).bind(email || '').first<{ id: number; code: string; attempts: number }>();
+  )
+    .bind(email || "")
+    .first<{ id: number; code: string; attempts: number }>();
 
   if (!activeCode) {
     return Response.json({ error: "error.invalidCode" }, { status: 400 });
@@ -119,31 +158,47 @@ export async function handleRegister(req: Request, env: Env) {
   }
 
   if (activeCode.code !== code) {
-    await env.DB.prepare("UPDATE verification_codes SET attempts = attempts + 1 WHERE id = ?").bind(activeCode.id).run();
+    await env.DB.prepare("UPDATE verification_codes SET attempts = attempts + 1 WHERE id = ?")
+      .bind(activeCode.id)
+      .run();
     return Response.json({ error: "error.invalidCode" }, { status: 400 });
   }
 
   // Check tombstone (90-day cooldown)
   const encoder = new TextEncoder();
   const emailData = encoder.encode(email + getPersistentSalt(env));
-  const emailHashBuffer = await crypto.subtle.digest('SHA-256', emailData);
-  const emailHash = Array.from(new Uint8Array(emailHashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
-  
-  const tombstone = await env.DB.prepare("SELECT expires_at FROM account_tombstones WHERE hash_id = ? AND expires_at > datetime('now')").bind(emailHash).first();
+  const emailHashBuffer = await crypto.subtle.digest("SHA-256", emailData);
+  const emailHash = Array.from(new Uint8Array(emailHashBuffer))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+
+  const tombstone = await env.DB.prepare(
+    "SELECT expires_at FROM account_tombstones WHERE hash_id = ? AND expires_at > datetime('now')"
+  )
+    .bind(emailHash)
+    .first();
   if (tombstone) {
     return Response.json({ error: "error.accountCooldown" }, { status: 403 });
   }
 
   // Check uniqueness (case-insensitive for email and username)
-  const existing = await env.DB.prepare("SELECT user_id FROM users WHERE LOWER(email) = LOWER(?) OR LOWER(username) = LOWER(?)").bind(email || '', username || '').first();
+  const existing = await env.DB.prepare(
+    "SELECT user_id FROM users WHERE LOWER(email) = LOWER(?) OR LOWER(username) = LOWER(?)"
+  )
+    .bind(email || "", username || "")
+    .first();
   if (existing) {
     return Response.json({ error: "error.userOrEmailExists" }, { status: 400 });
   }
 
   // Validate referral code if provided
   let referrerId: string | null = null;
-  if (referral_code && typeof referral_code === 'string' && referral_code.trim()) {
-    const referrer = await env.DB.prepare("SELECT user_id FROM users WHERE referral_code = ? AND email NOT LIKE 'deleted_%'").bind(referral_code.trim().toUpperCase()).first<{user_id: string}>();
+  if (referral_code && typeof referral_code === "string" && referral_code.trim()) {
+    const referrer = await env.DB.prepare(
+      "SELECT user_id FROM users WHERE referral_code = ? AND email NOT LIKE 'deleted_%'"
+    )
+      .bind(referral_code.trim().toUpperCase())
+      .first<{ user_id: string }>();
     if (!referrer) {
       return Response.json({ error: "error.invalidReferralCode" }, { status: 400 });
     }
@@ -156,68 +211,94 @@ export async function handleRegister(req: Request, env: Env) {
   const initialCredits = referrerId ? 150 : 100;
 
   const statements = [
-    env.DB.prepare(`
+    env.DB.prepare(
+      `
       INSERT INTO users (user_id, username, email, password_hash, credits, referral_code, referred_by) 
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).bind(userId, username || '', email || '', hash || '', initialCredits, newReferralCode, referrerId),
+    `
+    ).bind(
+      userId,
+      username || "",
+      email || "",
+      hash || "",
+      initialCredits,
+      newReferralCode,
+      referrerId
+    ),
 
     // Write signup bonus ledger entry (100)
-    env.DB.prepare(`
+    env.DB.prepare(
+      `
       INSERT INTO credit_ledger (ledger_id, user_id, category, amount, balance, title, detail)
       VALUES (?, ?, 'signup_bonus', 100, 100, 'Signup Bonus', 'Welcome credit pack')
-    `).bind(crypto.randomUUID(), userId)
+    `
+    ).bind(crypto.randomUUID(), userId)
   ];
 
   // If referred, reward both the new user (+50) and the referrer (+50) atomically
   if (referrerId) {
     statements.push(
       // 1. Reward the new user +50 (bringing balance to 150)
-      env.DB.prepare(`
+      env.DB.prepare(
+        `
         INSERT INTO credit_ledger (ledger_id, user_id, category, amount, balance, title, detail, related_id)
         VALUES (?, ?, 'referral_reward', 50, 150, 'Referral Bonus', 'Invited by friend', ?)
-      `).bind(crypto.randomUUID(), userId, referrerId),
+      `
+      ).bind(crypto.randomUUID(), userId, referrerId),
 
       // 2. Reward the referrer +50
       env.DB.prepare("UPDATE users SET credits = credits + 50 WHERE user_id = ?").bind(referrerId),
 
       // 3. Subquery ensures atomic snapshot of referrer credits without read-after-write race
-      env.DB.prepare(`
+      env.DB.prepare(
+        `
         INSERT INTO credit_ledger (ledger_id, user_id, category, amount, balance, title, detail, related_id)
         VALUES (?, ?, 'referral_reward', 50, (SELECT credits FROM users WHERE user_id = ?), 'Referral Reward', ?, ?)
-      `).bind(crypto.randomUUID(), referrerId, referrerId, username, userId)
+      `
+      ).bind(crypto.randomUUID(), referrerId, referrerId, username, userId)
     );
   }
 
-  statements.push(env.DB.prepare("DELETE FROM verification_codes WHERE id = ?").bind(activeCode.id));
+  statements.push(
+    env.DB.prepare("DELETE FROM verification_codes WHERE id = ?").bind(activeCode.id)
+  );
 
   await env.DB.batch(statements);
 
   const token = await signJWT({ userId, tokenVersion: 1 }, env.JWT_SECRET, SESSION_TTL_SECONDS);
-  
-  return new Response(JSON.stringify({ user_id: (userId || ''), username, email, credits: initialCredits }), {
-    headers: setCookieHeaders(token)
-  });
+
+  return new Response(
+    JSON.stringify({ user_id: userId || "", username, email, credits: initialCredits }),
+    {
+      headers: setCookieHeaders(token)
+    }
+  );
 }
 
 export async function handleLogin(req: Request, env: Env) {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
   const body: any = await safeJsonBody(req);
-  
+
   let { email, password, turnstile_token } = body;
-  if (typeof email === 'string') email = email.toLowerCase().trim();
-  
-  const clientIp = req.headers.get("CF-Connecting-IP") || req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null;
-  if (!await verifyTurnstile(turnstile_token, env.TURNSTILE_SECRET_KEY, clientIp)) {
+  if (typeof email === "string") email = email.toLowerCase().trim();
+
+  const clientIp =
+    req.headers.get("CF-Connecting-IP") ||
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    null;
+  if (!(await verifyTurnstile(turnstile_token, env.TURNSTILE_SECRET_KEY, clientIp))) {
     return Response.json({ error: "Invalid captcha" }, { status: 400 });
   }
 
-  if (typeof email !== 'string' || !email.trim() || typeof password !== 'string' || !password) {
+  if (typeof email !== "string" || !email.trim() || typeof password !== "string" || !password) {
     return Response.json({ error: "Invalid credentials" }, { status: 401 });
   }
 
-  const user = await env.DB.prepare("SELECT * FROM users WHERE LOWER(email) = ?").bind(email || '').first<User & { password_hash: string | null; token_version: number | null }>();
+  const user = await env.DB.prepare("SELECT * FROM users WHERE LOWER(email) = ?")
+    .bind(email || "")
+    .first<User & { password_hash: string | null; token_version: number | null }>();
   if (!user) return Response.json({ error: "Invalid credentials" }, { status: 401 });
-  
+
   if (!user.password_hash) {
     return Response.json({ error: "Please login with OAuth" }, { status: 401 });
   }
@@ -225,14 +306,21 @@ export async function handleLogin(req: Request, env: Env) {
   const valid = bcrypt.compareSync(password, user.password_hash);
   if (!valid) return Response.json({ error: "Invalid credentials" }, { status: 401 });
 
-  const token = await signJWT({ userId: user.user_id, tokenVersion: user.token_version || 1 }, env.JWT_SECRET, SESSION_TTL_SECONDS);
-  
-  return new Response(JSON.stringify({ 
-    user_id: user.user_id, 
-    username: user.username, 
-    email: user.email, 
-    credits: user.credits 
-  }), { headers: setCookieHeaders(token) });
+  const token = await signJWT(
+    { userId: user.user_id, tokenVersion: user.token_version || 1 },
+    env.JWT_SECRET,
+    SESSION_TTL_SECONDS
+  );
+
+  return new Response(
+    JSON.stringify({
+      user_id: user.user_id,
+      username: user.username,
+      email: user.email,
+      credits: user.credits
+    }),
+    { headers: setCookieHeaders(token) }
+  );
 }
 
 export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionContext) {
@@ -240,25 +328,44 @@ export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionCont
 
   // Opportunistic cleanup of expired verification codes (> 1 day old), stale IP rate limits (> 24h old), and stale passkey challenge CAS entries (> 10m old)
   const cleanupPromise = Promise.all([
-    env.DB.prepare("DELETE FROM verification_codes WHERE expires_at < datetime('now', '-1 day')").run().catch(() => {}),
-    env.DB.prepare("DELETE FROM system_counters WHERE (key LIKE 'ip_code_rate_20%' AND key < 'ip_code_rate_' || strftime('%Y-%m-%dT%H', 'now', '-24 hours')) OR (key LIKE 'ip_pwd_rate_20%' AND key < 'ip_pwd_rate_' || strftime('%Y-%m-%dT%H', 'now', '-24 hours'))").run().catch(() => {}),
-    env.DB.prepare("DELETE FROM system_counters WHERE key LIKE 'pk_used_%' AND value < strftime('%s', 'now', '-10 minutes')").run().catch(() => {})
+    env.DB.prepare("DELETE FROM verification_codes WHERE expires_at < datetime('now', '-1 day')")
+      .run()
+      .catch(() => {}),
+    env.DB.prepare(
+      "DELETE FROM system_counters WHERE (key LIKE 'ip_code_rate_20%' AND key < 'ip_code_rate_' || strftime('%Y-%m-%dT%H', 'now', '-24 hours')) OR (key LIKE 'ip_pwd_rate_20%' AND key < 'ip_pwd_rate_' || strftime('%Y-%m-%dT%H', 'now', '-24 hours'))"
+    )
+      .run()
+      .catch(() => {}),
+    env.DB.prepare(
+      "DELETE FROM system_counters WHERE key LIKE 'pk_used_%' AND value < strftime('%s', 'now', '-10 minutes')"
+    )
+      .run()
+      .catch(() => {})
   ]);
-  if (ctx && typeof ctx.waitUntil === 'function') {
+  if (ctx && typeof ctx.waitUntil === "function") {
     ctx.waitUntil(cleanupPromise);
   }
 
   const body: any = await safeJsonBody(req);
   let { email, turnstile_token, lang } = body;
-  
-  if (typeof email === 'string') email = email.toLowerCase().trim();
 
-  const clientIp = req.headers.get("CF-Connecting-IP") || req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
-  if (!await verifyTurnstile(turnstile_token, env.TURNSTILE_SECRET_KEY, clientIp !== "unknown" ? clientIp : null)) {
+  if (typeof email === "string") email = email.toLowerCase().trim();
+
+  const clientIp =
+    req.headers.get("CF-Connecting-IP") ||
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    "unknown";
+  if (
+    !(await verifyTurnstile(
+      turnstile_token,
+      env.TURNSTILE_SECRET_KEY,
+      clientIp !== "unknown" ? clientIp : null
+    ))
+  ) {
     return Response.json({ error: "error.invalidCaptcha" }, { status: 400 });
   }
 
-  if (typeof email !== 'string' || !isValidEmailDomain(email)) {
+  if (typeof email !== "string" || !isValidEmailDomain(email)) {
     return Response.json({ error: "error.unsupportedEmailDomain" }, { status: 400 });
   }
 
@@ -266,9 +373,9 @@ export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionCont
   const ipHourlyKey = `ip_code_rate_${currentHourStr}_${clientIp}`;
 
   if (clientIp !== "unknown") {
-    const ipCounter = await env.DB.prepare(
-      "SELECT value FROM system_counters WHERE key = ?"
-    ).bind(ipHourlyKey).first<{value: number}>();
+    const ipCounter = await env.DB.prepare("SELECT value FROM system_counters WHERE key = ?")
+      .bind(ipHourlyKey)
+      .first<{ value: number }>();
     if (ipCounter && ipCounter.value >= 5) {
       return Response.json({ error: "error.ipRateLimit" }, { status: 429 });
     }
@@ -277,34 +384,44 @@ export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionCont
   const todayStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
   const dailyKey = `emails_sent_${todayStr}`;
 
-  const counter = await env.DB.prepare(
-    "SELECT value FROM system_counters WHERE key = ?"
-  ).bind(dailyKey).first<{value: number}>();
+  const counter = await env.DB.prepare("SELECT value FROM system_counters WHERE key = ?")
+    .bind(dailyKey)
+    .first<{ value: number }>();
   if (counter && counter.value >= 500) {
     return Response.json({ error: "error.dailyEmailLimit" }, { status: 429 });
   }
 
-  const recent = await env.DB.prepare("SELECT id FROM verification_codes WHERE LOWER(email) = ? AND created_at > datetime('now', '-60 seconds')").bind(email || '').first();
+  const recent = await env.DB.prepare(
+    "SELECT id FROM verification_codes WHERE LOWER(email) = ? AND created_at > datetime('now', '-60 seconds')"
+  )
+    .bind(email || "")
+    .first();
   if (recent) {
     return Response.json({ error: "error.wait60s" }, { status: 429 });
   }
 
-  // NM-AUDIT-04: Anti-Account Enumeration Privacy-Preserving Check
-  // Check if email already belongs to an existing user or is in deletion cooldown
+  // Anti-account enumeration privacy preservation:
+  // Verify whether email already belongs to an active user or remains in deletion cooldown
   const existingUser = await env.DB.prepare(
     "SELECT user_id, email FROM users WHERE LOWER(email) = LOWER(?)"
-  ).bind(email).first<{ user_id: string; email: string }>();
+  )
+    .bind(email)
+    .first<{ user_id: string; email: string }>();
 
   let inCooldown = false;
   try {
     const persistentSalt = getPersistentSalt(env);
     const encoder = new TextEncoder();
     const emailData = encoder.encode(email + persistentSalt);
-    const emailHashBuffer = await crypto.subtle.digest('SHA-256', emailData);
-    const emailHash = Array.from(new Uint8Array(emailHashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+    const emailHashBuffer = await crypto.subtle.digest("SHA-256", emailData);
+    const emailHash = Array.from(new Uint8Array(emailHashBuffer))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
     const activeTombstone = await env.DB.prepare(
       "SELECT expires_at FROM account_tombstones WHERE hash_id = ? AND expires_at > datetime('now')"
-    ).bind(emailHash).first();
+    )
+      .bind(emailHash)
+      .first();
     if (activeTombstone) inCooldown = true;
   } catch (err) {
     // If salt check throws in production when not configured, fallback gracefully
@@ -314,23 +431,29 @@ export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionCont
     if (clientIp !== "unknown") {
       await env.DB.prepare(
         "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
-      ).bind(ipHourlyKey).run();
+      )
+        .bind(ipHourlyKey)
+        .run();
     }
     await env.DB.prepare(
       "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
-    ).bind(dailyKey).run();
+    )
+      .bind(dailyKey)
+      .run();
 
-    const isZh = lang === 'zh';
+    const isZh = lang === "zh";
     const noticeSubject = isZh ? "[NanoMesh] 账户注册提醒" : "[NanoMesh] Account Notice";
     const noticeGreeting = isZh ? "您好！" : "Hello!";
-    const noticeBody = isZh 
+    const noticeBody = isZh
       ? "我们收到了使用您邮箱注册 NanoMesh 的请求。但检测到该邮箱已注册或处于注销冷静期。如果您忘记密码，请前往登录页使用“找回密码”功能。如非您本人操作，请忽略此邮件。"
       : "We received a registration attempt for NanoMesh using your email address. However, this email is already registered or in deletion cooldown. If you forgot your password, please use 'Forgot Password' on the sign-in page. If this was not you, please ignore this email.";
-    const noticeFooter = isZh ? "&copy; 2026 NanoMesh 灵微络. 保留所有权利。" : "&copy; 2026 NanoMesh. All rights reserved.";
+    const noticeFooter = isZh
+      ? "&copy; 2026 NanoMesh 灵微络. 保留所有权利。"
+      : "&copy; 2026 NanoMesh. All rights reserved.";
 
     const noticeHtml = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
-        <h2 style="color: #00e5ff; margin-bottom: 24px; font-weight: normal;">NanoMesh ${isZh ? '灵微络' : ''}</h2>
+        <h2 style="color: #00e5ff; margin-bottom: 24px; font-weight: normal;">NanoMesh ${isZh ? "灵微络" : ""}</h2>
         <p style="font-size: 16px; margin-bottom: 16px;">${noticeGreeting}</p>
         <p style="font-size: 14px; color: #4b5563; line-height: 1.6; margin-bottom: 24px;">${noticeBody}</p>
         <hr style="border: none; border-top: 1px solid #e5e7eb; margin-bottom: 16px;">
@@ -341,7 +464,7 @@ export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionCont
     await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${env.RESEND_API_KEY}`,
+        Authorization: `Bearer ${env.RESEND_API_KEY}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
@@ -350,28 +473,38 @@ export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionCont
         subject: noticeSubject,
         html: noticeHtml
       })
-    }).catch(err => console.error("Failed to send notice email:", err));
+    }).catch((err) => console.error("Failed to send notice email:", err));
 
     return Response.json({ success: true, message: "Code sent" });
   }
 
   const code = generateSecureVerificationCode();
 
-  await env.DB.prepare(`
+  await env.DB.prepare(
+    `
     INSERT INTO verification_codes (email, code, expires_at) 
     VALUES (?, ?, datetime('now', '+10 minutes'))
-  `).bind(email || '', code || '').run();
+  `
+  )
+    .bind(email || "", code || "")
+    .run();
 
-  const isZh = lang === 'zh';
+  const isZh = lang === "zh";
   const subject = isZh ? "[NanoMesh] 您的注册验证码" : "[NanoMesh] Your Verification Code";
-  
-  const textGreeting = isZh ? "您好！感谢您注册 NanoMesh。" : "Hello! Thank you for registering for NanoMesh.";
-  const textHint = isZh ? "该验证码将在 10 分钟后过期。如果您未请求此验证码，请忽略此邮件。" : "This code will expire in 10 minutes. If you did not request this code, please ignore this email.";
-  const textFooter = isZh ? "&copy; 2026 NanoMesh 灵微络. 保留所有权利。" : "&copy; 2026 NanoMesh. All rights reserved.";
+
+  const textGreeting = isZh
+    ? "您好！感谢您注册 NanoMesh。"
+    : "Hello! Thank you for registering for NanoMesh.";
+  const textHint = isZh
+    ? "该验证码将在 10 分钟后过期。如果您未请求此验证码，请忽略此邮件。"
+    : "This code will expire in 10 minutes. If you did not request this code, please ignore this email.";
+  const textFooter = isZh
+    ? "&copy; 2026 NanoMesh 灵微络. 保留所有权利。"
+    : "&copy; 2026 NanoMesh. All rights reserved.";
 
   const htmlContent = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
-      <h2 style="color: #00e5ff; margin-bottom: 24px; font-weight: normal;">NanoMesh ${isZh ? '灵微络' : ''}</h2>
+      <h2 style="color: #00e5ff; margin-bottom: 24px; font-weight: normal;">NanoMesh ${isZh ? "灵微络" : ""}</h2>
       <p style="font-size: 16px; margin-bottom: 16px;">${textGreeting}</p>
       <div style="background-color: #f3f4f6; border-radius: 8px; padding: 24px; text-align: center; margin-bottom: 24px;">
         <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #111827;">${code}</span>
@@ -385,7 +518,7 @@ export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionCont
   const resendRes = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${env.RESEND_API_KEY}`,
+      Authorization: `Bearer ${env.RESEND_API_KEY}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
@@ -402,12 +535,16 @@ export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionCont
 
   await env.DB.prepare(
     "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
-  ).bind(dailyKey).run();
+  )
+    .bind(dailyKey)
+    .run();
 
   if (clientIp !== "unknown") {
     await env.DB.prepare(
       "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
-    ).bind(ipHourlyKey).run();
+    )
+      .bind(ipHourlyKey)
+      .run();
   }
 
   return Response.json({ success: true });
@@ -427,7 +564,11 @@ export async function handleMe(req: Request, env: Env) {
   const session = await getSession(req, env);
   if (!session) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
-  const user = await env.DB.prepare("SELECT user_id, username, email, credits, frozen_credits, avatar_url, avatar_updated_at, referral_code, password_hash IS NOT NULL as has_password FROM users WHERE user_id = ?").bind(session.userId || '').first();
+  const user = await env.DB.prepare(
+    "SELECT user_id, username, email, credits, frozen_credits, avatar_url, avatar_updated_at, referral_code, password_hash IS NOT NULL as has_password FROM users WHERE user_id = ?"
+  )
+    .bind(session.userId || "")
+    .first();
   if (!user) return Response.json({ error: "Not found" }, { status: 404 });
 
   return Response.json({ ...user, has_password: !!user.has_password });
@@ -437,7 +578,7 @@ export async function handleGitHubRedirect(req: Request, env: Env) {
   const urlObj = new URL(req.url);
   const action = urlObj.searchParams.get("action") || "login";
   let userId: string | undefined;
-  if (action === 'bind') {
+  if (action === "bind") {
     const session = await getSession(req, env);
     if (!session || !session.userId) {
       return Response.redirect(`${env.FRONTEND_URL}/login.html?error=unauthorized`);
@@ -452,7 +593,7 @@ export async function handleGoogleRedirect(req: Request, env: Env) {
   const urlObj = new URL(req.url);
   const action = urlObj.searchParams.get("action") || "login";
   let userId: string | undefined;
-  if (action === 'bind') {
+  if (action === "bind") {
     const session = await getSession(req, env);
     if (!session || !session.userId) {
       return Response.redirect(`${env.FRONTEND_URL}/login.html?error=unauthorized`);
@@ -463,19 +604,25 @@ export async function handleGoogleRedirect(req: Request, env: Env) {
   return Response.redirect(url, 302);
 }
 
-async function handleOAuthCallback(req: Request, env: Env, provider: 'github' | 'google', callbackFn: any) {
+async function handleOAuthCallback(
+  req: Request,
+  env: Env,
+  provider: "github" | "google",
+  callbackFn: any
+) {
   const url = new URL(req.url);
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
 
-  if (!code || !state) return Response.redirect(`${env.FRONTEND_URL}/login.html?error=missing_params`);
+  if (!code || !state)
+    return Response.redirect(`${env.FRONTEND_URL}/login.html?error=missing_params`);
 
   const payload = await verifyJWT(state, env.JWT_SECRET);
   if (!payload || !payload.nonce) {
     return Response.redirect(`${env.FRONTEND_URL}/login.html?error=invalid_state`);
   }
 
-  const isBindAction = payload.action === 'bind';
+  const isBindAction = payload.action === "bind";
 
   try {
     const profile = await callbackFn(code, state, env);
@@ -487,20 +634,32 @@ async function handleOAuthCallback(req: Request, env: Env, provider: 'github' | 
     const encoder = new TextEncoder();
     const persistentSalt = getPersistentSalt(env);
     const oauthData = encoder.encode(`${provider}:${profile.id}` + persistentSalt);
-    const oauthHashBuffer = await crypto.subtle.digest('SHA-256', oauthData);
-    const oauthHash = Array.from(new Uint8Array(oauthHashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
-    
-    const tombstone = await env.DB.prepare("SELECT expires_at FROM account_tombstones WHERE hash_id = ? AND expires_at > datetime('now')").bind(oauthHash || '').first();
+    const oauthHashBuffer = await crypto.subtle.digest("SHA-256", oauthData);
+    const oauthHash = Array.from(new Uint8Array(oauthHashBuffer))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+    const tombstone = await env.DB.prepare(
+      "SELECT expires_at FROM account_tombstones WHERE hash_id = ? AND expires_at > datetime('now')"
+    )
+      .bind(oauthHash || "")
+      .first();
     if (tombstone) {
       return Response.redirect(`${env.FRONTEND_URL}/login.html?error=account_cooldown`);
     }
 
-    // Check tombstone for profile email (NM-SEC-02)
-    if (profile.email && typeof profile.email === 'string') {
+    // Check tombstone cooldown for profile email
+    if (profile.email && typeof profile.email === "string") {
       const emailData = encoder.encode(profile.email.toLowerCase().trim() + persistentSalt);
-      const emailHashBuffer = await crypto.subtle.digest('SHA-256', emailData);
-      const emailHash = Array.from(new Uint8Array(emailHashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
-      const emailTombstone = await env.DB.prepare("SELECT expires_at FROM account_tombstones WHERE hash_id = ? AND expires_at > datetime('now')").bind(emailHash).first();
+      const emailHashBuffer = await crypto.subtle.digest("SHA-256", emailData);
+      const emailHash = Array.from(new Uint8Array(emailHashBuffer))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+      const emailTombstone = await env.DB.prepare(
+        "SELECT expires_at FROM account_tombstones WHERE hash_id = ? AND expires_at > datetime('now')"
+      )
+        .bind(emailHash)
+        .first();
       if (emailTombstone) {
         return Response.redirect(`${env.FRONTEND_URL}/login.html?error=account_cooldown`);
       }
@@ -508,12 +667,14 @@ async function handleOAuthCallback(req: Request, env: Env, provider: 'github' | 
 
     let activeUser = null;
     if (session && session.userId) {
-      activeUser = await env.DB.prepare("SELECT user_id, avatar_url FROM users WHERE user_id = ?").bind(session.userId).first<any>();
+      activeUser = await env.DB.prepare("SELECT user_id, avatar_url FROM users WHERE user_id = ?")
+        .bind(session.userId)
+        .first<any>();
     }
 
     if (isBindAction) {
-      // NM-SEC-01: CSRF & Session Hijack Prevention
-      // State MUST contain payload.userId and MUST match the current session's userId
+      // CSRF and session hijacking prevention:
+      // State payload must contain a valid userId that matches the authenticated session
       if (!payload.userId || !session || !session.userId || payload.userId !== session.userId) {
         return Response.redirect(`${env.FRONTEND_URL}/settings.html?error=bind_csrf_rejected`);
       }
@@ -524,76 +685,129 @@ async function handleOAuthCallback(req: Request, env: Env, provider: 'github' | 
 
       // Track 2: User explicitly clicked "Bind" from Settings while logged in
       userId = activeUser.user_id;
-      await env.DB.prepare("INSERT OR IGNORE INTO user_oauth_bindings (user_id, provider, provider_id) VALUES (?, ?, ?)")
-        .bind(userId || '', provider, String(profile.id || '')).run();
-      
+      await env.DB.prepare(
+        "INSERT OR IGNORE INTO user_oauth_bindings (user_id, provider, provider_id) VALUES (?, ?, ?)"
+      )
+        .bind(userId || "", provider, String(profile.id || ""))
+        .run();
+
       if (avatarToSet && !activeUser.avatar_url) {
-        await env.DB.prepare("UPDATE users SET avatar_url = ? WHERE user_id = ?").bind(avatarToSet, userId).run();
+        await env.DB.prepare("UPDATE users SET avatar_url = ? WHERE user_id = ?")
+          .bind(avatarToSet, userId)
+          .run();
       }
     } else {
       // Track 1: Login / Register
-      let binding = await env.DB.prepare("SELECT user_id FROM user_oauth_bindings WHERE provider = ? AND provider_id = ?").bind(provider, String(profile.id || '')).first<any>();
+      let binding = await env.DB.prepare(
+        "SELECT user_id FROM user_oauth_bindings WHERE provider = ? AND provider_id = ?"
+      )
+        .bind(provider, String(profile.id || ""))
+        .first<any>();
 
       if (binding) {
         userId = binding.user_id;
         if (avatarToSet) {
-          const existing = await env.DB.prepare("SELECT avatar_url FROM users WHERE user_id = ?").bind(userId || '').first<any>();
+          const existing = await env.DB.prepare("SELECT avatar_url FROM users WHERE user_id = ?")
+            .bind(userId || "")
+            .first<any>();
           if (!existing?.avatar_url) {
-            await env.DB.prepare("UPDATE users SET avatar_url = ? WHERE user_id = ?").bind(avatarToSet, (userId || '')).run();
+            await env.DB.prepare("UPDATE users SET avatar_url = ? WHERE user_id = ?")
+              .bind(avatarToSet, userId || "")
+              .run();
           }
         }
       } else {
         // Check if email already registered
-      const existingUser = await env.DB.prepare("SELECT user_id, avatar_url FROM users WHERE LOWER(email) = ?").bind((profile.email || "").toLowerCase()).first<any>();
-      if (existingUser) {
-        userId = existingUser.user_id;
-        if (avatarToSet && !existingUser.avatar_url) {
-          await env.DB.prepare("UPDATE users SET avatar_url = ? WHERE user_id = ?").bind(avatarToSet, (userId || '')).run();
-        }
-        // Bind to existing user
-        await env.DB.prepare("INSERT OR IGNORE INTO user_oauth_bindings (user_id, provider, provider_id) VALUES (?, ?, ?)").bind(userId || '', provider, String(profile.id || '')).run();
-      } else {
-        userId = crypto.randomUUID();
-        const oauthReferralCode = await generateUniqueReferralCode(env.DB);
-        const safeUsername = await generateOAuthUsername(env.DB, profile.username || profile.name, profile.email);
-        // Insert new user
-        await env.DB.prepare(`
+        const existingUser = await env.DB.prepare(
+          "SELECT user_id, avatar_url FROM users WHERE LOWER(email) = ?"
+        )
+          .bind((profile.email || "").toLowerCase())
+          .first<any>();
+        if (existingUser) {
+          userId = existingUser.user_id;
+          if (avatarToSet && !existingUser.avatar_url) {
+            await env.DB.prepare("UPDATE users SET avatar_url = ? WHERE user_id = ?")
+              .bind(avatarToSet, userId || "")
+              .run();
+          }
+          // Bind to existing user
+          await env.DB.prepare(
+            "INSERT OR IGNORE INTO user_oauth_bindings (user_id, provider, provider_id) VALUES (?, ?, ?)"
+          )
+            .bind(userId || "", provider, String(profile.id || ""))
+            .run();
+        } else {
+          userId = crypto.randomUUID();
+          const oauthReferralCode = await generateUniqueReferralCode(env.DB);
+          const safeUsername = await generateOAuthUsername(
+            env.DB,
+            profile.username || profile.name,
+            profile.email
+          );
+          // Insert new user
+          await env.DB.prepare(
+            `
           INSERT INTO users (user_id, username, email, avatar_url, credits, referral_code)
           VALUES (?, ?, ?, ?, 100, ?)
-        `).bind(userId || '', safeUsername, (profile.email || "").toLowerCase(), avatarToSet, oauthReferralCode).run();
-        // Write signup bonus ledger
-        await env.DB.prepare(`
+        `
+          )
+            .bind(
+              userId || "",
+              safeUsername,
+              (profile.email || "").toLowerCase(),
+              avatarToSet,
+              oauthReferralCode
+            )
+            .run();
+          // Write signup bonus ledger
+          await env.DB.prepare(
+            `
           INSERT INTO credit_ledger (ledger_id, user_id, category, amount, balance, title, detail)
           VALUES (?, ?, 'signup_bonus', 100, 100, 'Signup Bonus', 'Welcome credit pack')
-        `).bind(crypto.randomUUID(), (userId || '')).run();
-        // Bind new user
-        await env.DB.prepare("INSERT INTO user_oauth_bindings (user_id, provider, provider_id) VALUES (?, ?, ?)").bind(userId || '', provider, String(profile.id || '')).run();
+        `
+          )
+            .bind(crypto.randomUUID(), userId || "")
+            .run();
+          // Bind new user
+          await env.DB.prepare(
+            "INSERT INTO user_oauth_bindings (user_id, provider, provider_id) VALUES (?, ?, ?)"
+          )
+            .bind(userId || "", provider, String(profile.id || ""))
+            .run();
+        }
       }
     }
-  }
 
-    const dbUser = await env.DB.prepare("SELECT token_version FROM users WHERE user_id = ?").bind(userId).first<{token_version: number | null}>();
-    const token = await signJWT({ userId, tokenVersion: dbUser?.token_version || 1 }, env.JWT_SECRET, SESSION_TTL_SECONDS);
+    const dbUser = await env.DB.prepare("SELECT token_version FROM users WHERE user_id = ?")
+      .bind(userId)
+      .first<{ token_version: number | null }>();
+    const token = await signJWT(
+      { userId, tokenVersion: dbUser?.token_version || 1 },
+      env.JWT_SECRET,
+      SESSION_TTL_SECONDS
+    );
     // Cannot use Response.redirect() — it returns an immutable response.
     // Must manually construct response with Location + Set-Cookie.
     return new Response(null, {
       status: 302,
       headers: {
-        "Location": `${env.FRONTEND_URL}/`,
-        "Set-Cookie": `session=${token}; HttpOnly; Path=/; Max-Age=${SESSION_TTL_SECONDS}; SameSite=Lax; Secure`,
-      },
+        Location: `${env.FRONTEND_URL}/`,
+        "Set-Cookie": `session=${token}; HttpOnly; Path=/; Max-Age=${SESSION_TTL_SECONDS}; SameSite=Lax; Secure`
+      }
     });
   } catch (e: any) {
-    return Response.redirect(`${env.FRONTEND_URL}/login.html?error=${encodeURIComponent(e.message)}`);
+    return Response.redirect(
+      `${env.FRONTEND_URL}/login.html?error=${encodeURIComponent(e.message)}`
+    );
   }
 }
 
 export async function handleGitHubCallback(req: Request, env: Env) {
-  return handleOAuthCallback(req, env, 'github', ghCallback);
+  return handleOAuthCallback(req, env, "github", ghCallback);
 }
 
 export async function handleGoogleCallback(req: Request, env: Env) {
-  return handleOAuthCallback(req, env, 'google', goCallback);
+  return handleOAuthCallback(req, env, "google", goCallback);
 }
 
 export async function handleGetBindings(req: Request, env: Env) {
@@ -603,8 +817,12 @@ export async function handleGetBindings(req: Request, env: Env) {
   const session = await getSession(req, env);
   if (!session) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
-  const bindings = await env.DB.prepare("SELECT provider FROM user_oauth_bindings WHERE user_id = ?").bind(session.userId || '').all();
-  return Response.json({ bindings: bindings.results.map(r => r.provider) });
+  const bindings = await env.DB.prepare(
+    "SELECT provider FROM user_oauth_bindings WHERE user_id = ?"
+  )
+    .bind(session.userId || "")
+    .all();
+  return Response.json({ bindings: bindings.results.map((r) => r.provider) });
 }
 
 export async function handleUnbindOAuth(req: Request, env: Env, provider: string) {
@@ -612,45 +830,79 @@ export async function handleUnbindOAuth(req: Request, env: Env, provider: string
   if (!session) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
   // Safety check: don't allow unbinding if they have no password, no other OAuth, and no passkeys
-  const user = await env.DB.prepare("SELECT password_hash FROM users WHERE user_id = ?").bind(session.userId || '').first<any>();
-  const bindings = await env.DB.prepare("SELECT provider FROM user_oauth_bindings WHERE user_id = ?").bind(session.userId || '').all();
-  const passkeyCount = await env.DB.prepare("SELECT COUNT(*) as cnt FROM user_passkeys WHERE user_id = ?").bind(session.userId || '').first<{ cnt: number }>();
+  const user = await env.DB.prepare("SELECT password_hash FROM users WHERE user_id = ?")
+    .bind(session.userId || "")
+    .first<any>();
+  const bindings = await env.DB.prepare(
+    "SELECT provider FROM user_oauth_bindings WHERE user_id = ?"
+  )
+    .bind(session.userId || "")
+    .all();
+  const passkeyCount = await env.DB.prepare(
+    "SELECT COUNT(*) as cnt FROM user_passkeys WHERE user_id = ?"
+  )
+    .bind(session.userId || "")
+    .first<{ cnt: number }>();
 
   const hasPassword = !!(user && user.password_hash);
   const hasMultipleOAuth = !!(bindings.results && bindings.results.length > 1);
   const hasPasskey = (passkeyCount?.cnt ?? 0) > 0;
 
   if (!hasPassword && !hasMultipleOAuth && !hasPasskey) {
-    return Response.json({ error: "Cannot unbind last login method without a password or passkey." }, { status: 400 });
+    return Response.json(
+      { error: "Cannot unbind last login method without a password or passkey." },
+      { status: 400 }
+    );
   }
 
-  await env.DB.prepare("DELETE FROM user_oauth_bindings WHERE user_id = ? AND provider = ?").bind(session.userId, provider).run();
-  
+  await env.DB.prepare("DELETE FROM user_oauth_bindings WHERE user_id = ? AND provider = ?")
+    .bind(session.userId, provider)
+    .run();
+
   return Response.json({ success: true });
 }
 
-export async function handleForgotPassword(req: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
+export async function handleForgotPassword(
+  req: Request,
+  env: Env,
+  ctx?: ExecutionContext
+): Promise<Response> {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
 
   // Opportunistic cleanup of expired verification codes (> 1 day old) and stale IP rate limits (> 24h old)
   const cleanupPromise = Promise.all([
-    env.DB.prepare("DELETE FROM verification_codes WHERE expires_at < datetime('now', '-1 day')").run().catch(() => {}),
-    env.DB.prepare("DELETE FROM system_counters WHERE (key LIKE 'ip_code_rate_20%' AND key < 'ip_code_rate_' || strftime('%Y-%m-%dT%H', 'now', '-24 hours')) OR (key LIKE 'ip_pwd_rate_20%' AND key < 'ip_pwd_rate_' || strftime('%Y-%m-%dT%H', 'now', '-24 hours'))").run().catch(() => {})
+    env.DB.prepare("DELETE FROM verification_codes WHERE expires_at < datetime('now', '-1 day')")
+      .run()
+      .catch(() => {}),
+    env.DB.prepare(
+      "DELETE FROM system_counters WHERE (key LIKE 'ip_code_rate_20%' AND key < 'ip_code_rate_' || strftime('%Y-%m-%dT%H', 'now', '-24 hours')) OR (key LIKE 'ip_pwd_rate_20%' AND key < 'ip_pwd_rate_' || strftime('%Y-%m-%dT%H', 'now', '-24 hours'))"
+    )
+      .run()
+      .catch(() => {})
   ]);
-  if (ctx && typeof ctx.waitUntil === 'function') {
+  if (ctx && typeof ctx.waitUntil === "function") {
     ctx.waitUntil(cleanupPromise);
   }
 
   const body: any = await safeJsonBody(req);
   let { email, turnstile_token, lang } = body;
-  if (typeof email === 'string') email = email.toLowerCase().trim();
+  if (typeof email === "string") email = email.toLowerCase().trim();
 
-  const clientIp = req.headers.get("CF-Connecting-IP") || req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
-  if (!await verifyTurnstile(turnstile_token, env.TURNSTILE_SECRET_KEY, clientIp !== "unknown" ? clientIp : null)) {
+  const clientIp =
+    req.headers.get("CF-Connecting-IP") ||
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    "unknown";
+  if (
+    !(await verifyTurnstile(
+      turnstile_token,
+      env.TURNSTILE_SECRET_KEY,
+      clientIp !== "unknown" ? clientIp : null
+    ))
+  ) {
     return Response.json({ error: "error.invalidCaptcha" }, { status: 400 });
   }
 
-  if (typeof email !== 'string' || !isValidEmailDomain(email)) {
+  if (typeof email !== "string" || !isValidEmailDomain(email)) {
     return Response.json({ error: "error.unsupportedEmailDomain" }, { status: 400 });
   }
 
@@ -658,9 +910,9 @@ export async function handleForgotPassword(req: Request, env: Env, ctx?: Executi
   const currentHourStr = new Date().toISOString().slice(0, 13);
   const ipHourlyKey = `ip_pwd_rate_${currentHourStr}_${clientIp}`;
   if (clientIp !== "unknown") {
-    const ipCounter = await env.DB.prepare(
-      "SELECT value FROM system_counters WHERE key = ?"
-    ).bind(ipHourlyKey).first<{value: number}>();
+    const ipCounter = await env.DB.prepare("SELECT value FROM system_counters WHERE key = ?")
+      .bind(ipHourlyKey)
+      .first<{ value: number }>();
     if (ipCounter && ipCounter.value >= 5) {
       return Response.json({ error: "error.ipRateLimit" }, { status: 429 });
     }
@@ -669,7 +921,9 @@ export async function handleForgotPassword(req: Request, env: Env, ctx?: Executi
   // 60-second cooldown per email
   const recent = await env.DB.prepare(
     "SELECT id FROM verification_codes WHERE LOWER(email) = ? AND created_at > datetime('now', '-60 seconds')"
-  ).bind(email).first();
+  )
+    .bind(email)
+    .first();
   if (recent) {
     return Response.json({ error: "error.wait60s" }, { status: 429 });
   }
@@ -677,35 +931,44 @@ export async function handleForgotPassword(req: Request, env: Env, ctx?: Executi
   // Check if user exists and has a password
   const user = await env.DB.prepare(
     "SELECT user_id, email, password_hash FROM users WHERE LOWER(email) = LOWER(?)"
-  ).bind(email).first<{ user_id: string; email: string; password_hash: string | null }>();
+  )
+    .bind(email)
+    .first<{ user_id: string; email: string; password_hash: string | null }>();
 
   // If user does not exist or has deleted account, return success to prevent account enumeration
   if (!user || user.email.startsWith("deleted_")) {
-    return Response.json({ success: true, message: "If this email is registered, a reset code has been sent." });
+    return Response.json({
+      success: true,
+      message: "If this email is registered, a reset code has been sent."
+    });
   }
 
   // Update IP hourly counter
   if (clientIp !== "unknown") {
     await env.DB.prepare(
       "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
-    ).bind(ipHourlyKey).run();
+    )
+      .bind(ipHourlyKey)
+      .run();
   }
 
-  const isZh = lang === 'zh';
+  const isZh = lang === "zh";
 
   if (!user.password_hash) {
     // User is OAuth-only, send helpful email
     const subject = isZh ? "[NanoMesh] 重置密码提醒" : "[NanoMesh] Password Reset Notice";
     const greeting = isZh ? "您好！" : "Hello!";
-    const bodyText = isZh 
+    const bodyText = isZh
       ? "您的账号是通过第三方快捷登录（Google / GitHub）创建的，未设置过密码。请直接在登录页面使用第三方快捷登录。"
       : "Your account was created via third-party login (Google / GitHub) and does not have a password. Please sign in directly using your third-party provider.";
-    const footer = isZh ? "&copy; 2026 NanoMesh 灵微络. 保留所有权利。" : "&copy; 2026 NanoMesh. All rights reserved.";
+    const footer = isZh
+      ? "&copy; 2026 NanoMesh 灵微络. 保留所有权利。"
+      : "&copy; 2026 NanoMesh. All rights reserved.";
 
     await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${env.RESEND_API_KEY}`,
+        Authorization: `Bearer ${env.RESEND_API_KEY}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
@@ -714,7 +977,7 @@ export async function handleForgotPassword(req: Request, env: Env, ctx?: Executi
         subject: subject,
         html: `
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
-            <h2 style="color: #00e5ff; margin-bottom: 24px; font-weight: normal;">NanoMesh ${isZh ? '灵微络' : ''}</h2>
+            <h2 style="color: #00e5ff; margin-bottom: 24px; font-weight: normal;">NanoMesh ${isZh ? "灵微络" : ""}</h2>
             <p style="font-size: 16px; margin-bottom: 16px;">${greeting}</p>
             <p style="font-size: 14px; color: #4b5563; line-height: 1.6; margin-bottom: 24px;">${bodyText}</p>
             <hr style="border: none; border-top: 1px solid #e5e7eb; margin-bottom: 16px;">
@@ -722,28 +985,37 @@ export async function handleForgotPassword(req: Request, env: Env, ctx?: Executi
           </div>
         `
       })
-    }).catch(err => console.error("Failed to send oauth reset notice email:", err));
+    }).catch((err) => console.error("Failed to send oauth reset notice email:", err));
 
-    return Response.json({ success: true, message: "If this email is registered, a reset code has been sent." });
+    return Response.json({
+      success: true,
+      message: "If this email is registered, a reset code has been sent."
+    });
   }
 
   // Generate 6-digit reset code
   const code = generateSecureVerificationCode();
-  await env.DB.prepare(`
+  await env.DB.prepare(
+    `
     INSERT INTO verification_codes (email, code, expires_at) 
     VALUES (?, ?, datetime('now', '+10 minutes'))
-  `).bind(email, code).run();
+  `
+  )
+    .bind(email, code)
+    .run();
 
   const subject = isZh ? "[NanoMesh] 您的重置密码验证码" : "[NanoMesh] Your Password Reset Code";
   const greeting = isZh ? "您好！" : "Hello!";
-  const hint = isZh 
-    ? "您正在申请重置 NanoMesh 账号密码。该验证码将在 10 分钟后过期。如非本人操作，请立即检查账号安全并忽略此邮件。" 
+  const hint = isZh
+    ? "您正在申请重置 NanoMesh 账号密码。该验证码将在 10 分钟后过期。如非本人操作，请立即检查账号安全并忽略此邮件。"
     : "You requested to reset your NanoMesh password. This code will expire in 10 minutes. If you did not request this, please ignore this email.";
-  const footer = isZh ? "&copy; 2026 NanoMesh 灵微络. 保留所有权利。" : "&copy; 2026 NanoMesh. All rights reserved.";
+  const footer = isZh
+    ? "&copy; 2026 NanoMesh 灵微络. 保留所有权利。"
+    : "&copy; 2026 NanoMesh. All rights reserved.";
 
   const htmlContent = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
-      <h2 style="color: #00e5ff; margin-bottom: 24px; font-weight: normal;">NanoMesh ${isZh ? '灵微络' : ''}</h2>
+      <h2 style="color: #00e5ff; margin-bottom: 24px; font-weight: normal;">NanoMesh ${isZh ? "灵微络" : ""}</h2>
       <p style="font-size: 16px; margin-bottom: 16px;">${greeting}</p>
       <div style="background-color: #f3f4f6; border-radius: 8px; padding: 24px; text-align: center; margin-bottom: 24px;">
         <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #111827;">${code}</span>
@@ -757,7 +1029,7 @@ export async function handleForgotPassword(req: Request, env: Env, ctx?: Executi
   await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${env.RESEND_API_KEY}`,
+      Authorization: `Bearer ${env.RESEND_API_KEY}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
@@ -766,33 +1038,45 @@ export async function handleForgotPassword(req: Request, env: Env, ctx?: Executi
       subject: subject,
       html: htmlContent
     })
-  }).catch(err => console.error("Failed to send reset code email:", err));
+  }).catch((err) => console.error("Failed to send reset code email:", err));
 
-  return Response.json({ success: true, message: "If this email is registered, a reset code has been sent." });
+  return Response.json({
+    success: true,
+    message: "If this email is registered, a reset code has been sent."
+  });
 }
 
 export async function handleResetPassword(req: Request, env: Env): Promise<Response> {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
   const body: any = await safeJsonBody(req);
   let { email, code, newPassword } = body;
-  if (typeof email === 'string') email = email.toLowerCase().trim();
+  if (typeof email === "string") email = email.toLowerCase().trim();
 
-  if (typeof email !== 'string' || !isValidEmailDomain(email)) {
+  if (typeof email !== "string" || !isValidEmailDomain(email)) {
     return Response.json({ error: "error.unsupportedEmailDomain" }, { status: 400 });
   }
 
-  if (!code || typeof code !== 'string') {
+  if (!code || typeof code !== "string") {
     return Response.json({ error: "error.invalidCode" }, { status: 400 });
   }
 
-  if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 8 || newPassword.length > 64 || !/[a-zA-Z]/.test(newPassword) || !/[0-9]/.test(newPassword)) {
+  if (
+    !newPassword ||
+    typeof newPassword !== "string" ||
+    newPassword.length < 8 ||
+    newPassword.length > 64 ||
+    !/[a-zA-Z]/.test(newPassword) ||
+    !/[0-9]/.test(newPassword)
+  ) {
     return Response.json({ error: "error.invalidPasswordFormat" }, { status: 400 });
   }
 
   // Check code with anti-brute force tracking
   const activeCode = await env.DB.prepare(
     "SELECT id, code, attempts FROM verification_codes WHERE LOWER(email) = ? AND expires_at > datetime('now') ORDER BY id DESC LIMIT 1"
-  ).bind(email).first<{ id: number; code: string; attempts: number }>();
+  )
+    .bind(email)
+    .first<{ id: number; code: string; attempts: number }>();
 
   if (!activeCode) {
     return Response.json({ error: "error.invalidCode" }, { status: 400 });
@@ -804,14 +1088,18 @@ export async function handleResetPassword(req: Request, env: Env): Promise<Respo
   }
 
   if (activeCode.code !== code.trim()) {
-    await env.DB.prepare("UPDATE verification_codes SET attempts = attempts + 1 WHERE id = ?").bind(activeCode.id).run();
+    await env.DB.prepare("UPDATE verification_codes SET attempts = attempts + 1 WHERE id = ?")
+      .bind(activeCode.id)
+      .run();
     return Response.json({ error: "error.invalidCode" }, { status: 400 });
   }
 
   // Find user
   const user = await env.DB.prepare(
     "SELECT user_id, email FROM users WHERE LOWER(email) = LOWER(?)"
-  ).bind(email).first<{ user_id: string; email: string }>();
+  )
+    .bind(email)
+    .first<{ user_id: string; email: string }>();
 
   if (!user || user.email.startsWith("deleted_")) {
     return Response.json({ error: "error.userNotFound" }, { status: 404 });
@@ -821,11 +1109,15 @@ export async function handleResetPassword(req: Request, env: Env): Promise<Respo
   const hash = bcrypt.hashSync(newPassword, 10);
 
   // Update password and increment token_version to invalidate all existing sessions
-  await env.DB.prepare(`
+  await env.DB.prepare(
+    `
     UPDATE users 
     SET password_hash = ?, token_version = token_version + 1 
     WHERE user_id = ?
-  `).bind(hash, user.user_id).run();
+  `
+  )
+    .bind(hash, user.user_id)
+    .run();
 
   // Delete all verification codes for this email
   await env.DB.prepare("DELETE FROM verification_codes WHERE LOWER(email) = ?").bind(email).run();

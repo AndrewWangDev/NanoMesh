@@ -96,7 +96,7 @@ async function getGenerator(modelEndpoint, onProgress, forceDevice = null) {
       }
     }
 
-    // 3. Robust CPU Wasm SIMD Fallback (Works on 100% of devices, zero driver hangs)
+    // 3. Fallback to CPU Wasm SIMD execution for environments lacking WebGPU support
     if (!gen) {
       console.log('[LocalRunner] Allocating CPU Wasm pipeline with q4 quantization...');
       usedDevice = 'wasm';

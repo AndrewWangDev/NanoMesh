@@ -1303,43 +1303,54 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         const isLargeFile = uploadBlob.size > 4 * 1024 * 1024;
+        let uploadedDirectly = false;
 
         if (isLargeFile) {
           // Tier B: Presigned S3 direct upload for large files (> 4MB and <= 25MB)
-          const presignRes = await fetch('/api/upload/presign', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              file_name: file.name,
-              file_size: uploadBlob.size,
-              mime_type: file.type || 'application/octet-stream',
-              modality
-            })
-          });
+          try {
+            const presignRes = await fetch('/api/upload/presign', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                file_name: file.name,
+                file_size: uploadBlob.size,
+                mime_type: file.type || 'application/octet-stream',
+                modality
+              })
+            });
 
-          if (presignRes.status === 403) {
-            selectedFiles = selectedFiles.filter(f => f.assetId !== fileDesc.assetId);
-            renderFileChips();
-            window.showZeroBalanceModal();
-            return;
+            if (presignRes.status === 403) {
+              selectedFiles = selectedFiles.filter(f => f.assetId !== fileDesc.assetId);
+              renderFileChips();
+              window.showZeroBalanceModal();
+              return;
+            }
+
+            if (presignRes.ok) {
+              const presignData = await presignRes.json();
+              const putRes = await fetch(presignData.uploadUrl, {
+                method: 'PUT',
+                body: uploadBlob,
+                headers: { 'Content-Type': file.type || 'application/octet-stream' }
+              });
+
+              if (putRes.ok) {
+                fileDesc.r2Key = presignData.r2Key;
+                fileDesc.assetId = presignData.assetId;
+                uploadedDirectly = true;
+              } else {
+                console.warn(`S3 direct upload failed with status ${putRes.status}, falling back to worker proxy upload`);
+              }
+            } else {
+              console.warn('Presign endpoint failed, falling back to worker proxy upload');
+            }
+          } catch (s3Err) {
+            console.warn('S3 direct upload network exception, falling back to worker proxy upload:', s3Err);
           }
+        }
 
-          if (!presignRes.ok) throw new Error('Presign failed');
-          const presignData = await presignRes.json();
-          fileDesc.r2Key = presignData.r2Key;
-          fileDesc.assetId = presignData.assetId;
-
-          const putRes = await fetch(presignData.uploadUrl, {
-            method: 'PUT',
-            body: uploadBlob,
-            headers: { 'Content-Type': file.type || 'application/octet-stream' }
-          });
-
-          if (!putRes.ok) {
-            throw new Error(`S3 direct upload failed with status ${putRes.status}`);
-          }
-        } else {
-          // Tier A: Native same-origin direct upload (<= 25MB)
+        if (!uploadedDirectly) {
+          // Tier A: Native same-origin direct upload (<= 25MB or fallback from failed S3 upload)
           const formData = new FormData();
           formData.append('file', uploadBlob, file.name);
           formData.append('modality', modality);
@@ -3221,7 +3232,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       };
     }
 
-    // Smart Viewport & Clamping Position Calculation (紧凑轻量面板)
+    // Smart Viewport & Clamping Position Calculation for compact popover panel
     const cardRect = cardEl.getBoundingClientRect();
     const canvasPane = document.getElementById('workbench-canvas-pane');
     const parentRect = canvasPane ? canvasPane.getBoundingClientRect() : { top: 0, left: 0, width: 600, height: 600 };
@@ -3312,7 +3323,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const runId = 'run-' + Date.now();
     currentActiveRunId = runId;
 
-    // Show Unified Control Bar (Set to 当前路由)
+    // Show Unified Control Bar (bound to current active route)
     const controlBar = document.getElementById('unified-control-bar') || document.getElementById('macro-workflow-bar');
     if (controlBar) controlBar.style.display = 'inline-flex';
     const macroLabel = document.getElementById('macro-label') || document.querySelector('.macro-label');
@@ -3379,7 +3390,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           <div class="msg-avatar-badge user-avatar-badge">${userAvatarHtml}</div>
         </div>
         <div class="msg-content-col">
-          <!-- Inline Telemetry Metadata Bar (紧密排布在对应那次用户提问气泡正上方) -->
+          <!-- Inline Telemetry Metadata Bar: rendered directly above current user prompt bubble -->
           <div class="telemetry-meta-bar" id="telemetry-bar-${runId}">
             <div class="telemetry-pill arb-telemetry-pill" id="arb-pill-${runId}">
               <span class="arb-text" id="arb-text-${runId}">${isEn ? '⌛ Routing...' : '⚡ 正在路由仲裁...'}</span>
@@ -4128,7 +4139,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       requestAnimationFrame(() => renderDagSvgConnectors());
 
-      // Render Step Indicator Badge (状态步进与内容分离: ⠋ 视觉元素提取中...)
+      // Render Step Indicator Badge (decoupling execution step progress from streaming text content)
       const stepsContainer = document.getElementById('assistant-steps-' + currentActiveAssistantId);
       if (stepsContainer) {
         let stepBadge = document.getElementById('step-badge-' + currentActiveAssistantId + '-' + data.role_id);
@@ -4664,7 +4675,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (data.output) completedNode.output = data.output;
       }
 
-      // Update Step Indicator Badge (浅灰色 ✓ 提取完成 227ms)
+      // Update Step Indicator Badge with completed status and latency
       const stepsContainer = document.getElementById('assistant-steps-' + currentActiveAssistantId);
       if (stepsContainer) {
         let stepBadge = document.getElementById('step-badge-' + currentActiveAssistantId + '-' + data.role_id);
@@ -4885,7 +4896,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         window._currentStagedNewFiles = [];
 
-        // Branch Transition & Context Springback (记忆回弹算法)
+        // Branch Transition & Context Springback algorithm
         const intent = window.currentRoundIntentState;
         window.sessionBranches = window.sessionBranches || {};
         const promptSnippet = (window.lastUserPrompt || '').slice(0, 50);
@@ -6186,7 +6197,7 @@ window.markAllNotificationsRead = async function() {
   }
 };
 
-// --- Settings Modal: "我的消息" Tab Controller ---
+// --- Settings Modal: Notifications Tab Controller ---
 window.loadMessagesTab = async function(filter = notifState.currentFilter || 'all') {
   notifState.currentFilter = filter;
   const listEl = document.getElementById('settings-messages-list');
@@ -6317,7 +6328,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // Filter pills inside "我的消息" panel
+  // Filter pills inside notifications panel
   document.querySelectorAll('#messages-filter-pills .messages-filter-pill, #messages-filter-pills .filter-pill').forEach(pill => {
     pill.addEventListener('click', () => {
       document.querySelectorAll('#messages-filter-pills .messages-filter-pill, #messages-filter-pills .filter-pill').forEach(p => p.classList.remove('active'));

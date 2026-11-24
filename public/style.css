@@ -2352,7 +2352,7 @@ button.legal-nav-link {
   font-weight: 600;
 }
 
-/* Assistant Steps Stream (状态步进与内容分离) */
+/* Assistant Steps Stream (Progress indicator decoupled from text stream) */
 .assistant-steps-stream {
   display: flex;
   flex-direction: column;
@@ -3186,7 +3186,7 @@ button.legal-nav-link {
    Stage 3: Left 65% DAG Whitebox Workbench
    ========================================================== */
 
-/* Unified Central Control Bar (SaaS Integrated Pill: [ ← 返回 ] | 当前路由: ... ▼ | [ ▶ 重新路由 ]) */
+/* Unified Central Control Bar: [Back to Workbench] | Current Route dropdown | [Re-route] */
 .unified-control-bar {
   position: absolute;
   top: 16px;
