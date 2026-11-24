@@ -32,8 +32,8 @@ export function isOriginAllowed(origin: string, request: Request, env: Env): boo
   const reqUrl = new URL(request.url);
   if (origin === reqUrl.origin) return true;
   if (env.FRONTEND_URL && origin === env.FRONTEND_URL) return true;
-  
-  // 仅在本地开发测试环境下允许 localhost / 127.0.0.1 跨源调用
+
+  // Allow localhost and loopback origins strictly in non-production local development and testing environments
   const isLocalRequest = reqUrl.hostname === "localhost" || reqUrl.hostname === "127.0.0.1";
   if (isLocalRequest) {
     try {
@@ -275,8 +275,8 @@ export async function parseAttestationObject(attestationObjectBytes: Uint8Array)
       throw new Error("Invalid EC2 P-256 coordinates");
     }
     const spkiPrefix = new Uint8Array([
-      0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
-      0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04
+      0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08,
+      0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04
     ]);
     publicKeySpki = new Uint8Array(spkiPrefix.length + 64);
     publicKeySpki.set(spkiPrefix, 0);
@@ -336,7 +336,9 @@ export async function verifyAssertionSignature(params: {
 
   // 1. Verify rpIdHash
   const enc = new TextEncoder();
-  const expectedRpIdHash = new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(expectedRpId)));
+  const expectedRpIdHash = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", enc.encode(expectedRpId))
+  );
   const actualRpIdHash = authenticatorData.slice(0, 32);
   for (let i = 0; i < 32; i++) {
     if (expectedRpIdHash[i] !== actualRpIdHash[i]) {

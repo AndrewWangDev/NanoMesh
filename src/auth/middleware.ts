@@ -27,14 +27,15 @@ export async function getSession(request: Request, env: Env): Promise<SessionPay
   // Verify token_version and active status against database (supports immediate session revocation and blocks deleted accounts)
   let user: { token_version: number | null; email: string } | null = null;
   try {
-    user = await env.DB.prepare(
-      "SELECT token_version, email FROM users WHERE user_id = ?"
-    ).bind(payload.userId).first<{token_version: number | null; email: string}>();
+    user = await env.DB.prepare("SELECT token_version, email FROM users WHERE user_id = ?")
+      .bind(payload.userId)
+      .first<{ token_version: number | null; email: string }>();
   } catch (dbErr) {
     // Graceful fallback during migration deployment window if token_version is not yet applied
-    user = await env.DB.prepare(
-      "SELECT email FROM users WHERE user_id = ?"
-    ).bind(payload.userId).first<{email: string}>().then(r => r ? { token_version: 1, email: r.email } : null);
+    user = await env.DB.prepare("SELECT email FROM users WHERE user_id = ?")
+      .bind(payload.userId)
+      .first<{ email: string }>()
+      .then((r) => (r ? { token_version: 1, email: r.email } : null));
   }
 
   if (!user || (user.email && user.email.startsWith("deleted_"))) return null;
@@ -51,9 +52,9 @@ export async function getSession(request: Request, env: Env): Promise<SessionPay
 export async function requireAuth(request: Request, env: Env): Promise<SessionPayload | Response> {
   const session = await getSession(request, env);
   if (!session) {
-    return new Response(JSON.stringify({ error: "Unauthorized" }), { 
-      status: 401, 
-      headers: { "Content-Type": "application/json" } 
+    return new Response(JSON.stringify({ error: "Unauthorized" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" }
     });
   }
   return session;

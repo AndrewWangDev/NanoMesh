@@ -1,5 +1,10 @@
 // src/orchestration/slicing.ts
-import { ArtifactBundle, AssetDescriptor, InstantiatedDAGNode, UnifiedProtocolEnvelope } from "./types";
+import {
+  ArtifactBundle,
+  AssetDescriptor,
+  InstantiatedDAGNode,
+  UnifiedProtocolEnvelope
+} from "./types";
 
 export interface NodeExecutionContext {
   claimed_assets: AssetDescriptor[];
@@ -16,8 +21,8 @@ export interface NodeExecutionContext {
 }
 
 /**
- * Step 4: Targeted Claiming Law (定向认领法则) & Envelope Slicing
- * 
+ * Step 4: Targeted Claiming Law & Envelope Slicing
+ *
  * Rules:
  * - P0: Claims matching media generated directly by the preceding node (ArtifactBundle.generated_media).
  * - P1: Penetrates to claim unconsumed matching user initial assets from envelope.assets_manifest.
@@ -28,8 +33,8 @@ export interface NodeExecutionContext {
  */
 function supportsModality(set: Set<string>, modality: string): boolean {
   if (set.has(modality)) return true;
-  if (modality === 'text_doc' && set.has('text')) return true;
-  if (modality === 'text' && set.has('text_doc')) return true;
+  if (modality === "text_doc" && set.has("text")) return true;
+  if (modality === "text" && set.has("text_doc")) return true;
   return false;
 }
 
@@ -42,10 +47,16 @@ export function sliceEnvelopeForNode(
 ): NodeExecutionContext {
   const claimedAssets: AssetDescriptor[] = [];
   const requiredInModalities = new Set(node.role.in_modalities);
-  const modelInModalities = new Set(node.selected_model.in_modalities || node.selected_model.modalities);
+  const modelInModalities = new Set(
+    node.selected_model.in_modalities || node.selected_model.modalities
+  );
 
   // 1. P0 Priority: Claim matching media generated directly by preceding nodes (Reverse Chronological: Latest First)
-  if (previousBundle && previousBundle.generated_media && previousBundle.generated_media.length > 0) {
+  if (
+    previousBundle &&
+    previousBundle.generated_media &&
+    previousBundle.generated_media.length > 0
+  ) {
     for (let i = previousBundle.generated_media.length - 1; i >= 0; i--) {
       const media = previousBundle.generated_media[i];
       if (requiredInModalities.has(media.modality) && modelInModalities.has(media.modality)) {
@@ -74,15 +85,17 @@ export function sliceEnvelopeForNode(
   for (const asset of envelope.assets_manifest) {
     if (asset.consumed) continue;
 
-    const isSensoryModality = asset.modality === 'image' || asset.modality === 'audio';
+    const isSensoryModality = asset.modality === "image" || asset.modality === "audio";
 
-    // BUG-02 Fix: Masked head nodes must focus purely on sensory feature extraction
-    // and must never consume cognitive documents (text, text_doc).
+    // Masked head nodes focus purely on sensory feature extraction
+    // and do not consume cognitive documents (text, text_doc).
     if (isMaskedHeadNode && !isSensoryModality) {
       continue;
     }
 
-    const isExplicitlyNeeded = supportsModality(requiredInModalities, asset.modality) && supportsModality(modelInModalities, asset.modality);
+    const isExplicitlyNeeded =
+      supportsModality(requiredInModalities, asset.modality) &&
+      supportsModality(modelInModalities, asset.modality);
     const isTailHarvest = isTailNode && supportsModality(modelInModalities, asset.modality);
     const isHeadHarvest = isHeadNode && supportsModality(modelInModalities, asset.modality);
 
@@ -90,12 +103,12 @@ export function sliceEnvelopeForNode(
       asset.consumed = true;
       claimedAssets.push(asset);
       requiredInModalities.delete(asset.modality);
-      if (asset.modality === 'text_doc') requiredInModalities.delete('text');
+      if (asset.modality === "text_doc") requiredInModalities.delete("text");
     }
   }
 
   // 3. Upstream text from parent (or previous bundle text context)
-  const upstreamText = parentOutput || previousBundle?.text_context || '';
+  const upstreamText = parentOutput || previousBundle?.text_context || "";
   const isDownstream = node.role.in_degree > 0;
 
   // 4. Instruction & Constraints Injection Responsibility
@@ -103,7 +116,7 @@ export function sliceEnvelopeForNode(
   // Single-node DAG (in=0 && out=0): Receives user prompt.
   // Downstream Node (in>0): Receives user prompt (anchored by System Prompt guidance).
   const isHeadMasked = node.role.in_degree === 0 && node.role.out_degree > 0;
-  const injectedPrompt = isHeadMasked ? '' : (envelope.instruction_payload || '');
+  const injectedPrompt = isHeadMasked ? "" : envelope.instruction_payload || "";
 
   return {
     claimed_assets: claimedAssets,

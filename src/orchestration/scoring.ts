@@ -25,7 +25,7 @@ export function cosineSimilarity(vecA: number[], vecB: number[]): number {
 export async function generatePromptEmbedding(env: Env, text: string): Promise<number[] | null> {
   try {
     if (env.AI) {
-      const res = await env.AI.run('@cf/baai/bge-m3', { text: [text.slice(0, 500)] });
+      const res = await env.AI.run("@cf/baai/bge-m3", { text: [text.slice(0, 500)] });
       if (res && Array.isArray(res.data) && res.data[0]) {
         return res.data[0];
       }
@@ -51,17 +51,17 @@ function computeHashJitter(seed: string): number {
 
 /**
  * Step 3: Serverless-Native Scoring Formula & Stateless Traffic Shaping
- * 
+ *
  * Formula:
  * S = μ0 + α * max(0, sim - τ) + β * (Rm / 5) + ω_fit * Fit(m, L_req) + Tier(m) + δ_jitter
- * 
+ *
  * Parameters:
  * - μ0: Generalist prior (0.25 for generalist, 0.0 for specialist)
  * - α: 0.50 (Specialist boost)
  * - τ: 0.65 (Gating threshold)
  * - β: 0.25 (User rating weight)
  * - ω_fit: 0.15 (Context window headroom and fit weight)
- * - Tier(m): Architecture tier affinity (Browser: +0.15, Edge: +0.10, Cloud/Heavy: 0.0)
+ * - Tier(m): Architecture tier affinity (Light/Browser: +0.15, Medium/Edge: +0.10, Heavy/Cloud: 0.0)
  * - δ_jitter: Stateless session-hash jitter [0.0, 0.05] for thundering-herd prevention
  */
 export async function scoreAndRankRoleModels(
@@ -72,7 +72,7 @@ export async function scoreAndRankRoleModels(
   sessionId?: string,
   estimatedTokens: number = 512
 ): Promise<ScoredModel[]> {
-  const ALPHA = 0.50;
+  const ALPHA = 0.5;
   const TAU = 0.65;
   const BETA = 0.25;
   const OMEGA_FIT = 0.15;
@@ -81,7 +81,7 @@ export async function scoreAndRankRoleModels(
 
   for (const model of roleModels) {
     // 1. Generalist Prior
-    const mu0 = model.is_generalist ? (model.prior_score || 0.25) : 0.0;
+    const mu0 = model.is_generalist ? model.prior_score || 0.25 : 0.0;
 
     // 2. Scenario Anchor Similarity (sim)
     // Strictly computed via vector cosine similarity between prompt embedding and model anchor embeddings
@@ -103,22 +103,23 @@ export async function scoreAndRankRoleModels(
 
     // 5. Serverless Context Fit Score: penalizes models near context exhaustion
     const contextWindow = model.context_window || 4096;
-    const fitRatio = Math.max(0, 1.0 - (estimatedTokens / contextWindow));
+    const fitRatio = Math.max(0, 1.0 - estimatedTokens / contextWindow);
     const contextFitScore = OMEGA_FIT * fitRatio;
 
     // 6. Tier Affinity Score: prioritize client WebGPU and edge Worker AI over commercial APIs / heavy VPS
     let tierScore = 0.0;
-    if (model.inference_target === 'browser') {
+    if (model.inference_target === "browser") {
       tierScore = 0.15;
-    } else if (model.inference_target === 'edge') {
-      tierScore = 0.10;
+    } else if (model.inference_target === "edge") {
+      tierScore = 0.1;
     }
 
     // 7. Stateless Hash Jitter for thundering herd prevention
-    const jitterScore = computeHashJitter((sessionId || 'session') + '_' + model.model_id);
+    const jitterScore = computeHashJitter((sessionId || "session") + "_" + model.model_id);
 
     // Final Score
-    const totalScore = mu0 + specialistScore + ratingScore + contextFitScore + tierScore + jitterScore;
+    const totalScore =
+      mu0 + specialistScore + ratingScore + contextFitScore + tierScore + jitterScore;
 
     scoredList.push({
       model,

@@ -2,19 +2,19 @@
 import { Env } from "../types";
 import { DAGRole, DAGTemplate, ModelMetadata } from "./types";
 
-export const SENTINEL_UNREACHABLE_TEMPLATE_ID = '__NONE_OF_ABOVE__';
+export const SENTINEL_UNREACHABLE_TEMPLATE_ID = "__NONE_OF_ABOVE__";
 
 export const SENTINEL_UNREACHABLE_TEMPLATE: DAGTemplate = {
   template_id: SENTINEL_UNREACHABLE_TEMPLATE_ID,
-  name_zh: '∅ 意图不可达',
-  name_en: '∅ Unreachable',
-  desc_zh: '当前提供的任何候选工作流均无法满足、承接或解决用户的本轮指令诉求。',
-  desc_en: 'None of the candidate workflows can satisfy the user request.',
-  head_modalities: ['text'],
-  tail_modalities: ['text'],
+  name_zh: "∅ 意图不可达",
+  name_en: "∅ Unreachable",
+  desc_zh: "当前提供的任何候选工作流均无法满足、承接或解决用户的本轮指令诉求。",
+  desc_en: "None of the candidate workflows can satisfy the user request.",
+  head_modalities: ["text"],
+  tail_modalities: ["text"],
   roles: [],
   priority: -1,
-  status: 'active'
+  status: "active"
 };
 
 /**
@@ -31,9 +31,9 @@ export async function rankCandidateTemplates(
     return [SENTINEL_UNREACHABLE_TEMPLATE];
   }
 
-  const hasMediaInput = userModalities && userModalities.some(m => m !== 'text');
+  const hasMediaInput = userModalities && userModalities.some((m) => m !== "text");
   const evaluationState = hasMediaInput
-    ? `用户挂载了输入介质 [${userModalities.join(', ')}]，指令诉求：${userPrompt}`
+    ? `用户挂载了输入介质 [${userModalities.join(", ")}]，指令诉求：${userPrompt}`
     : userPrompt;
 
   // Fast JEV Score via Workers AI (Primary Clef-Flash + Secondary Llama-3.1-FP8)
@@ -42,9 +42,9 @@ export async function rankCandidateTemplates(
       // 1. Primary: Clef-Flash / JEV score ranking
       try {
         const questions: Record<string, any> = {};
-        candidateTemplates.forEach(t => {
+        candidateTemplates.forEach((t) => {
           questions[t.template_id] = {
-            type: 'score',
+            type: "score",
             instructions: `评估工作流模板 "${t.name_zh}: ${t.desc_zh}" 对承接并完成用户任务 "${userPrompt}" 的胜任度打分：`,
             criteria: [
               "该工作流完全不相关或无法承接用户任务诉求",
@@ -53,27 +53,30 @@ export async function rankCandidateTemplates(
             ]
           };
         });
-        const clefRes = await env.AI.run('@cf/cloudflare/clef-flash', {
+        const clefRes = await env.AI.run("@cf/cloudflare/clef-flash", {
           state: evaluationState,
           questions
         });
         if (clefRes) {
           const ans: any = clefRes?.answers || clefRes;
-          const scored = [...candidateTemplates].map(t => {
-            const entry = ans[t.template_id];
-            const rawScore = typeof entry?.score === 'number'
-              ? entry.score
-              : (typeof entry?.value === 'number' ? entry.value : (t.priority / 10));
-            // Clef-Flash score against 3 levels [0, 1, 2] is an expected index in [0.0, 2.0].
-            // Normalize to 0-100 scale: (rawScore / 2.0) * 100
-            const normalizedScore = rawScore <= 2.0
-              ? (rawScore / 2.0) * 100
-              : rawScore;
-            return {
-              template: t,
-              score: normalizedScore
-            };
-          }).sort((a, b) => b.score - a.score);
+          const scored = [...candidateTemplates]
+            .map((t) => {
+              const entry = ans[t.template_id];
+              const rawScore =
+                typeof entry?.score === "number"
+                  ? entry.score
+                  : typeof entry?.value === "number"
+                    ? entry.value
+                    : t.priority / 10;
+              // Clef-Flash score against 3 levels [0, 1, 2] is an expected index in [0.0, 2.0].
+              // Normalize to 0-100 scale: (rawScore / 2.0) * 100
+              const normalizedScore = rawScore <= 2.0 ? (rawScore / 2.0) * 100 : rawScore;
+              return {
+                template: t,
+                score: normalizedScore
+              };
+            })
+            .sort((a, b) => b.score - a.score);
 
           // Fast-Failed Dual Gate: If maximum relevance score is below 25, no template is capable!
           const maxScore = scored[0]?.score ?? 0;
@@ -81,7 +84,7 @@ export async function rankCandidateTemplates(
             return [SENTINEL_UNREACHABLE_TEMPLATE];
           }
 
-          return scored.map(s => s.template).slice(0, 3);
+          return scored.map((s) => s.template).slice(0, 3);
         }
       } catch (clefErr) {
         console.warn("Clef-Flash score failed, trying Llama-3.1-FP8:", clefErr);
@@ -89,9 +92,11 @@ export async function rankCandidateTemplates(
 
       // 2. Secondary: Llama-3.1-8B-FP8 JSON array ranker with Relational Sentinel
       const templateSummaries = [
-        ...candidateTemplates.map((t) => `ID: ${t.template_id} | Name: ${t.name_zh} | Desc: ${t.desc_zh}`),
+        ...candidateTemplates.map(
+          (t) => `ID: ${t.template_id} | Name: ${t.name_zh} | Desc: ${t.desc_zh}`
+        ),
         `ID: ${SENTINEL_UNREACHABLE_TEMPLATE_ID} | Name: 无匹配工作流 | Desc: 当前给出的所有候选工作流在技术、模态或能力上均完全无法承接用户的诉求（例如要求视频生成或不可达系统能力）。`
-      ].join('\n');
+      ].join("\n");
 
       const prompt = `You are a strict DAG Workflow Router.
 Evaluate user request: "${userPrompt}"
@@ -105,13 +110,13 @@ Rules:
 
 Return JSON array only: ["id1", "id2", "id3"] or ["${SENTINEL_UNREACHABLE_TEMPLATE_ID}"]`;
 
-      const aiRes = await env.AI.run('@cf/meta/llama-3.1-8b-instruct-fp8', {
-        messages: [{ role: 'user', content: prompt }],
+      const aiRes = await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fp8", {
+        messages: [{ role: "user", content: prompt }],
         max_tokens: 60,
         temperature: 0.0
       });
 
-      const text = aiRes?.response || '';
+      const text = aiRes?.response || "";
       const match = text.match(/\[(.*?)\]/);
       if (match) {
         const topIds: string[] = JSON.parse(match[0]);
@@ -120,7 +125,7 @@ Return JSON array only: ["id1", "id2", "id3"] or ["${SENTINEL_UNREACHABLE_TEMPLA
           return [SENTINEL_UNREACHABLE_TEMPLATE];
         }
 
-        const idMap = new Map(candidateTemplates.map(t => [t.template_id, t]));
+        const idMap = new Map(candidateTemplates.map((t) => [t.template_id, t]));
         const ordered: DAGTemplate[] = [];
         for (const id of topIds) {
           if (idMap.has(id)) ordered.push(idMap.get(id)!);
@@ -149,21 +154,23 @@ export interface RoleResolutionResult {
 }
 
 function getModelModalities(m: ModelMetadata): { inSet: Set<string>; outSet: Set<string> } {
-  const inSet = new Set(m.in_modalities && m.in_modalities.length > 0 ? m.in_modalities : m.modalities);
+  const inSet = new Set(
+    m.in_modalities && m.in_modalities.length > 0 ? m.in_modalities : m.modalities
+  );
   let outList = m.out_modalities && m.out_modalities.length > 0 ? m.out_modalities : null;
   if (!outList) {
-    if (m.endpoint?.includes('flux') || m.tags?.includes('#image_generation')) {
-      outList = ['image'];
+    if (m.endpoint?.includes("flux") || m.tags?.includes("#image_generation")) {
+      outList = ["image"];
     } else {
-      outList = ['text'];
+      outList = ["text"];
     }
   }
   return { inSet, outSet: new Set(outList) };
 }
 
 /**
- * Step 2: Competence Law (胜任定律) and Intersection Operation with Tag Downgrade
- * 
+ * Step 2: Competence Law and Intersection Operation with Tag Downgrade
+ *
  * Rules:
  * (1) Role.in_modalities ⊆ Model.in_modalities
  * (2) Role.out_modalities ⊆ Model.out_modalities
@@ -176,7 +183,7 @@ export function resolveRoleCompetence(
   const roleIn = new Set(role.in_modalities);
   const roleOut = new Set(role.out_modalities);
 
-  const tags = role.requisition_tags.length ? role.requisition_tags : ['#general'];
+  const tags = role.requisition_tags.length ? role.requisition_tags : ["#general"];
   let activeTag = tags[0];
   let downgraded = false;
   let downgradeEvent: { original_tag: string; fallback_tag: string } | undefined;
@@ -187,7 +194,7 @@ export function resolveRoleCompetence(
     activeTag = currentTag;
 
     // Perform Intersection Operation with Competence Law
-    matchedModels = candidateModels.filter(m => {
+    matchedModels = candidateModels.filter((m) => {
       const { inSet, outSet } = getModelModalities(m);
       const modelTags = new Set(m.tags);
 
@@ -220,7 +227,7 @@ export function resolveRoleCompetence(
 
   // If even after trying all tags, no model was found, fall back to matching by modalities only
   if (matchedModels.length === 0) {
-    matchedModels = candidateModels.filter(m => {
+    matchedModels = candidateModels.filter((m) => {
       const { inSet, outSet } = getModelModalities(m);
       for (const reqIn of roleIn) {
         if (!inSet.has(reqIn)) return false;
@@ -232,7 +239,7 @@ export function resolveRoleCompetence(
     });
     if (matchedModels.length > 0) {
       downgraded = true;
-      downgradeEvent = { original_tag: tags[0], fallback_tag: '#modality_fallback' };
+      downgradeEvent = { original_tag: tags[0], fallback_tag: "#modality_fallback" };
     }
   }
 
@@ -243,7 +250,8 @@ export function resolveRoleCompetence(
   // Extract compensation prompt if downgraded
   let compensationPrompt: string | undefined;
   if (downgraded && role.compensation_prompts) {
-    compensationPrompt = role.compensation_prompts[activeTag] || 
+    compensationPrompt =
+      role.compensation_prompts[activeTag] ||
       role.compensation_prompts[Object.keys(role.compensation_prompts)[0]];
   }
 

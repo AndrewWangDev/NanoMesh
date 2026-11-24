@@ -1,4 +1,8 @@
-export async function verifyTurnstile(token: string, secretKey: string, remoteip?: string | null): Promise<boolean> {
+export async function verifyTurnstile(
+  token: string,
+  secretKey: string,
+  remoteip?: string | null
+): Promise<boolean> {
   try {
     const formData = new FormData();
     formData.append("secret", secretKey);

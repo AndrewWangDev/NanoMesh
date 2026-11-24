@@ -1,26 +1,29 @@
 // src/orchestration/types.ts
 
-export type Modality = 'text' | 'image' | 'audio' | 'text_doc';
+export type Modality = "text" | "image" | "audio" | "text_doc";
 
 export interface AssetDescriptor {
   asset_id: string;
   modality: Modality;
   mime_type: string;
   file_size: number;
-  r2_key?: string;            // e.g. tmp/... or assets/...
-  in_memory_text?: string;    // Plain text / Markdown table extracted client-side
-  in_memory_data?: string;    // Base64 data URL for images/multimodal assets
-  consumed: boolean;          // Cursor: whether consumed by a DAG node
-  source_digest: string;      // SHA-256 digest of content
-  is_new?: boolean;           // Whether uploaded in the current round
-  filename?: string;          // Original filename for display and receipt
+  r2_key?: string; // e.g. tmp/... or assets/...
+  in_memory_text?: string; // Plain text / Markdown table extracted client-side
+  in_memory_data?: string; // Base64 data URL for images/multimodal assets
+  consumed: boolean; // Cursor: whether consumed by a DAG node
+  source_digest: string; // SHA-256 digest of content
+  is_new?: boolean; // Whether uploaded in the current round
+  filename?: string; // Original filename for display and receipt
 }
 
 export interface ConstraintContext {
-  target_language: 'auto' | 'zh' | 'en';
-  output_style: 'concise' | 'detailed' | 'creative';
+  target_language: "auto" | "zh" | "en";
+  output_style: "concise" | "detailed" | "creative";
 }
 
+/**
+ * Immutable client-to-gateway request envelope carrying multi-turn state, assets, and environmental constraints.
+ */
 export interface UnifiedProtocolEnvelope {
   envelope_id: string;
   session_id: string;
@@ -39,6 +42,9 @@ export interface UnifiedProtocolEnvelope {
   };
 }
 
+/**
+ * Functional role unit in an orchestration graph (e.g. perception, analysis, synthesis).
+ */
 export interface DAGRole {
   role_id: string;
   name_zh: string;
@@ -51,6 +57,9 @@ export interface DAGRole {
   compensation_prompts?: Record<string, string>;
 }
 
+/**
+ * Top-level Directed Acyclic Graph (DAG) pipeline template definition.
+ */
 export interface DAGTemplate {
   template_id: string;
   name_zh: string;
@@ -65,6 +74,9 @@ export interface DAGTemplate {
   status: string;
 }
 
+/**
+ * Compute node and model metadata across Light (browser), Medium (edge), and Heavy (cloud/VPS) tiers.
+ */
 export interface ModelMetadata {
   model_id: string;
   display_name: string;
@@ -87,12 +99,12 @@ export interface ModelMetadata {
   prior_score: number;
   scenario_anchors: string[];
   anchor_embeddings?: number[][] | null;
-  inference_target?: 'cloud' | 'browser' | 'heavy' | 'edge';
-  browser_runtime?: 'webgpu' | 'wasm';
+  inference_target?: "cloud" | "browser" | "heavy" | "edge";
+  browser_runtime?: "webgpu" | "wasm";
   download_size_bytes?: number;
-  auth_mode?: 'none' | 'jwt_ephemeral' | 'bearer_static';
+  auth_mode?: "none" | "jwt_ephemeral" | "bearer_static";
   auth_secret?: string | null;
-  api_format?: 'workers_ai' | 'openai_compat' | 'google_ai';
+  api_format?: "workers_ai" | "openai_compat" | "google_ai";
 }
 
 export interface ScoredModel {
@@ -130,12 +142,12 @@ export interface SessionAssetLedgerItem {
   introduced_round?: number;
   branch_id?: string;
   r2_key?: string;
-  origin?: 'upload' | 'generated';
+  origin?: "upload" | "generated";
 }
 
 export interface MediaArtifact {
   asset_id: string;
-  modality: 'image' | 'audio';
+  modality: "image" | "audio";
   mime_type: string;
   file_size: number;
   r2_key: string;
@@ -145,9 +157,9 @@ export interface MediaArtifact {
 }
 
 export interface ArtifactBundle {
-  text_context: string;                   // Text reasoning context from parent
-  generated_media: MediaArtifact[];       // Media directly produced by parent step
-  inherited_assets: AssetDescriptor[];    // Cumulative available assets in execution space S
+  text_context: string; // Text reasoning context from parent
+  generated_media: MediaArtifact[]; // Media directly produced by parent step
+  inherited_assets: AssetDescriptor[]; // Cumulative available assets in execution space S
   execution_trace?: {
     role_id: string;
     model_id: string;
@@ -161,7 +173,8 @@ export interface InstantiatedDAG {
   candidate_templates: DAGTemplate[]; // Top 3 candidate templates
   nodes: InstantiatedDAGNode[];
   reasoning_trace: {
-    intent_state: 'ANCHOR_TAIL' | 'REBIND_ROOT' | 'CROSS_FUSION' | 'SWITCH_BRANCH' | 'DETACH_RESET' | null;
+    intent_state:
+      "ANCHOR_TAIL" | "REBIND_ROOT" | "CROSS_FUSION" | "SWITCH_BRANCH" | "DETACH_RESET" | null;
     target_branch_id?: string;
     is_multi_round: boolean;
     subsistence_filtered_count: number;
@@ -171,4 +184,3 @@ export interface InstantiatedDAG {
   is_security_violation?: boolean;
   is_unreachable?: boolean;
 }
-

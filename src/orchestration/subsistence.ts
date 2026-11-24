@@ -10,9 +10,9 @@ export function hardFilterModels(
   estimatedTokens: number = 512,
   disableBrowser: boolean = false
 ): ModelMetadata[] {
-  return models.filter(m => {
+  return models.filter((m) => {
     // 0. Disable browser inference filter
-    if (disableBrowser && m.inference_target === 'browser') return false;
+    if (disableBrowser && m.inference_target === "browser") return false;
 
     // 1. Rating check: Rm >= 1.0
     if ((m.user_rating || 5.0) < 1.0) return false;
@@ -21,7 +21,7 @@ export function hardFilterModels(
     if (m.context_window < estimatedTokens) return false;
 
     // 3. Status active
-    if (m.status !== 'active') return false;
+    if (m.status !== "active") return false;
 
     return true;
   });
@@ -33,8 +33,8 @@ export interface SubsistenceModalityContext {
 }
 
 /**
- * Step 1: Generalized Subsistence Law (广义温饱定律) for DAG Templates
- * 
+ * Step 1: Generalized Subsistence Law for DAG Templates
+ *
  * Axioms:
  * 1. Single-Node DAG: Exact Equivalence for Physical Media Assets:
  *    M(A_user) ≡ M(N_in) and (text ∈ N_in => hasUserText)
@@ -51,33 +51,36 @@ export function filterTemplatesBySubsistence(
   let hasUserText: boolean;
   let userModalitySet: Set<string>;
 
-  // BUG-06 Fix: Normalize legacy or non-standard document modalities ('pdf' -> 'text_doc')
-  const normalizeModality = (m: string) => (m === 'pdf' ? 'text_doc' : m);
+  // Normalize legacy or non-standard document modalities ('pdf' -> 'text_doc')
+  const normalizeModality = (m: string) => (m === "pdf" ? "text_doc" : m);
 
   if (Array.isArray(userModalities)) {
-    const rawList = (userModalities.length ? userModalities : ['text']).map(normalizeModality);
-    mediaModalities = rawList.filter(m => m !== 'text' && m !== 'text_doc');
-    hasUserText = rawList.includes('text') || rawList.includes('text_doc');
+    const rawList = (userModalities.length ? userModalities : ["text"]).map(normalizeModality);
+    mediaModalities = rawList.filter((m) => m !== "text" && m !== "text_doc");
+    hasUserText = rawList.includes("text") || rawList.includes("text_doc");
     userModalitySet = new Set(rawList);
-    if (hasUserText) userModalitySet.add('text');
+    if (hasUserText) userModalitySet.add("text");
   } else {
-    mediaModalities = (userModalities.mediaModalities || []).map(normalizeModality).filter(m => m !== 'text' && m !== 'text_doc');
+    mediaModalities = (userModalities.mediaModalities || [])
+      .map(normalizeModality)
+      .filter((m) => m !== "text" && m !== "text_doc");
     hasUserText = userModalities.hasUserText !== undefined ? userModalities.hasUserText : true;
     userModalitySet = new Set(mediaModalities);
-    if (hasUserText) userModalitySet.add('text');
-    if (userModalitySet.size === 0) userModalitySet.add('text');
+    if (hasUserText) userModalitySet.add("text");
+    if (userModalitySet.size === 0) userModalitySet.add("text");
   }
 
-  return templates.filter(tpl => {
-    if (tpl.status !== 'active') return false;
+  return templates.filter((tpl) => {
+    if (tpl.status !== "active") return false;
 
     // Check single-node DAG case
-    const isSingleNode = tpl.roles.length === 1 && tpl.roles[0].in_degree === 0 && tpl.roles[0].out_degree === 0;
+    const isSingleNode =
+      tpl.roles.length === 1 && tpl.roles[0].in_degree === 0 && tpl.roles[0].out_degree === 0;
     if (isSingleNode) {
       const role = tpl.roles[0];
       const roleInSet = new Set(role.in_modalities);
-      const roleMedia = (role.in_modalities || []).filter(m => m !== 'text' && m !== 'text_doc');
-      const roleRequiresText = roleInSet.has('text') || roleInSet.has('text_doc');
+      const roleMedia = (role.in_modalities || []).filter((m) => m !== "text" && m !== "text_doc");
+      const roleRequiresText = roleInSet.has("text") || roleInSet.has("text_doc");
 
       // 1. Physical Media Equivalence: user uploaded media must match role's physical requirements exactly
       const userMediaSet = new Set(mediaModalities);
@@ -119,7 +122,7 @@ export function filterTemplatesBySubsistence(
         }
       }
       // Add this role's outputs to cumulative supply for downstream nodes
-      for (const outM of (role.out_modalities || ['text'])) {
+      for (const outM of role.out_modalities || ["text"]) {
         cumulativeSupply.add(outM);
       }
     }
@@ -139,7 +142,7 @@ export function filterTemplatesBySubsistence(
     }
     // If user provided ONLY text (no media), the pipeline must consume text
     if (mediaModalities.length === 0 && hasUserText) {
-      if (!allClaimableInputs.has('text') && !allClaimableInputs.has('text_doc')) {
+      if (!allClaimableInputs.has("text") && !allClaimableInputs.has("text_doc")) {
         return false;
       }
     }

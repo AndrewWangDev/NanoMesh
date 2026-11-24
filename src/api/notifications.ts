@@ -5,14 +5,14 @@ import { getAdminSession } from "./admin";
 
 export interface CreateNotificationParams {
   userId?: string | null; // null for broadcast
-  category: 'model' | 'billing' | 'quota' | 'task' | 'system';
+  category: "model" | "billing" | "quota" | "task" | "system";
   eventType: string;
-  priority?: 'normal' | 'urgent';
+  priority?: "normal" | "urgent";
   titleZh: string;
   titleEn: string;
   contentZh: string;
   contentEn: string;
-  actionType?: 'route' | 'url' | 'none';
+  actionType?: "route" | "url" | "none";
   actionPayload?: string;
   relatedId?: string;
   extraData?: string;
@@ -21,10 +21,13 @@ export interface CreateNotificationParams {
 /**
  * Universal dispatcher for both system triggers and admin broadcasts.
  */
-export async function dispatchNotification(env: Env, params: CreateNotificationParams): Promise<string> {
+export async function dispatchNotification(
+  env: Env,
+  params: CreateNotificationParams
+): Promise<string> {
   const notificationId = crypto.randomUUID();
-  const priority = params.priority || 'normal';
-  const actionType = params.actionType || 'none';
+  const priority = params.priority || "normal";
+  const actionType = params.actionType || "none";
   const actionPayload = params.actionPayload || null;
   const relatedId = params.relatedId || null;
   const extraData = params.extraData || null;
@@ -35,21 +38,23 @@ export async function dispatchNotification(env: Env, params: CreateNotificationP
       title_zh, title_en, content_zh, content_en,
       action_type, action_payload, related_id, extra_data, is_read
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
-  ).bind(
-    notificationId,
-    params.userId || null,
-    params.category,
-    params.eventType,
-    priority,
-    params.titleZh,
-    params.titleEn,
-    params.contentZh,
-    params.contentEn,
-    actionType,
-    actionPayload,
-    relatedId,
-    extraData
-  ).run();
+  )
+    .bind(
+      notificationId,
+      params.userId || null,
+      params.category,
+      params.eventType,
+      priority,
+      params.titleZh,
+      params.titleEn,
+      params.contentZh,
+      params.contentEn,
+      actionType,
+      actionPayload,
+      relatedId,
+      extraData
+    )
+    .run();
 
   return notificationId;
 }
@@ -57,28 +62,34 @@ export async function dispatchNotification(env: Env, params: CreateNotificationP
 /**
  * Low balance check (< 500 credits) with a 24-hour deduplication window.
  */
-export async function checkAndNotifyLowBalance(env: Env, userId: string, currentCredits: number): Promise<void> {
+export async function checkAndNotifyLowBalance(
+  env: Env,
+  userId: string,
+  currentCredits: number
+): Promise<void> {
   if (currentCredits >= 500) return;
 
   const recent = await env.DB.prepare(
     `SELECT notification_id FROM notifications 
      WHERE user_id = ? AND event_type = 'low_balance' AND created_at > datetime('now', '-24 hours')
      LIMIT 1`
-  ).bind(userId).first();
+  )
+    .bind(userId)
+    .first();
 
   if (recent) return;
 
   await dispatchNotification(env, {
     userId,
-    category: 'quota',
-    eventType: 'low_balance',
-    priority: 'urgent',
-    titleZh: '算力额度不足提醒',
-    titleEn: 'Low Balance Warning',
+    category: "quota",
+    eventType: "low_balance",
+    priority: "urgent",
+    titleZh: "算力额度不足提醒",
+    titleEn: "Low Balance Warning",
     contentZh: `当前账户可用额度已低于 500 ⚡（剩余 ${currentCredits} ⚡），为免影响推理调度，请及时充值。`,
     contentEn: `Available quota is below 500 ⚡ (remaining: ${currentCredits} ⚡). Please top up to maintain uninterrupted model routing.`,
-    actionType: 'route',
-    actionPayload: JSON.stringify({ modal: 'recharge' })
+    actionType: "route",
+    actionPayload: JSON.stringify({ modal: "recharge" })
   });
 }
 
@@ -133,7 +144,9 @@ export async function handleGetNotifications(req: Request, env: Env): Promise<Re
     WHERE (n.user_id = ? OR n.user_id IS NULL)${filterClause}
     ORDER BY n.created_at DESC
     LIMIT ? OFFSET ?`
-  ).bind(session.userId, session.userId, limit, offset).all();
+  )
+    .bind(session.userId, session.userId, limit, offset)
+    .all();
 
   // 2. Fetch total count for current filter
   const countResult = await env.DB.prepare(
@@ -141,7 +154,9 @@ export async function handleGetNotifications(req: Request, env: Env): Promise<Re
     FROM notifications n
     LEFT JOIN broadcast_reads br ON n.notification_id = br.notification_id AND br.user_id = ?
     WHERE (n.user_id = ? OR n.user_id IS NULL)${filterClause}`
-  ).bind(session.userId, session.userId).first<{ total: number }>();
+  )
+    .bind(session.userId, session.userId)
+    .first<{ total: number }>();
 
   // 3. Fetch overall unread & urgent metrics
   const unreadStats = await env.DB.prepare(
@@ -155,7 +170,9 @@ export async function handleGetNotifications(req: Request, env: Env): Promise<Re
         (n.user_id IS NOT NULL AND n.is_read = 0) OR
         (n.user_id IS NULL AND br.read_at IS NULL)
       )`
-  ).bind(session.userId, session.userId).first<{ unread_count: number; urgent_count: number }>();
+  )
+    .bind(session.userId, session.userId)
+    .first<{ unread_count: number; urgent_count: number }>();
 
   const unreadCount = unreadStats?.unread_count || 0;
   const urgentCount = unreadStats?.urgent_count || 0;
@@ -170,13 +187,19 @@ export async function handleGetNotifications(req: Request, env: Env): Promise<Re
   });
 }
 
-export async function handleMarkAsRead(req: Request, env: Env, notificationId: string): Promise<Response> {
+export async function handleMarkAsRead(
+  req: Request,
+  env: Env,
+  notificationId: string
+): Promise<Response> {
   const session = await getSession(req, env);
   if (!session) return Response.json({ error: "Unauthorized" }, { status: 401 });
 
   const notif = await env.DB.prepare(
     "SELECT notification_id, user_id FROM notifications WHERE notification_id = ?"
-  ).bind(notificationId).first<{ notification_id: string; user_id: string | null }>();
+  )
+    .bind(notificationId)
+    .first<{ notification_id: string; user_id: string | null }>();
 
   if (!notif) {
     return Response.json({ error: "Notification not found" }, { status: 404 });
@@ -188,12 +211,16 @@ export async function handleMarkAsRead(req: Request, env: Env, notificationId: s
     }
     await env.DB.prepare(
       "UPDATE notifications SET is_read = 1, read_at = datetime('now') WHERE notification_id = ?"
-    ).bind(notificationId).run();
+    )
+      .bind(notificationId)
+      .run();
   } else {
     // Broadcast message: record in broadcast_reads
     await env.DB.prepare(
       "INSERT OR IGNORE INTO broadcast_reads (user_id, notification_id) VALUES (?, ?)"
-    ).bind(session.userId, notificationId).run();
+    )
+      .bind(session.userId, notificationId)
+      .run();
   }
 
   return Response.json({ success: true });
@@ -206,7 +233,9 @@ export async function handleMarkAllAsRead(req: Request, env: Env): Promise<Respo
   // 1. Mark all direct notifications as read
   await env.DB.prepare(
     "UPDATE notifications SET is_read = 1, read_at = datetime('now') WHERE user_id = ? AND is_read = 0"
-  ).bind(session.userId).run();
+  )
+    .bind(session.userId)
+    .run();
 
   // 2. Insert read receipts for all unread global broadcasts
   await env.DB.prepare(
@@ -215,7 +244,9 @@ export async function handleMarkAllAsRead(req: Request, env: Env): Promise<Respo
      FROM notifications n
      LEFT JOIN broadcast_reads br ON n.notification_id = br.notification_id AND br.user_id = ?
      WHERE n.user_id IS NULL AND br.read_at IS NULL`
-  ).bind(session.userId, session.userId).run();
+  )
+    .bind(session.userId, session.userId)
+    .run();
 
   return Response.json({ success: true });
 }
@@ -227,29 +258,31 @@ export async function handleAdminSendNotification(req: Request, env: Env): Promi
   if (!session) return new Response("Unauthorized", { status: 401 });
 
   const body = (await safeJsonBody(req)) as {
-    target?: 'all' | 'user';
+    target?: "all" | "user";
     targetUser?: string; // email or user_id
-    category?: 'system' | 'model' | 'billing' | 'quota' | 'task';
-    priority?: 'normal' | 'urgent';
+    category?: "system" | "model" | "billing" | "quota" | "task";
+    priority?: "normal" | "urgent";
     titleZh?: string;
     titleEn?: string;
     contentZh?: string;
     contentEn?: string;
-    actionType?: 'route' | 'url' | 'none';
+    actionType?: "route" | "url" | "none";
     actionPayload?: string;
   };
 
-  const target = body.target || 'all';
+  const target = body.target || "all";
   let targetUserId: string | null = null;
 
-  if (target === 'user') {
+  if (target === "user") {
     if (!body.targetUser?.trim()) {
       return Response.json({ error: "Target user (email or ID) is required" }, { status: 400 });
     }
     const cleanUser = body.targetUser.trim();
     const user = await env.DB.prepare(
       "SELECT user_id FROM users WHERE user_id = ? OR email = ? OR username = ?"
-    ).bind(cleanUser, cleanUser, cleanUser).first<{ user_id: string }>();
+    )
+      .bind(cleanUser, cleanUser, cleanUser)
+      .first<{ user_id: string }>();
 
     if (!user) {
       return Response.json({ error: "Specified user not found" }, { status: 404 });
@@ -268,14 +301,14 @@ export async function handleAdminSendNotification(req: Request, env: Env): Promi
 
   const id = await dispatchNotification(env, {
     userId: targetUserId,
-    category: body.category || 'system',
-    eventType: target === 'all' ? 'admin_broadcast' : 'admin_direct',
-    priority: body.priority || 'normal',
+    category: body.category || "system",
+    eventType: target === "all" ? "admin_broadcast" : "admin_direct",
+    priority: body.priority || "normal",
     titleZh,
     titleEn,
     contentZh,
     contentEn,
-    actionType: body.actionType || 'none',
+    actionType: body.actionType || "none",
     actionPayload: body.actionPayload || undefined
   });
 

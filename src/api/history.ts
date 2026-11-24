@@ -17,12 +17,14 @@ export async function handleGetHistory(request: Request, env: Env): Promise<Resp
        WHERE user_id = ?
        ORDER BY pinned DESC, updated_at DESC
        LIMIT 50`
-    ).bind(session.userId).all<any>();
+    )
+      .bind(session.userId)
+      .all<any>();
 
-    const sessions = (res.results || []).map(r => {
+    const sessions = (res.results || []).map((r) => {
       let rounds = [];
       try {
-        rounds = JSON.parse(r.rounds_json || '[]');
+        rounds = JSON.parse(r.rounds_json || "[]");
       } catch (e) {}
 
       return {
@@ -45,7 +47,9 @@ export async function handleGetHistory(request: Request, env: Env): Promise<Resp
   } catch (err: any) {
     console.error("Failed to fetch history:", err);
     const isDev = env.ENVIRONMENT === "development";
-    const errorMessage = isDev ? (err?.message || "Failed to fetch history") : "Failed to fetch history";
+    const errorMessage = isDev
+      ? err?.message || "Failed to fetch history"
+      : "Failed to fetch history";
     return new Response(JSON.stringify({ error: errorMessage }), {
       status: 500,
       headers: { "Content-Type": "application/json" }
@@ -65,19 +69,27 @@ export async function handleSaveHistory(request: Request, env: Env): Promise<Res
   try {
     const body: any = await request.json();
     const sessionId = body.sessionId || body.session_id;
-    if (!sessionId || typeof sessionId !== 'string' || !sessionId.trim() || sessionId.trim().length > 64) {
-      return new Response(JSON.stringify({ error: "Invalid sessionId (must be non-empty string <= 64 chars)" }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" }
-      });
+    if (
+      !sessionId ||
+      typeof sessionId !== "string" ||
+      !sessionId.trim() ||
+      sessionId.trim().length > 64
+    ) {
+      return new Response(
+        JSON.stringify({ error: "Invalid sessionId (must be non-empty string <= 64 chars)" }),
+        {
+          status: 400,
+          headers: { "Content-Type": "application/json" }
+        }
+      );
     }
     const cleanSessionId = sessionId.trim();
 
-    const traceId = body.id || body.trace_id || ('trace-' + Date.now());
-    const rawTitle = typeof body.title === 'string' ? body.title.trim() : '';
-    const title = (rawTitle || '多模态任务编排').slice(0, 100);
-    const cost = String(body.cost ?? '0').slice(0, 32);
-    const duration = String(body.duration ?? '0s').slice(0, 32);
+    const traceId = body.id || body.trace_id || "trace-" + Date.now();
+    const rawTitle = typeof body.title === "string" ? body.title.trim() : "";
+    const title = (rawTitle || "多模态任务编排").slice(0, 100);
+    const cost = String(body.cost ?? "0").slice(0, 32);
+    const duration = String(body.duration ?? "0s").slice(0, 32);
     const nodesCount = Number(body.nodesCount ?? body.nodes_count ?? 1);
     const cached = body.cached ? 1 : 0;
     const pinned = body.pinned ? 1 : 0;
@@ -105,18 +117,20 @@ export async function handleSaveHistory(request: Request, env: Env): Promise<Res
          rounds_json = excluded.rounds_json,
          updated_at = datetime('now')
        WHERE user_chat_sessions.user_id = excluded.user_id`
-    ).bind(
-      cleanSessionId,
-      session.userId,
-      traceId,
-      title,
-      cost,
-      duration,
-      nodesCount,
-      cached,
-      pinned,
-      roundsJson
-    ).run();
+    )
+      .bind(
+        cleanSessionId,
+        session.userId,
+        traceId,
+        title,
+        cost,
+        duration,
+        nodesCount,
+        cached,
+        pinned,
+        roundsJson
+      )
+      .run();
 
     return new Response(JSON.stringify({ success: true, sessionId }), {
       headers: { "Content-Type": "application/json" }
@@ -124,7 +138,9 @@ export async function handleSaveHistory(request: Request, env: Env): Promise<Res
   } catch (err: any) {
     console.error("Failed to save history:", err);
     const isDev = env.ENVIRONMENT === "development";
-    const errorMessage = isDev ? (err?.message || "Failed to save history") : "Failed to save history";
+    const errorMessage = isDev
+      ? err?.message || "Failed to save history"
+      : "Failed to save history";
     return new Response(JSON.stringify({ error: errorMessage }), {
       status: 500,
       headers: { "Content-Type": "application/json" }
@@ -132,7 +148,11 @@ export async function handleSaveHistory(request: Request, env: Env): Promise<Res
   }
 }
 
-export async function handleUpdateHistoryItem(request: Request, env: Env, sessionId: string): Promise<Response> {
+export async function handleUpdateHistoryItem(
+  request: Request,
+  env: Env,
+  sessionId: string
+): Promise<Response> {
   const session = await getSession(request, env);
   if (!session) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
@@ -167,8 +187,10 @@ export async function handleUpdateHistoryItem(request: Request, env: Env, sessio
     values.push(session.userId);
 
     await env.DB.prepare(
-      `UPDATE user_chat_sessions SET ${updates.join(', ')} WHERE session_id = ? AND user_id = ?`
-    ).bind(...values).run();
+      `UPDATE user_chat_sessions SET ${updates.join(", ")} WHERE session_id = ? AND user_id = ?`
+    )
+      .bind(...values)
+      .run();
 
     return new Response(JSON.stringify({ success: true }), {
       headers: { "Content-Type": "application/json" }
@@ -176,7 +198,9 @@ export async function handleUpdateHistoryItem(request: Request, env: Env, sessio
   } catch (err: any) {
     console.error("Failed to update history item:", err);
     const isDev = env.ENVIRONMENT === "development";
-    const errorMessage = isDev ? (err?.message || "Failed to update history") : "Failed to update history";
+    const errorMessage = isDev
+      ? err?.message || "Failed to update history"
+      : "Failed to update history";
     return new Response(JSON.stringify({ error: errorMessage }), {
       status: 500,
       headers: { "Content-Type": "application/json" }
@@ -184,7 +208,11 @@ export async function handleUpdateHistoryItem(request: Request, env: Env, sessio
   }
 }
 
-export async function handleDeleteHistoryItem(request: Request, env: Env, sessionId: string): Promise<Response> {
+export async function handleDeleteHistoryItem(
+  request: Request,
+  env: Env,
+  sessionId: string
+): Promise<Response> {
   const session = await getSession(request, env);
   if (!session) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
@@ -196,7 +224,9 @@ export async function handleDeleteHistoryItem(request: Request, env: Env, sessio
   try {
     await env.DB.prepare(
       `DELETE FROM user_chat_sessions WHERE (session_id = ? OR trace_id = ?) AND user_id = ?`
-    ).bind(sessionId, sessionId, session.userId).run();
+    )
+      .bind(sessionId, sessionId, session.userId)
+      .run();
 
     return new Response(JSON.stringify({ success: true }), {
       headers: { "Content-Type": "application/json" }
@@ -204,7 +234,9 @@ export async function handleDeleteHistoryItem(request: Request, env: Env, sessio
   } catch (err: any) {
     console.error("Failed to delete history item:", err);
     const isDev = env.ENVIRONMENT === "development";
-    const errorMessage = isDev ? (err?.message || "Failed to delete history") : "Failed to delete history";
+    const errorMessage = isDev
+      ? err?.message || "Failed to delete history"
+      : "Failed to delete history";
     return new Response(JSON.stringify({ error: errorMessage }), {
       status: 500,
       headers: { "Content-Type": "application/json" }

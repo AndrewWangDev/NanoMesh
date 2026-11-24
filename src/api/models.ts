@@ -24,7 +24,7 @@ export async function handleGetPublicModels(request: Request, env: Env): Promise
   } catch (err: any) {
     console.error("Failed to load models:", err);
     const isDev = env.ENVIRONMENT === "development";
-    const errorMessage = isDev ? (err?.message || "Failed to load models") : "Failed to load models";
+    const errorMessage = isDev ? err?.message || "Failed to load models" : "Failed to load models";
     return new Response(JSON.stringify({ error: errorMessage }), {
       status: 500,
       headers: { "Content-Type": "application/json" }

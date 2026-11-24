@@ -18,12 +18,18 @@ export async function handleUpdateProfile(req: Request, env: Env) {
   }
 
   // Check uniqueness (case-insensitive)
-  const existing = await env.DB.prepare("SELECT user_id FROM users WHERE LOWER(username) = LOWER(?) AND user_id != ?").bind(username, session.userId).first();
+  const existing = await env.DB.prepare(
+    "SELECT user_id FROM users WHERE LOWER(username) = LOWER(?) AND user_id != ?"
+  )
+    .bind(username, session.userId)
+    .first();
   if (existing) {
     return Response.json({ error: "error.usernameExists" }, { status: 400 });
   }
 
-  await env.DB.prepare("UPDATE users SET username = ? WHERE user_id = ?").bind(username, session.userId).run();
+  await env.DB.prepare("UPDATE users SET username = ? WHERE user_id = ?")
+    .bind(username, session.userId)
+    .run();
 
   return Response.json({ success: true });
 }
@@ -36,12 +42,22 @@ export async function handleUpdatePassword(req: Request, env: Env) {
   const body: any = await safeJsonBody(req);
   const { oldPassword, newPassword } = body;
 
-  if (!newPassword || newPassword.length < 8 || newPassword.length > 64 || !/[a-zA-Z]/.test(newPassword) || !/[0-9]/.test(newPassword)) {
+  if (
+    !newPassword ||
+    newPassword.length < 8 ||
+    newPassword.length > 64 ||
+    !/[a-zA-Z]/.test(newPassword) ||
+    !/[0-9]/.test(newPassword)
+  ) {
     return Response.json({ error: "error.invalidPasswordFormat" }, { status: 400 });
   }
 
   // Get user
-  const user = await env.DB.prepare("SELECT password_hash, token_version FROM users WHERE user_id = ?").bind(session.userId).first<{password_hash: string | null; token_version: number | null}>();
+  const user = await env.DB.prepare(
+    "SELECT password_hash, token_version FROM users WHERE user_id = ?"
+  )
+    .bind(session.userId)
+    .first<{ password_hash: string | null; token_version: number | null }>();
   if (!user) return Response.json({ error: "error.userNotFound" }, { status: 404 });
 
   if (user.password_hash) {
@@ -54,12 +70,18 @@ export async function handleUpdatePassword(req: Request, env: Env) {
 
   const newHash = bcrypt.hashSync(newPassword, 10);
   const nextTokenVersion = (user.token_version ?? 1) + 1;
-  await env.DB.prepare("UPDATE users SET password_hash = ?, token_version = ? WHERE user_id = ?").bind(newHash, nextTokenVersion, session.userId).run();
+  await env.DB.prepare("UPDATE users SET password_hash = ?, token_version = ? WHERE user_id = ?")
+    .bind(newHash, nextTokenVersion, session.userId)
+    .run();
 
-  const newToken = await signJWT({ userId: session.userId, tokenVersion: nextTokenVersion }, env.JWT_SECRET, 30 * 24 * 3600);
+  const newToken = await signJWT(
+    { userId: session.userId, tokenVersion: nextTokenVersion },
+    env.JWT_SECRET,
+    30 * 24 * 3600
+  );
   const response = Response.json({ success: true, token: newToken });
   response.headers.set(
-    'Set-Cookie',
+    "Set-Cookie",
     `session=${newToken}; HttpOnly; Path=/; Max-Age=${30 * 24 * 3600}; SameSite=Lax; Secure`
   );
   return response;
@@ -70,13 +92,17 @@ export async function handleUpdateAvatar(req: Request, env: Env, ctx?: Execution
   const session = await getSession(req, env);
   if (!session) return Response.json({ error: "error.unauthorized" }, { status: 401 });
 
-  const userRow = await env.DB.prepare("SELECT avatar_url, avatar_updated_at FROM users WHERE user_id = ?").bind(session.userId).first<{avatar_url: string | null; avatar_updated_at: string | null}>();
+  const userRow = await env.DB.prepare(
+    "SELECT avatar_url, avatar_updated_at FROM users WHERE user_id = ?"
+  )
+    .bind(session.userId)
+    .first<{ avatar_url: string | null; avatar_updated_at: string | null }>();
   if (!userRow) return Response.json({ error: "error.userNotFound" }, { status: 404 });
 
   const previousAvatarUrl = userRow.avatar_url;
 
   if (userRow.avatar_updated_at) {
-    const lastUpdate = new Date(userRow.avatar_updated_at.replace(' ', 'T') + 'Z').getTime();
+    const lastUpdate = new Date(userRow.avatar_updated_at.replace(" ", "T") + "Z").getTime();
     if (Date.now() - lastUpdate < 24 * 60 * 60 * 1000) {
       return Response.json({ error: "error.avatarCooldown" }, { status: 429 });
     }
@@ -92,13 +118,13 @@ export async function handleUpdateAvatar(req: Request, env: Env, ctx?: Execution
     return Response.json({ error: "error.fileTooLarge" }, { status: 400 });
   }
 
-  const extension = file.name.split('.').pop()?.toLowerCase() || 'png';
+  const extension = file.name.split(".").pop()?.toLowerCase() || "png";
   const EXT_TO_MIME: Record<string, string> = {
-    png: 'image/png',
-    jpg: 'image/jpeg',
-    jpeg: 'image/jpeg',
-    webp: 'image/webp',
-    gif: 'image/gif'
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    webp: "image/webp",
+    gif: "image/gif"
   };
   const safeContentType = EXT_TO_MIME[extension];
   if (!safeContentType) {
@@ -106,7 +132,7 @@ export async function handleUpdateAvatar(req: Request, env: Env, ctx?: Execution
   }
 
   const objectKey = `avatars/${session.userId}_${Date.now()}.${extension}`;
-  
+
   await env.R2.put(objectKey, file.stream(), {
     httpMetadata: {
       contentType: safeContentType
@@ -115,16 +141,20 @@ export async function handleUpdateAvatar(req: Request, env: Env, ctx?: Execution
 
   const avatarUrl = `/storage/${objectKey}`;
 
-  await env.DB.prepare("UPDATE users SET avatar_url = ?, avatar_updated_at = datetime('now') WHERE user_id = ?").bind(avatarUrl, session.userId).run();
+  await env.DB.prepare(
+    "UPDATE users SET avatar_url = ?, avatar_updated_at = datetime('now') WHERE user_id = ?"
+  )
+    .bind(avatarUrl, session.userId)
+    .run();
 
-  // NM-AUDIT-07: Asynchronously clean up previous avatar from R2 to eliminate orphaned storage accumulation
+  // Asynchronously clean up previous avatar from R2 to eliminate orphaned storage accumulation
   if (previousAvatarUrl && previousAvatarUrl.startsWith("/storage/avatars/")) {
     const oldKey = previousAvatarUrl.replace("/storage/", "");
-    if (oldKey && oldKey !== objectKey && env.R2 && typeof env.R2.delete === 'function') {
-      const deletePromise = env.R2.delete(oldKey).catch(err => {
+    if (oldKey && oldKey !== objectKey && env.R2 && typeof env.R2.delete === "function") {
+      const deletePromise = env.R2.delete(oldKey).catch((err) => {
         console.warn("[R2_CLEANUP_WARN] Failed to delete old avatar:", oldKey, err);
       });
-      if (ctx && typeof ctx.waitUntil === 'function') {
+      if (ctx && typeof ctx.waitUntil === "function") {
         ctx.waitUntil(deletePromise);
       } else {
         await deletePromise;
@@ -141,7 +171,16 @@ export async function handleDeleteAccount(req: Request, env: Env) {
   if (!session) return Response.json({ error: "error.unauthorized" }, { status: 401 });
 
   // 1. Check frozen_credits
-  const user = await env.DB.prepare("SELECT email, oauth_id, oauth_provider, frozen_credits FROM users WHERE user_id = ?").bind(session.userId).first<{email: string, oauth_id: string | null, oauth_provider: string | null, frozen_credits: number}>();
+  const user = await env.DB.prepare(
+    "SELECT email, oauth_id, oauth_provider, frozen_credits FROM users WHERE user_id = ?"
+  )
+    .bind(session.userId)
+    .first<{
+      email: string;
+      oauth_id: string | null;
+      oauth_provider: string | null;
+      frozen_credits: number;
+    }>();
   if (!user) return Response.json({ error: "error.userNotFound" }, { status: 404 });
 
   if (user.frozen_credits > 0) {
@@ -152,40 +191,63 @@ export async function handleDeleteAccount(req: Request, env: Env) {
   const encoder = new TextEncoder();
   const persistentSalt = getPersistentSalt(env);
   const emailData = encoder.encode(user.email + persistentSalt);
-  const emailHashBuffer = await crypto.subtle.digest('SHA-256', emailData);
-  const emailHash = Array.from(new Uint8Array(emailHashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+  const emailHashBuffer = await crypto.subtle.digest("SHA-256", emailData);
+  const emailHash = Array.from(new Uint8Array(emailHashBuffer))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 
   // 3. Insert tombstone (with in-memory Set deduplication & INSERT OR IGNORE idempotency)
   const tombstoneHashes = new Set<string>();
   tombstoneHashes.add(emailHash);
-  await env.DB.prepare("INSERT OR IGNORE INTO account_tombstones (hash_id, type, expires_at) VALUES (?, 'email', datetime('now', '+90 days'))").bind(emailHash).run();
+  await env.DB.prepare(
+    "INSERT OR IGNORE INTO account_tombstones (hash_id, type, expires_at) VALUES (?, 'email', datetime('now', '+90 days'))"
+  )
+    .bind(emailHash)
+    .run();
 
-  const bindings = await env.DB.prepare("SELECT provider, provider_id FROM user_oauth_bindings WHERE user_id = ?").bind(session.userId).all<{provider: string; provider_id: string}>();
+  const bindings = await env.DB.prepare(
+    "SELECT provider, provider_id FROM user_oauth_bindings WHERE user_id = ?"
+  )
+    .bind(session.userId)
+    .all<{ provider: string; provider_id: string }>();
   if (bindings.results && bindings.results.length > 0) {
     for (const b of bindings.results) {
       const oauthData = encoder.encode(`${b.provider}:${b.provider_id}` + persistentSalt);
-      const oauthHashBuffer = await crypto.subtle.digest('SHA-256', oauthData);
-      const oauthHash = Array.from(new Uint8Array(oauthHashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+      const oauthHashBuffer = await crypto.subtle.digest("SHA-256", oauthData);
+      const oauthHash = Array.from(new Uint8Array(oauthHashBuffer))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
       if (!tombstoneHashes.has(oauthHash)) {
         tombstoneHashes.add(oauthHash);
-        await env.DB.prepare("INSERT OR IGNORE INTO account_tombstones (hash_id, type, expires_at) VALUES (?, 'oauth', datetime('now', '+90 days'))").bind(oauthHash).run();
+        await env.DB.prepare(
+          "INSERT OR IGNORE INTO account_tombstones (hash_id, type, expires_at) VALUES (?, 'oauth', datetime('now', '+90 days'))"
+        )
+          .bind(oauthHash)
+          .run();
       }
     }
   }
 
   if (user.oauth_provider && user.oauth_id) {
     const oauthData = encoder.encode(`${user.oauth_provider}:${user.oauth_id}` + persistentSalt);
-    const oauthHashBuffer = await crypto.subtle.digest('SHA-256', oauthData);
-    const oauthHash = Array.from(new Uint8Array(oauthHashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+    const oauthHashBuffer = await crypto.subtle.digest("SHA-256", oauthData);
+    const oauthHash = Array.from(new Uint8Array(oauthHashBuffer))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
     if (!tombstoneHashes.has(oauthHash)) {
       tombstoneHashes.add(oauthHash);
-      await env.DB.prepare("INSERT OR IGNORE INTO account_tombstones (hash_id, type, expires_at) VALUES (?, 'oauth', datetime('now', '+90 days'))").bind(oauthHash).run();
+      await env.DB.prepare(
+        "INSERT OR IGNORE INTO account_tombstones (hash_id, type, expires_at) VALUES (?, 'oauth', datetime('now', '+90 days'))"
+      )
+        .bind(oauthHash)
+        .run();
     }
   }
 
   // 4. In-place anonymization & private session erasure (GDPR compliance)
   await env.DB.batch([
-    env.DB.prepare(`
+    env.DB.prepare(
+      `
       UPDATE users 
       SET email = 'deleted_' || user_id, 
           oauth_id = NULL, 
@@ -197,7 +259,8 @@ export async function handleDeleteAccount(req: Request, env: Env) {
           credits = 0,
           token_version = token_version + 1
       WHERE user_id = ?
-    `).bind(session.userId),
+    `
+    ).bind(session.userId),
     env.DB.prepare("DELETE FROM user_chat_sessions WHERE user_id = ?").bind(session.userId),
     env.DB.prepare("DELETE FROM user_oauth_bindings WHERE user_id = ?").bind(session.userId),
     env.DB.prepare("DELETE FROM user_passkeys WHERE user_id = ?").bind(session.userId),
@@ -206,7 +269,7 @@ export async function handleDeleteAccount(req: Request, env: Env) {
   ]);
 
   // 5. Cascade cleanup of user assets in R2 (GDPR right to be forgotten)
-  if (env.R2 && typeof env.R2.list === 'function' && typeof env.R2.delete === 'function') {
+  if (env.R2 && typeof env.R2.list === "function" && typeof env.R2.delete === "function") {
     const prefixes = [`tmp/${session.userId}/`, `avatars/${session.userId}_`];
     for (const prefix of prefixes) {
       try {
@@ -215,7 +278,7 @@ export async function handleDeleteAccount(req: Request, env: Env) {
         do {
           const listed = await env.R2.list({ prefix, cursor, limit: 1000 });
           if (listed && listed.objects && listed.objects.length > 0) {
-            const keys = listed.objects.map(o => o.key);
+            const keys = listed.objects.map((o) => o.key);
             await env.R2.delete(keys);
           }
           cursor = listed.truncated ? listed.cursor : undefined;
@@ -230,9 +293,8 @@ export async function handleDeleteAccount(req: Request, env: Env) {
   // Clear cookie
   const response = Response.json({ success: true });
   response.headers.set(
-    'Set-Cookie',
+    "Set-Cookie",
     `session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0`
   );
   return response;
 }
-

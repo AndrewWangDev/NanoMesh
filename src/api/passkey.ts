@@ -37,10 +37,12 @@ export async function handlePasskeyRegisterOptions(request: Request, env: Env): 
   const rpId = getRpId(request);
   const { challenge, cookieHeader } = await createChallenge("register", env.JWT_SECRET);
 
-  // NM-NEW-01: Opportunistic cleanup of stale challenge CAS entries (> 10m old)
+  // Opportunistic cleanup of stale challenge CAS entries (> 10m old)
   env.DB.prepare(
     "DELETE FROM system_counters WHERE key LIKE 'pk_used_%' AND value < strftime('%s', 'now', '-10 minutes')"
-  ).run().catch(() => {});
+  )
+    .run()
+    .catch(() => {});
 
   const excludeCredentials = (existingKeys.results || []).map((k) => {
     let transports = ["internal"];
@@ -69,8 +71,8 @@ export async function handlePasskeyRegisterOptions(request: Request, env: Env): 
       displayName: user.username || user.email
     },
     pubKeyCredParams: [
-      { type: "public-key", alg: -7 },   // ES256
-      { type: "public-key", alg: -257 }  // RS256
+      { type: "public-key", alg: -7 }, // ES256
+      { type: "public-key", alg: -257 } // RS256
     ],
     timeout: 60000,
     attestation: "none",
@@ -126,12 +128,14 @@ export async function handlePasskeyRegisterVerify(request: Request, env: Env): P
     return Response.json({ error: "error.passkeyChallengeExpired" }, { status: 400 });
   }
 
-  // NM-SEC-03 & NM-NEW-01: Single-use challenge consumption via CAS in system_counters with creation timestamp
+  // Single-use challenge consumption via CAS in system_counters with creation timestamp
   const nowEpoch = Math.floor(Date.now() / 1000);
   const regChallengeKey = `pk_used_${clientData.challenge}`;
   const regCasResult = await env.DB.prepare(
     "INSERT OR IGNORE INTO system_counters (key, value) VALUES (?, ?)"
-  ).bind(regChallengeKey, nowEpoch).run();
+  )
+    .bind(regChallengeKey, nowEpoch)
+    .run();
 
   if (regCasResult.meta.changes === 0) {
     console.error(`[Passkey Security Violation] Challenge replayed: ${regChallengeKey}`);
@@ -143,7 +147,10 @@ export async function handlePasskeyRegisterVerify(request: Request, env: Env): P
   try {
     parsedAttestation = await parseAttestationObject(base64UrlToBuffer(response.attestationObject));
   } catch (err: any) {
-    return Response.json({ error: err.message || "error.passkeyAttestationFailed" }, { status: 400 });
+    return Response.json(
+      { error: err.message || "error.passkeyAttestationFailed" },
+      { status: 400 }
+    );
   }
 
   // 3. Verify rpIdHash
@@ -165,11 +172,14 @@ export async function handlePasskeyRegisterVerify(request: Request, env: Env): P
   const credentialId = id;
   const publicKeyB64 = bufferToBase64Url(parsedAttestation.publicKeySpki);
   const transportsJson = JSON.stringify(response.transports || ["internal"]);
-  const friendlyName = (typeof deviceName === "string" && deviceName.trim()) 
-    ? deviceName.trim().slice(0, 50) 
-    : "Passkey";
+  const friendlyName =
+    typeof deviceName === "string" && deviceName.trim()
+      ? deviceName.trim().slice(0, 50)
+      : "Passkey";
 
-  const existing = await env.DB.prepare("SELECT credential_id FROM user_passkeys WHERE credential_id = ?")
+  const existing = await env.DB.prepare(
+    "SELECT credential_id FROM user_passkeys WHERE credential_id = ?"
+  )
     .bind(credentialId)
     .first();
 
@@ -177,11 +187,13 @@ export async function handlePasskeyRegisterVerify(request: Request, env: Env): P
     return Response.json({ error: "error.passkeyAlreadyExists" }, { status: 400 });
   }
 
-  await env.DB.prepare(`
+  await env.DB.prepare(
+    `
     INSERT INTO user_passkeys (
       credential_id, user_id, public_key, public_key_alg, counter, device_name, aaguid, transports
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `)
+  `
+  )
     .bind(
       credentialId,
       auth.userId,
@@ -207,12 +219,14 @@ export async function handlePasskeyList(request: Request, env: Env): Promise<Res
   const auth = await requireAuth(request, env);
   if (auth instanceof Response) return auth;
 
-  const { results } = await env.DB.prepare(`
+  const { results } = await env.DB.prepare(
+    `
     SELECT credential_id, device_name, aaguid, transports, created_at, last_used_at
     FROM user_passkeys
     WHERE user_id = ?
     ORDER BY created_at DESC
-  `)
+  `
+  )
     .bind(auth.userId)
     .all();
 
@@ -323,10 +337,12 @@ export async function handlePasskeyLoginOptions(request: Request, env: Env): Pro
   const headers = new Headers({ "Content-Type": "application/json" });
   headers.set("Set-Cookie", cookieHeader);
 
-  // NM-NEW-01: Opportunistic cleanup of stale challenge CAS entries (> 10m old)
+  // Opportunistic cleanup of stale challenge CAS entries (> 10m old)
   env.DB.prepare(
     "DELETE FROM system_counters WHERE key LIKE 'pk_used_%' AND value < strftime('%s', 'now', '-10 minutes')"
-  ).run().catch(() => {});
+  )
+    .run()
+    .catch(() => {});
 
   return new Response(JSON.stringify(options), { status: 200, headers });
 }
@@ -335,16 +351,24 @@ export async function handlePasskeyLoginVerify(request: Request, env: Env): Prom
   const body: any = await safeJsonBody(request);
   const { id, rawId, response } = body;
 
-  if (!id || !response || !response.clientDataJSON || !response.authenticatorData || !response.signature) {
+  if (
+    !id ||
+    !response ||
+    !response.clientDataJSON ||
+    !response.authenticatorData ||
+    !response.signature
+  ) {
     return Response.json({ error: "error.passkeyInvalidPayload" }, { status: 400 });
   }
 
   // 1. Fetch passkey from database
-  const passkey = await env.DB.prepare(`
+  const passkey = await env.DB.prepare(
+    `
     SELECT credential_id, user_id, public_key, public_key_alg, counter
     FROM user_passkeys
     WHERE credential_id = ?
-  `)
+  `
+  )
     .bind(id)
     .first<{
       credential_id: string;
@@ -363,7 +387,7 @@ export async function handlePasskeyLoginVerify(request: Request, env: Env): Prom
     .bind(passkey.user_id)
     .first<any>();
 
-  // NM-SEC-02: Block deactivated / tombstoned accounts
+  // Block deactivated or tombstoned accounts
   if (!user || (user.email && user.email.startsWith("deleted_"))) {
     return Response.json({ error: "error.userNotFound" }, { status: 401 });
   }
@@ -395,12 +419,14 @@ export async function handlePasskeyLoginVerify(request: Request, env: Env): Prom
     return Response.json({ error: "error.passkeyChallengeExpired" }, { status: 400 });
   }
 
-  // NM-SEC-03 & NM-NEW-01: Single-use challenge consumption via CAS in system_counters with creation timestamp
+  // Single-use challenge consumption via CAS in system_counters with creation timestamp
   const nowEpoch = Math.floor(Date.now() / 1000);
   const loginChallengeKey = `pk_used_${clientData.challenge}`;
   const loginCasResult = await env.DB.prepare(
     "INSERT OR IGNORE INTO system_counters (key, value) VALUES (?, ?)"
-  ).bind(loginChallengeKey, nowEpoch).run();
+  )
+    .bind(loginChallengeKey, nowEpoch)
+    .run();
 
   if (loginCasResult.meta.changes === 0) {
     console.error(`[Passkey Security Violation] Challenge replayed: ${loginChallengeKey}`);
@@ -437,23 +463,34 @@ export async function handlePasskeyLoginVerify(request: Request, env: Env): Prom
 
   // If counter is enabled and decreases/repeats (unless 0), reject authentication per W3C WebAuthn spec Section 7.2
   if (newCounter > 0 && passkey.counter > 0 && newCounter <= passkey.counter) {
-    console.error(`[Passkey Security Violation] Cloned authenticator or replay detected: newCounter=${newCounter}, storedCounter=${passkey.counter}`);
+    console.error(
+      `[Passkey Security Violation] Cloned authenticator or replay detected: newCounter=${newCounter}, storedCounter=${passkey.counter}`
+    );
     return Response.json({ error: "error.clonedAuthenticatorDetected" }, { status: 403 });
   }
 
-  await env.DB.prepare(`
+  await env.DB.prepare(
+    `
     UPDATE user_passkeys
     SET counter = ?, last_used_at = datetime('now')
     WHERE credential_id = ?
-  `)
+  `
+  )
     .bind(newCounter, passkey.credential_id)
     .run();
 
   // 6. Issue JWT session token
-  const token = await signJWT({ userId: user.user_id, tokenVersion: user.token_version || 1 }, env.JWT_SECRET, SESSION_TTL_SECONDS);
+  const token = await signJWT(
+    { userId: user.user_id, tokenVersion: user.token_version || 1 },
+    env.JWT_SECRET,
+    SESSION_TTL_SECONDS
+  );
 
   const headers = new Headers({ "Content-Type": "application/json" });
-  headers.append("Set-Cookie", `session=${token}; HttpOnly; Path=/; Max-Age=${SESSION_TTL_SECONDS}; SameSite=Lax; Secure`);
+  headers.append(
+    "Set-Cookie",
+    `session=${token}; HttpOnly; Path=/; Max-Age=${SESSION_TTL_SECONDS}; SameSite=Lax; Secure`
+  );
   headers.append("Set-Cookie", clearChallengeCookie());
 
   return new Response(

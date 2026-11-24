@@ -2,9 +2,13 @@ import { Env } from "../types";
 import { signJWT } from "./jwt";
 
 // GitHub
-export async function getGitHubAuthURL(env: Env, action: string = 'login', userId?: string): Promise<string> {
+export async function getGitHubAuthURL(
+  env: Env,
+  action: string = "login",
+  userId?: string
+): Promise<string> {
   const payload: any = { nonce: crypto.randomUUID(), action };
-  if (action === 'bind' && userId) {
+  if (action === "bind" && userId) {
     payload.userId = userId;
   }
   const state = await signJWT(payload, env.JWT_SECRET, 300); // 5 min
@@ -22,7 +26,7 @@ export async function handleGitHubCallback(code: string, state: string, env: Env
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Accept": "application/json"
+      Accept: "application/json"
     },
     body: JSON.stringify({
       client_id: env.GITHUB_CLIENT_ID,
@@ -31,34 +35,36 @@ export async function handleGitHubCallback(code: string, state: string, env: Env
       redirect_uri: `${env.FRONTEND_URL}/api/auth/callback/github`
     })
   });
-  
+
   const tokenData: any = await tokenRes.json();
   if (tokenData.error) throw new Error(tokenData.error_description || tokenData.error);
-  
+
   const accessToken = tokenData.access_token;
-  
+
   // Fetch user info
   const userRes = await fetch("https://api.github.com/user", {
     headers: {
-      "Authorization": `Bearer ${accessToken}`,
+      Authorization: `Bearer ${accessToken}`,
       "User-Agent": "NanoMesh-Auth"
     }
   });
   const userData: any = await userRes.json();
-  
+
   // Fetch user emails
   const emailsRes = await fetch("https://api.github.com/user/emails", {
     headers: {
-      "Authorization": `Bearer ${accessToken}`,
+      Authorization: `Bearer ${accessToken}`,
       "User-Agent": "NanoMesh-Auth"
     }
   });
   const emailsData: any[] = await emailsRes.json();
-  const verifiedPrimary = emailsData.find(e => e.primary && e.verified)?.email || emailsData.find(e => e.verified)?.email;
+  const verifiedPrimary =
+    emailsData.find((e) => e.primary && e.verified)?.email ||
+    emailsData.find((e) => e.verified)?.email;
   if (!verifiedPrimary) {
     throw new Error("GitHub account has no verified email address");
   }
-  
+
   return {
     id: String(userData.id),
     email: verifiedPrimary,
@@ -68,9 +74,13 @@ export async function handleGitHubCallback(code: string, state: string, env: Env
 }
 
 // Google
-export async function getGoogleAuthURL(env: Env, action: string = 'login', userId?: string): Promise<string> {
+export async function getGoogleAuthURL(
+  env: Env,
+  action: string = "login",
+  userId?: string
+): Promise<string> {
   const payload: any = { nonce: crypto.randomUUID(), action };
-  if (action === 'bind' && userId) {
+  if (action === "bind" && userId) {
     payload.userId = userId;
   }
   const state = await signJWT(payload, env.JWT_SECRET, 300); // 5 min
@@ -97,25 +107,25 @@ export async function handleGoogleCallback(code: string, state: string, env: Env
       redirect_uri: `${env.FRONTEND_URL}/api/auth/callback/google`
     }).toString()
   });
-  
+
   const tokenData: any = await tokenRes.json();
   if (tokenData.error) throw new Error(tokenData.error_description || tokenData.error);
-  
+
   const accessToken = tokenData.access_token;
-  
+
   const userRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
-    headers: { "Authorization": `Bearer ${accessToken}` }
+    headers: { Authorization: `Bearer ${accessToken}` }
   });
   const userData: any = await userRes.json();
-  
+
   if (!userData.verified_email) {
     throw new Error("Google account has no verified email address");
   }
-  
+
   return {
     id: userData.id,
     email: userData.email,
-    name: userData.name || userData.email.split('@')[0],
+    name: userData.name || userData.email.split("@")[0],
     picture: userData.picture
   };
 }

@@ -10,7 +10,7 @@
 export async function safeJsonBody<T = any>(request: Request): Promise<T> {
   try {
     const raw = await request.json();
-    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
       return raw as T;
     }
     return {} as T;
