@@ -1,3 +1,10 @@
+================================================================================
+[ARCHIVED HISTORICAL DESIGN DRAFT / 历史架构设计草稿]
+This document is an unformatted early draft preserved strictly for historical context.
+For active production architecture, routing mechanisms, and API contracts,
+please refer to README.md and DEPLOY.md in the repository root.
+================================================================================
+
 NanoMesh
 
 核心：具备自主认知的分布式AI调度系统，下一代共享算力的微模型基础设施网络。

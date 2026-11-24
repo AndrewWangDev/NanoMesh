@@ -8,7 +8,7 @@
 [![TypeScript](https://img.shields.io/badge/Language-TypeScript%205.x-3178C6.svg)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 
-[English](#english) | [简体中文](#简体中文) | [README_zh.md](./README_zh.md)
+[English](#english) | [简体中文](#简体中文) | [README_zh.md](./README_zh.md) | [Deployment Guide (DEPLOY.md)](./DEPLOY.md)
 
 ---
 
@@ -192,6 +192,10 @@ Eligible models undergo quantitative ranking:
    - $\tau = 0.65$ (Specialist activation threshold)
    - $\beta = 0.25$ (Quality rating weight, where $R_m \in [1, 5]$)
    - $\gamma = 0.40$ (Quadratic concurrency penalty weight)
+
+   > [!NOTE]
+   > **Edge Concurrency Decoupling Note**:
+   > In Cloudflare Workers serverless edge execution, maintaining transactional active connection counters in Cloudflare D1 across geographically distributed edge PoPs causes serialization locks and latency. Therefore, the production runtime sets `concurrency_penalty: 0.0` in `src/orchestration/scoring.ts`, relying on health probes, HTTP retry budgets, and semantic score affinity instead of stateful edge locks. The quadratic concurrency formula represents the theoretical design specification.
 3. **Topology Instantiation**: The highest-scoring candidate (Top 1) is selected as the Primary Model; Top 2 and Top 3 are preserved as Standby Models for manual client switching or automatic failover.
 
 ---
@@ -575,6 +579,10 @@ interface AssetDescriptor {
    - $\tau = 0.65$（专才门控激活阈值）
    - $\beta = 0.25$（综合评分权重，其中 $R_m \in [1, 5]$）
    - $\gamma = 0.40$（二次方并发惩罚系数，负载接近满载时抑制分配）
+
+   > [!NOTE]
+   > **边缘无服务器并发解耦说明**：
+   > 在 Cloudflare Workers 全球边缘网络中，若在每次子请求调度时跨区域高频写入 D1 数据库记录连接数，会导致显著的事务排队锁竞争与延迟。因此当前生产环境在 `src/orchestration/scoring.ts` 中采用解耦设计（`concurrency_penalty: 0.0`），通过健康探针与自适应重试机制替代中心化连接计数锁。该二次方并发公式保留为系统的理论设计基准。
 3. **拓扑实例化**：评分第 1 名作为主执行模型（Primary Model）；第 2、3 名写入备选模型池（Standby Models），供前端随时热切换或网关故障转移。
 
 ---
@@ -777,6 +785,15 @@ NanoMesh 定位为自适应推理调度引擎与协议网关，**本项目不打
 #### 11.4 隐私安全与合规保障
 - **端侧数据隐私（GDPR / CCPA）**：端侧 WebGPU 节点执行完全驻留于客户端本地浏览器内存沙箱，原始输入与张量不经过服务端，天然符合数据最小化（Data Minimization）隐私保护原则。
 - **出口合规**：本项目公开源代码符合美国出口管制条例 EAR99 / EAR 740.13(e)（License Exception TSU 公开可用加密软件豁免）。
+
+---
+
+### 12. 架构路线图与演进规划 (Architecture Roadmap)
+
+- **通用多分支 DAG 执行引擎 (Universal Arbitrary DAG Engine)**:
+  当前生产环境采用高稳定性的“具备动态边缘路由与角色序列回退的有序多阶段编排流水线（Ordered Multi-Stage Orchestration Pipeline）”。后续规划将进一步升级为支持任意有向无环图的通用调度引擎，引入动态分支并发广播（Fan-out）、多节点栅栏同步汇合（Barrier Join Aggregation）与条件边断言求解。
+- **接收端状态化防重放核销网关 (Stateful Replay Cache Sidecar)**:
+  为外部独立部署的 Heavy 算力节点提供轻量级 Redis / Bloom Filter 状态核销 Sidecar 镜像，配合边缘 Worker 签发的唯一 `jti` 与 60s 短有效期，达成开箱即用的端到端防重放硬件锁。
 
 ---
 

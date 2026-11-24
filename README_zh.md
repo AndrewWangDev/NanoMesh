@@ -8,7 +8,7 @@
 [![TypeScript](https://img.shields.io/badge/Language-TypeScript%205.x-3178C6.svg)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 
-[English](./README.md) | [简体中文](./README_zh.md)
+[English](./README.md) | [简体中文](./README_zh.md) | [部署指南 (DEPLOY_zh.md)](./DEPLOY_zh.md)
 
 ---
 

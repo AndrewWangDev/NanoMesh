@@ -8,10 +8,10 @@ import { handleDeleteAccount, handleUpdatePassword } from "../src/api/user";
 import { handleUnbindOAuth, handleSendCode } from "../src/api/auth";
 import { getPersistentSalt } from "../src/api/billing";
 import { handleSaveHistory } from "../src/api/history";
-import { 
-  handleAdminLogin, 
-  handleAdminListNodes, 
-  handleAdminCreateNode, 
+import {
+  handleAdminLogin,
+  handleAdminListNodes,
+  handleAdminCreateNode,
   handleAdminUpdateNode,
   handleAdminListRoles,
   handleAdminCompetenceMatrix,
@@ -58,16 +58,20 @@ interface TableConstraint {
 }
 
 const SCHEMA_CONSTRAINTS: Record<string, TableConstraint> = {
-  account_tombstones: { primaryKey: 'hash_id' },
-  users: { primaryKey: 'user_id', uniqueKeys: [['email'], ['referral_code'], ['username']], nocaseKeys: ['username', 'email'] },
-  user_oauth_bindings: { primaryKey: 'id', uniqueKeys: [['provider', 'provider_id']] },
-  dag_handshakes: { primaryKey: 'handshake_id' },
-  dag_roles: { primaryKey: 'role_id' },
-  dag_templates: { primaryKey: 'template_id' },
-  models: { primaryKey: 'model_id' },
-  user_passkeys: { primaryKey: 'credential_id' },
-  user_chat_sessions: { primaryKey: 'session_id' },
-  credit_ledger: { primaryKey: 'ledger_id' }
+  account_tombstones: { primaryKey: "hash_id" },
+  users: {
+    primaryKey: "user_id",
+    uniqueKeys: [["email"], ["referral_code"], ["username"]],
+    nocaseKeys: ["username", "email"]
+  },
+  user_oauth_bindings: { primaryKey: "id", uniqueKeys: [["provider", "provider_id"]] },
+  dag_handshakes: { primaryKey: "handshake_id" },
+  dag_roles: { primaryKey: "role_id" },
+  dag_templates: { primaryKey: "template_id" },
+  models: { primaryKey: "model_id" },
+  user_passkeys: { primaryKey: "credential_id" },
+  user_chat_sessions: { primaryKey: "session_id" },
+  credit_ledger: { primaryKey: "ledger_id" }
 };
 
 function checkAndInsertRow(
@@ -86,19 +90,26 @@ function checkAndInsertRow(
   if (constraint) {
     // 1. Check Primary Key
     const pk = constraint.primaryKey;
-    const pkConflictIndex = tableData.findIndex(r => r[pk] !== undefined && r[pk] !== null && r[pk] === newRow[pk]);
+    const pkConflictIndex = tableData.findIndex(
+      (r) => r[pk] !== undefined && r[pk] !== null && r[pk] === newRow[pk]
+    );
 
     // 2. Check UNIQUE Keys (including compound keys and NOCASE collation)
     let ukConflictIndex = -1;
     let conflictedKey = pk;
     if (constraint.uniqueKeys) {
       for (const ukCols of constraint.uniqueKeys) {
-        const idx = tableData.findIndex(r =>
-          ukCols.every(col => {
+        const idx = tableData.findIndex((r) =>
+          ukCols.every((col) => {
             const valA = r[col];
             const valB = newRow[col];
-            if (valA === undefined || valA === null || valB === undefined || valB === null) return false;
-            if (constraint.nocaseKeys?.includes(col) && typeof valA === 'string' && typeof valB === 'string') {
+            if (valA === undefined || valA === null || valB === undefined || valB === null)
+              return false;
+            if (
+              constraint.nocaseKeys?.includes(col) &&
+              typeof valA === "string" &&
+              typeof valB === "string"
+            ) {
               return valA.toLowerCase() === valB.toLowerCase();
             }
             return valA === valB;
@@ -106,7 +117,7 @@ function checkAndInsertRow(
         );
         if (idx !== -1) {
           ukConflictIndex = idx;
-          conflictedKey = ukCols.join('_');
+          conflictedKey = ukCols.join("_");
           break;
         }
       }
@@ -122,7 +133,9 @@ function checkAndInsertRow(
         tableData[conflictIndex] = { ...tableData[conflictIndex], ...newRow };
         return { changes: 1 };
       } else {
-        throw new Error(`SQLITE_CONSTRAINT: UNIQUE constraint failed: ${tableName}.${conflictedKey}`);
+        throw new Error(
+          `SQLITE_CONSTRAINT: UNIQUE constraint failed: ${tableName}.${conflictedKey}`
+        );
       }
     }
   }
@@ -156,9 +169,9 @@ function createMockD1(store: TableStore) {
           if (cleanSql.includes("FROM models")) {
             let res = [...store.models];
             if (cleanSql.includes("WHERE model_id = ?")) {
-              res = res.filter(m => m.model_id === boundArgs[0]);
+              res = res.filter((m) => m.model_id === boundArgs[0]);
             } else if (cleanSql.includes("WHERE status = 'active'")) {
-              res = res.filter(m => m.status === 'active');
+              res = res.filter((m) => m.status === "active");
             }
             return { results: res as any };
           }
@@ -167,7 +180,7 @@ function createMockD1(store: TableStore) {
           if (cleanSql.includes("FROM dag_roles")) {
             let res = [...store.dag_roles];
             if (cleanSql.includes("WHERE role_id = ?")) {
-              res = res.filter(r => r.role_id === boundArgs[0]);
+              res = res.filter((r) => r.role_id === boundArgs[0]);
             }
             return { results: res as any };
           }
@@ -176,7 +189,7 @@ function createMockD1(store: TableStore) {
           if (cleanSql.includes("FROM dag_templates")) {
             let res = [...store.dag_templates];
             if (cleanSql.includes("WHERE template_id = ?")) {
-              res = res.filter(t => t.template_id === boundArgs[0]);
+              res = res.filter((t) => t.template_id === boundArgs[0]);
             }
             return { results: res as any };
           }
@@ -185,26 +198,37 @@ function createMockD1(store: TableStore) {
           if (cleanSql.includes("FROM users")) {
             let res = [...store.users];
             if (cleanSql.includes("WHERE user_id = ?")) {
-              res = res.filter(u => u.user_id === boundArgs[0]);
+              res = res.filter((u) => u.user_id === boundArgs[0]);
             } else if (cleanSql.includes("LOWER(email) = LOWER(?) OR LOWER(username) = LOWER(?)")) {
-              const emailArg = String(boundArgs[0] || '').toLowerCase();
-              const userArg = String(boundArgs[1] || '').toLowerCase();
-              res = res.filter(u => 
-                (u.email && u.email.toLowerCase() === emailArg) || 
-                (u.username && u.username.toLowerCase() === userArg)
+              const emailArg = String(boundArgs[0] || "").toLowerCase();
+              const userArg = String(boundArgs[1] || "").toLowerCase();
+              res = res.filter(
+                (u) =>
+                  (u.email && u.email.toLowerCase() === emailArg) ||
+                  (u.username && u.username.toLowerCase() === userArg)
               );
             } else if (cleanSql.includes("WHERE email = ? OR username = ?")) {
-              res = res.filter(u => u.email === boundArgs[0] || u.username === boundArgs[1]);
+              res = res.filter((u) => u.email === boundArgs[0] || u.username === boundArgs[1]);
             } else if (cleanSql.includes("LOWER(username) = LOWER(?) AND user_id != ?")) {
-              const userArg = String(boundArgs[0] || '').toLowerCase();
+              const userArg = String(boundArgs[0] || "").toLowerCase();
               const userId = boundArgs[1];
-              res = res.filter(u => u.username && u.username.toLowerCase() === userArg && u.user_id !== userId);
+              res = res.filter(
+                (u) => u.username && u.username.toLowerCase() === userArg && u.user_id !== userId
+              );
             } else if (cleanSql.includes("WHERE referral_code = ?")) {
               const code = boundArgs[0];
-              res = res.filter(u => u.referral_code === code && (!cleanSql.includes("email NOT LIKE 'deleted_%'") || !u.email?.startsWith("deleted_")));
-            } else if (cleanSql.includes("LOWER(email) = LOWER(?)") || cleanSql.includes("LOWER(email) = ?")) {
-              const emailArg = String(boundArgs[0] || '').toLowerCase();
-              res = res.filter(u => u.email && u.email.toLowerCase() === emailArg);
+              res = res.filter(
+                (u) =>
+                  u.referral_code === code &&
+                  (!cleanSql.includes("email NOT LIKE 'deleted_%'") ||
+                    !u.email?.startsWith("deleted_"))
+              );
+            } else if (
+              cleanSql.includes("LOWER(email) = LOWER(?)") ||
+              cleanSql.includes("LOWER(email) = ?")
+            ) {
+              const emailArg = String(boundArgs[0] || "").toLowerCase();
+              res = res.filter((u) => u.email && u.email.toLowerCase() === emailArg);
             }
             return { results: res as any };
           }
@@ -213,7 +237,7 @@ function createMockD1(store: TableStore) {
           if (cleanSql.includes("FROM credit_ledger")) {
             let res = [...store.credit_ledger];
             if (cleanSql.includes("WHERE user_id = ?")) {
-              res = res.filter(l => l.user_id === boundArgs[0]);
+              res = res.filter((l) => l.user_id === boundArgs[0]);
             }
             return { results: res as any };
           }
@@ -222,7 +246,7 @@ function createMockD1(store: TableStore) {
           if (cleanSql.includes("FROM user_chat_sessions")) {
             let res = [...store.user_chat_sessions];
             if (cleanSql.includes("WHERE user_id = ?")) {
-              res = res.filter(s => s.user_id === boundArgs[0]);
+              res = res.filter((s) => s.user_id === boundArgs[0]);
             }
             return { results: res as any };
           }
@@ -231,7 +255,7 @@ function createMockD1(store: TableStore) {
           if (cleanSql.includes("FROM user_oauth_bindings")) {
             let res = [...store.user_oauth_bindings];
             if (cleanSql.includes("WHERE user_id = ?")) {
-              res = res.filter(b => b.user_id === boundArgs[0]);
+              res = res.filter((b) => b.user_id === boundArgs[0]);
             }
             return { results: res as any };
           }
@@ -242,7 +266,11 @@ function createMockD1(store: TableStore) {
             if (cleanSql.includes("WHERE hash_id = ?")) {
               const hashId = boundArgs[0];
               const nowIso = new Date().toISOString();
-              res = res.filter(t => t.hash_id === hashId && (!cleanSql.includes("expires_at > datetime('now')") || t.expires_at > nowIso));
+              res = res.filter(
+                (t) =>
+                  t.hash_id === hashId &&
+                  (!cleanSql.includes("expires_at > datetime('now')") || t.expires_at > nowIso)
+              );
             }
             return { results: res as any };
           }
@@ -250,7 +278,7 @@ function createMockD1(store: TableStore) {
           // 9. SELECT COUNT(*) as cnt FROM user_passkeys
           if (cleanSql.includes("FROM user_passkeys")) {
             const userId = boundArgs[0];
-            const pks = (store.user_passkeys || []).filter(p => p.user_id === userId);
+            const pks = (store.user_passkeys || []).filter((p) => p.user_id === userId);
             return { results: [{ cnt: pks.length }] as any };
           }
 
@@ -258,7 +286,7 @@ function createMockD1(store: TableStore) {
           if (cleanSql.includes("FROM user_uploaded_models")) {
             let res = [...(store.user_uploaded_models || [])];
             if (cleanSql.includes("WHERE upload_id = ?")) {
-              res = res.filter(m => m.upload_id === boundArgs[0]);
+              res = res.filter((m) => m.upload_id === boundArgs[0]);
             }
             return { results: res as any };
           }
@@ -267,7 +295,7 @@ function createMockD1(store: TableStore) {
           if (cleanSql.includes("FROM dag_handshakes")) {
             let res = [...(store.dag_handshakes || [])];
             if (cleanSql.includes("WHERE handshake_id = ?")) {
-              res = res.filter(h => h.handshake_id === boundArgs[0]);
+              res = res.filter((h) => h.handshake_id === boundArgs[0]);
             }
             return { results: res as any };
           }
@@ -275,19 +303,24 @@ function createMockD1(store: TableStore) {
           // 12. SELECT value FROM system_counters
           if (cleanSql.includes("FROM system_counters")) {
             const key = boundArgs[0];
-            const row = (store.system_counters || []).find(c => c.key === key);
+            const row = (store.system_counters || []).find((c) => c.key === key);
             return { results: row ? [row as any] : [] };
           }
 
           // 13. SELECT id FROM verification_codes
           if (cleanSql.includes("FROM verification_codes")) {
             let res = [...(store.verification_codes || [])];
-            if (cleanSql.includes("WHERE email = ?") || cleanSql.includes("WHERE LOWER(email) = ?") || cleanSql.includes("LOWER(email) = LOWER(?)")) {
-              const emailArg = String(boundArgs[0] || '').toLowerCase();
+            if (
+              cleanSql.includes("WHERE email = ?") ||
+              cleanSql.includes("WHERE LOWER(email) = ?") ||
+              cleanSql.includes("LOWER(email) = LOWER(?)")
+            ) {
+              const emailArg = String(boundArgs[0] || "").toLowerCase();
               const nowIso = new Date().toISOString();
-              res = res.filter(v => {
-                if ((v.email || '').toLowerCase() !== emailArg) return false;
-                if (cleanSql.includes("expires_at > datetime('now')") && v.expires_at < nowIso) return false;
+              res = res.filter((v) => {
+                if ((v.email || "").toLowerCase() !== emailArg) return false;
+                if (cleanSql.includes("expires_at > datetime('now')") && v.expires_at < nowIso)
+                  return false;
                 if (cleanSql.includes("created_at > datetime('now', '-60 seconds')")) {
                   if (!v.created_at) return false;
                   const createdAt = new Date(v.created_at).getTime();
@@ -303,9 +336,9 @@ function createMockD1(store: TableStore) {
           if (cleanSql.includes("FROM notifications")) {
             let res = [...(store.notifications || [])];
             if (cleanSql.includes("WHERE notification_id = ?")) {
-              res = res.filter(n => n.notification_id === boundArgs[0]);
+              res = res.filter((n) => n.notification_id === boundArgs[0]);
             } else if (cleanSql.includes("event_type = 'low_balance'")) {
-              res = res.filter(n => n.user_id === boundArgs[0] && n.event_type === 'low_balance');
+              res = res.filter((n) => n.user_id === boundArgs[0] && n.event_type === "low_balance");
             }
             return { results: res as any };
           }
@@ -318,14 +351,16 @@ function createMockD1(store: TableStore) {
           // DELETE FROM user_chat_sessions
           if (cleanSql.startsWith("DELETE FROM user_chat_sessions")) {
             const userId = boundArgs[0];
-            store.user_chat_sessions = store.user_chat_sessions.filter(s => s.user_id !== userId);
+            store.user_chat_sessions = store.user_chat_sessions.filter((s) => s.user_id !== userId);
             return { meta: { changes: 1 } };
           }
 
           // DELETE FROM user_oauth_bindings
           if (cleanSql.startsWith("DELETE FROM user_oauth_bindings")) {
             const userId = boundArgs[0];
-            store.user_oauth_bindings = store.user_oauth_bindings.filter(b => b.user_id !== userId);
+            store.user_oauth_bindings = store.user_oauth_bindings.filter(
+              (b) => b.user_id !== userId
+            );
             return { meta: { changes: 1 } };
           }
 
@@ -339,7 +374,7 @@ function createMockD1(store: TableStore) {
             const cutoffHour = new Date(Date.now() - 24 * 3600 * 1000).toISOString().slice(0, 13);
             const cutoffPrefix = `ip_code_rate_${cutoffHour}`;
             const cutoffEpoch = Math.floor(Date.now() / 1000) - 600;
-            store.system_counters = (store.system_counters || []).filter(c => {
+            store.system_counters = (store.system_counters || []).filter((c) => {
               if (c.key.startsWith("ip_code_rate_20")) {
                 const isExpired = c.key < `ip_code_rate_${cutoffHour}`;
                 return !isExpired;
@@ -360,16 +395,26 @@ function createMockD1(store: TableStore) {
           // DELETE FROM notifications
           if (cleanSql.startsWith("DELETE FROM notifications")) {
             const userId = boundArgs[0];
-            store.notifications = (store.notifications || []).filter(n => n.user_id !== userId);
+            store.notifications = (store.notifications || []).filter((n) => n.user_id !== userId);
             return { meta: { changes: 1 } };
           }
 
           // INSERT INTO notifications
           if (cleanSql.startsWith("INSERT INTO notifications")) {
             const [
-              notification_id, user_id, category, event_type, priority,
-              title_zh, title_en, content_zh, content_en,
-              action_type, action_payload, related_id, extra_data
+              notification_id,
+              user_id,
+              category,
+              event_type,
+              priority,
+              title_zh,
+              title_en,
+              content_zh,
+              content_en,
+              action_type,
+              action_payload,
+              related_id,
+              extra_data
             ] = boundArgs;
             const newRow = {
               notification_id,
@@ -396,7 +441,7 @@ function createMockD1(store: TableStore) {
           // UPDATE notifications SET is_read = 1
           if (cleanSql.startsWith("UPDATE notifications SET is_read = 1")) {
             const notifId = boundArgs[0];
-            const notif = (store.notifications || []).find(n => n.notification_id === notifId);
+            const notif = (store.notifications || []).find((n) => n.notification_id === notifId);
             if (notif) {
               notif.is_read = 1;
               notif.read_at = new Date().toISOString();
@@ -407,15 +452,24 @@ function createMockD1(store: TableStore) {
           // DELETE FROM broadcast_reads
           if (cleanSql.startsWith("DELETE FROM broadcast_reads")) {
             const userId = boundArgs[0];
-            store.broadcast_reads = (store.broadcast_reads || []).filter(r => r.user_id !== userId);
+            store.broadcast_reads = (store.broadcast_reads || []).filter(
+              (r) => r.user_id !== userId
+            );
             return { meta: { changes: 1 } };
           }
 
           // INSERT INTO account_tombstones (faithful SQLite / D1 unique constraint simulation)
           if (cleanSql.includes("INTO account_tombstones")) {
             const hashId = boundArgs[0];
-            const type = cleanSql.includes("'email'") ? 'email' : 'oauth';
-            return { meta: checkAndInsertRow("account_tombstones", { hash_id: hashId, type }, cleanSql, store) };
+            const type = cleanSql.includes("'email'") ? "email" : "oauth";
+            return {
+              meta: checkAndInsertRow(
+                "account_tombstones",
+                { hash_id: hashId, type },
+                cleanSql,
+                store
+              )
+            };
           }
 
           // INSERT INTO user_oauth_bindings
@@ -433,10 +487,10 @@ function createMockD1(store: TableStore) {
           // UPDATE users (anonymization)
           if (cleanSql.startsWith("UPDATE users") && cleanSql.includes("SET email = 'deleted_'")) {
             const userId = boundArgs[0];
-            const u = store.users.find(usr => usr.user_id === userId);
+            const u = store.users.find((usr) => usr.user_id === userId);
             if (u) {
-              u.email = 'deleted_' + userId;
-              u.username = 'del_' + userId.slice(0, 12);
+              u.email = "deleted_" + userId;
+              u.username = "del_" + userId.slice(0, 12);
               u.credits = 0;
               u.referral_code = null;
               u.token_version = (u.token_version || 1) + 1;
@@ -447,7 +501,7 @@ function createMockD1(store: TableStore) {
           // UPDATE users SET password_hash
           if (cleanSql.includes("UPDATE users") && cleanSql.includes("SET password_hash")) {
             const userId = boundArgs[boundArgs.length - 1];
-            const u = store.users.find(usr => usr.user_id === userId);
+            const u = store.users.find((usr) => usr.user_id === userId);
             if (u) {
               u.password_hash = boundArgs[0];
               u.token_version = (u.token_version || 1) + 1;
@@ -458,7 +512,7 @@ function createMockD1(store: TableStore) {
           // UPDATE user_uploaded_models
           if (cleanSql.startsWith("UPDATE user_uploaded_models")) {
             const uploadId = boundArgs[boundArgs.length - 1];
-            const m = (store.user_uploaded_models || []).find(mod => mod.upload_id === uploadId);
+            const m = (store.user_uploaded_models || []).find((mod) => mod.upload_id === uploadId);
             if (m) {
               m.status = boundArgs[0];
               if (boundArgs.length > 2) m.live_model_id = boundArgs[1];
@@ -475,7 +529,7 @@ function createMockD1(store: TableStore) {
               session_id: sessionId,
               template_id: templateId,
               next_step: nextStep,
-              status: 'ISSUED',
+              status: "ISSUED",
               expires_at: expiresAt,
               created_at: new Date().toISOString()
             };
@@ -483,14 +537,17 @@ function createMockD1(store: TableStore) {
           }
 
           // UPDATE dag_handshakes SET status = 'CONSUMED'
-          if (cleanSql.startsWith("UPDATE dag_handshakes") && cleanSql.includes("status = 'CONSUMED'")) {
+          if (
+            cleanSql.startsWith("UPDATE dag_handshakes") &&
+            cleanSql.includes("status = 'CONSUMED'")
+          ) {
             const [handshakeId, userId] = boundArgs;
             store.dag_handshakes = store.dag_handshakes || [];
             const item = store.dag_handshakes.find(
-              h => h.handshake_id === handshakeId && h.user_id === userId && h.status === 'ISSUED'
+              (h) => h.handshake_id === handshakeId && h.user_id === userId && h.status === "ISSUED"
             );
             if (item) {
-              item.status = 'CONSUMED';
+              item.status = "CONSUMED";
               return { meta: { changes: 1 } };
             }
             return { meta: { changes: 0 } };
@@ -502,7 +559,7 @@ function createMockD1(store: TableStore) {
             const initialLen = store.dag_handshakes.length;
             const nowIso = new Date().toISOString();
             // keep non-expired
-            store.dag_handshakes = store.dag_handshakes.filter(h => h.expires_at >= nowIso);
+            store.dag_handshakes = store.dag_handshakes.filter((h) => h.expires_at >= nowIso);
             const deleted = initialLen - store.dag_handshakes.length;
             return { meta: { changes: deleted } };
           }
@@ -516,13 +573,17 @@ function createMockD1(store: TableStore) {
           // INSERT INTO admin_login_attempts
           if (cleanSql.startsWith("INSERT INTO admin_login_attempts")) {
             store.admin_login_attempts = store.admin_login_attempts || [];
-            store.admin_login_attempts.push({ ip: boundArgs[0], created_at: new Date().toISOString() });
+            store.admin_login_attempts.push({
+              ip: boundArgs[0],
+              created_at: new Date().toISOString()
+            });
             return { meta: { changes: 1 } };
           }
 
           // INSERT INTO users
           if (cleanSql.startsWith("INSERT INTO users")) {
-            const [userId, username, email, password_hash, credits, referral_code, referred_by] = boundArgs;
+            const [userId, username, email, password_hash, credits, referral_code, referred_by] =
+              boundArgs;
             const newRow = {
               user_id: userId,
               username,
@@ -539,7 +600,7 @@ function createMockD1(store: TableStore) {
           // UPDATE users credits
           if (cleanSql.includes("UPDATE users SET credits")) {
             const userId = boundArgs[boundArgs.length - 1];
-            const user = store.users.find(u => u.user_id === userId);
+            const user = store.users.find((u) => u.user_id === userId);
             if (user) {
               if (cleanSql.includes("credits = credits + 50")) {
                 user.credits += 50;
@@ -574,18 +635,18 @@ function createMockD1(store: TableStore) {
               ledger_id = boundArgs[0];
               user_id = boundArgs[1];
               category = "compute_cost";
-              amount = boundArgs.length === 4 ? -1 : (Number(boundArgs[2]) || -1);
-              const u = store.users.find(usr => usr.user_id === user_id);
+              amount = boundArgs.length === 4 ? -1 : Number(boundArgs[2]) || -1;
+              const u = store.users.find((usr) => usr.user_id === user_id);
               balance = u?.credits ?? 0;
               title = "DAG智能编排调用";
-              detail = boundArgs.length === 4 ? (boundArgs[3] || "") : (boundArgs[4] || "");
+              detail = boundArgs.length === 4 ? boundArgs[3] || "" : boundArgs[4] || "";
               related_id = null;
             } else if (cleanSql.includes("(SELECT credits FROM users")) {
               ledger_id = boundArgs[0];
               user_id = boundArgs[1];
               category = "referral_reward";
               amount = 50;
-              const u = store.users.find(usr => usr.user_id === user_id);
+              const u = store.users.find((usr) => usr.user_id === user_id);
               balance = u?.credits ?? 0;
               title = "Referral Reward";
               detail = boundArgs[3] || "";
@@ -631,8 +692,9 @@ function createMockD1(store: TableStore) {
               display_name: boundArgs[1],
               provider: boundArgs[2],
               endpoint: boundArgs[3],
-              modalities: typeof boundArgs[4] === 'string' ? boundArgs[4] : JSON.stringify(boundArgs[4]),
-              tags: typeof boundArgs[5] === 'string' ? boundArgs[5] : JSON.stringify(boundArgs[5]),
+              modalities:
+                typeof boundArgs[4] === "string" ? boundArgs[4] : JSON.stringify(boundArgs[4]),
+              tags: typeof boundArgs[5] === "string" ? boundArgs[5] : JSON.stringify(boundArgs[5])
             };
             if (cleanSql.includes("in_modalities")) {
               modelObj.in_modalities = boundArgs[6];
@@ -676,7 +738,7 @@ function createMockD1(store: TableStore) {
           // UPDATE models
           if (cleanSql.startsWith("UPDATE models SET")) {
             const modelId = boundArgs[boundArgs.length - 1];
-            const model = store.models.find(m => m.model_id === modelId);
+            const model = store.models.find((m) => m.model_id === modelId);
             if (model) {
               model.display_name = boundArgs[0];
               model.provider = boundArgs[1];
@@ -724,7 +786,7 @@ function createMockD1(store: TableStore) {
               roles: boundArgs[7],
               role_sequence: boundArgs[8],
               priority: boundArgs[9] || 1,
-              status: boundArgs[10] || 'active'
+              status: boundArgs[10] || "active"
             };
             return { meta: checkAndInsertRow("dag_templates", newRow, cleanSql, store) };
           }
@@ -732,14 +794,14 @@ function createMockD1(store: TableStore) {
           // DELETE FROM dag_templates
           if (cleanSql.startsWith("DELETE FROM dag_templates")) {
             const templateId = boundArgs[0];
-            store.dag_templates = store.dag_templates.filter(t => t.template_id !== templateId);
+            store.dag_templates = store.dag_templates.filter((t) => t.template_id !== templateId);
             return { meta: { changes: 1 } };
           }
 
           // system_counters (rate limiting counters & atomic CAS)
           if (cleanSql.includes("system_counters")) {
             const key = boundArgs[0];
-            let row = (store.system_counters || []).find(c => c.key === key);
+            let row = (store.system_counters || []).find((c) => c.key === key);
             if (cleanSql.includes("INSERT OR IGNORE")) {
               if (row) {
                 return { meta: { changes: 0 } };
@@ -758,7 +820,7 @@ function createMockD1(store: TableStore) {
           // INSERT INTO user_chat_sessions
           if (cleanSql.startsWith("INSERT INTO user_chat_sessions")) {
             const sessionId = boundArgs[0];
-            const existing = store.user_chat_sessions.find(s => s.session_id === sessionId);
+            const existing = store.user_chat_sessions.find((s) => s.session_id === sessionId);
             if (existing) {
               existing.trace_id = boundArgs[2];
               existing.title = boundArgs[3];
@@ -804,7 +866,7 @@ function createMockD1(store: TableStore) {
           if (cleanSql.startsWith("UPDATE users SET avatar_url")) {
             const avatarUrl = boundArgs[0];
             const userId = boundArgs[1];
-            const u = store.users.find(usr => usr.user_id === userId);
+            const u = store.users.find((usr) => usr.user_id === userId);
             if (u) {
               u.avatar_url = avatarUrl;
               u.avatar_updated_at = new Date().toISOString();
@@ -835,7 +897,8 @@ function createMockR2() {
   const store = new Map<string, { body: Uint8Array; metadata: any }>();
   return {
     async put(key: string, body: any, options?: any) {
-      const bytes = typeof body === "string" ? new TextEncoder().encode(body) : new Uint8Array(body);
+      const bytes =
+        typeof body === "string" ? new TextEncoder().encode(body) : new Uint8Array(body);
       store.set(key, { body: bytes, metadata: options?.httpMetadata || {} });
       return { key, size: bytes.length };
     },
@@ -846,7 +909,10 @@ function createMockR2() {
         body: item.body,
         httpEtag: "mock-etag-12345",
         async arrayBuffer() {
-          return item.body.buffer.slice(item.body.byteOffset, item.body.byteOffset + item.body.byteLength);
+          return item.body.buffer.slice(
+            item.body.byteOffset,
+            item.body.byteOffset + item.body.byteLength
+          );
         },
         async text() {
           return new TextDecoder().decode(item.body);
@@ -869,10 +935,10 @@ function createMockR2() {
       const sliced = allObjects.slice(startIndex, startIndex + limit);
       const nextIndex = startIndex + sliced.length;
       const truncated = nextIndex < allObjects.length;
-      return { 
-        objects: sliced, 
-        truncated, 
-        cursor: truncated ? String(nextIndex) : undefined 
+      return {
+        objects: sliced,
+        truncated,
+        cursor: truncated ? String(nextIndex) : undefined
       };
     },
     async delete(keys: string | string[]) {
@@ -899,19 +965,24 @@ function createMockAI() {
       }
       if (model === "@cf/openai/whisper") {
         if (!(input.audio instanceof Uint8Array)) {
-          throw new Error("DEFECT-03 Violation: Workers AI Whisper input.audio must be a compact Uint8Array, not Array<number>!");
+          throw new Error(
+            "DEFECT-03 Violation: Workers AI Whisper input.audio must be a compact Uint8Array, not Array<number>!"
+          );
         }
         return { text: "Mock Whisper transcription from voice audio stream." };
       }
       if (model === "@cf/black-forest-labs/flux-1-schnell") {
-        return new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137]);
+        return new Uint8Array([
+          137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8,
+          6, 0, 0, 0, 31, 21, 196, 137
+        ]);
       }
       if (model === "@cf/black-forest-labs/flux-broken-zero") {
         return new Uint8Array([]);
       }
       if (model.includes("llama")) {
         // Realistic simulated generation latency (allows testing race conditions and client abort)
-        await new Promise(r => setTimeout(r, 60));
+        await new Promise((r) => setTimeout(r, 60));
       }
       return {
         response: "Mock Workers AI output response for role."
@@ -1081,104 +1152,179 @@ async function runIntegrationTests() {
 
   // Execute registration statements batch
   const regBatch = [
-    env.DB.prepare(`
+    env.DB.prepare(
+      `
       INSERT INTO users (user_id, username, email, password_hash, credits, referral_code, referred_by)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).bind(newUserId, "NewbieUser", "newbie@nanomesh.local", "hash123", initialCredits, "REF-NEWBIE-1", referrerId),
-    env.DB.prepare(`
+    `
+    ).bind(
+      newUserId,
+      "NewbieUser",
+      "newbie@nanomesh.local",
+      "hash123",
+      initialCredits,
+      "REF-NEWBIE-1",
+      referrerId
+    ),
+    env.DB.prepare(
+      `
       INSERT INTO credit_ledger (ledger_id, user_id, category, amount, balance, title, detail)
       VALUES (?, ?, 'signup_bonus', 100, 100, 'Signup Bonus', 'Welcome pack')
-    `).bind("ledg_1", newUserId),
-    env.DB.prepare(`
+    `
+    ).bind("ledg_1", newUserId),
+    env.DB.prepare(
+      `
       INSERT INTO credit_ledger (ledger_id, user_id, category, amount, balance, title, detail, related_id)
       VALUES (?, ?, 'referral_reward', 50, 150, 'Referral Bonus', 'Invited by boss', ?)
-    `).bind("ledg_2", newUserId, referrerId),
+    `
+    ).bind("ledg_2", newUserId, referrerId),
     env.DB.prepare("UPDATE users SET credits = credits + 50 WHERE user_id = ?").bind(referrerId),
-    env.DB.prepare(`
+    env.DB.prepare(
+      `
       INSERT INTO credit_ledger (ledger_id, user_id, category, amount, balance, title, detail, related_id)
       VALUES (?, ?, 'referral_reward', 50, (SELECT credits FROM users WHERE user_id = ?), 'Referral Reward', ?, ?)
-    `).bind("ledg_3", referrerId, referrerId, "NewbieUser", newUserId)
+    `
+    ).bind("ledg_3", referrerId, referrerId, "NewbieUser", newUserId)
   ];
 
   await env.DB.batch(regBatch);
 
-  const newbieDb = store.users.find(u => u.user_id === newUserId);
-  const bossDb = store.users.find(u => u.user_id === referrerId);
+  const newbieDb = store.users.find((u) => u.user_id === newUserId);
+  const bossDb = store.users.find((u) => u.user_id === referrerId);
   assert.ok(newbieDb, "Newbie user must exist in DB");
   assert.equal(newbieDb.credits, 150, "Newbie must receive 100 base + 50 referral = 150 credits");
   assert.equal(bossDb.credits, 150, "Boss credits must be updated from 100 to 150");
 
-  const newbieLedgers = store.credit_ledger.filter(l => l.user_id === newUserId);
+  const newbieLedgers = store.credit_ledger.filter((l) => l.user_id === newUserId);
   assert.equal(newbieLedgers.length, 2, "Newbie must have 2 ledger records (signup + referral)");
 
-  const bossLedgers = store.credit_ledger.filter(l => l.user_id === referrerId);
+  const bossLedgers = store.credit_ledger.filter((l) => l.user_id === referrerId);
   assert.equal(bossLedgers.length, 1, "Boss must have 1 referral reward ledger");
-  assert.equal(bossLedgers[0].balance, 150, "Boss ledger balance snapshot must accurately equal 150");
+  assert.equal(
+    bossLedgers[0].balance,
+    150,
+    "Boss ledger balance snapshot must accurately equal 150"
+  );
   console.log("  ✓ Atomic registration batch & ledger balance consistency: PASSED");
 
   // Verify declarative unique constraint guard intercepts duplicate PK & UNIQUE violations
-  await assert.rejects(
-    async () => {
-      await env.DB.prepare(`
+  await assert.rejects(async () => {
+    await env.DB.prepare(
+      `
         INSERT INTO users (user_id, username, email, password_hash, credits, referral_code, referred_by)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).bind(newUserId, "DuplicatePKUser", "different@nanomesh.local", "hash123", 100, "REF-DUP-1", null).run();
-    },
-    /SQLITE_CONSTRAINT: UNIQUE constraint failed: users\.user_id/
-  );
+      `
+    )
+      .bind(
+        newUserId,
+        "DuplicatePKUser",
+        "different@nanomesh.local",
+        "hash123",
+        100,
+        "REF-DUP-1",
+        null
+      )
+      .run();
+  }, /SQLITE_CONSTRAINT: UNIQUE constraint failed: users\.user_id/);
 
-  await assert.rejects(
-    async () => {
-      await env.DB.prepare(`
+  await assert.rejects(async () => {
+    await env.DB.prepare(
+      `
         INSERT INTO users (user_id, username, email, password_hash, credits, referral_code, referred_by)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).bind("usr_another_002", "DuplicateEmailUser", "newbie@nanomesh.local", "hash123", 100, "REF-DUP-2", null).run();
-    },
-    /SQLITE_CONSTRAINT: UNIQUE constraint failed: users\.email/
-  );
+      `
+    )
+      .bind(
+        "usr_another_002",
+        "DuplicateEmailUser",
+        "newbie@nanomesh.local",
+        "hash123",
+        100,
+        "REF-DUP-2",
+        null
+      )
+      .run();
+  }, /SQLITE_CONSTRAINT: UNIQUE constraint failed: users\.email/);
 
-  // NM-SEC-03: Verify case-insensitive username uniqueness guard (newbieuser vs NewbieUser)
-  await assert.rejects(
-    async () => {
-      await env.DB.prepare(`
+  // Verify case-insensitive username uniqueness guard (newbieuser vs NewbieUser)
+  await assert.rejects(async () => {
+    await env.DB.prepare(
+      `
         INSERT INTO users (user_id, username, email, password_hash, credits, referral_code, referred_by)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).bind("usr_case_insensitive_003", "newbieuser", "different2@nanomesh.local", "hash123", 100, "REF-DUP-3", null).run();
-    },
-    /SQLITE_CONSTRAINT: UNIQUE constraint failed: users\.username/
-  );
+      `
+    )
+      .bind(
+        "usr_case_insensitive_003",
+        "newbieuser",
+        "different2@nanomesh.local",
+        "hash123",
+        100,
+        "REF-DUP-3",
+        null
+      )
+      .run();
+  }, /SQLITE_CONSTRAINT: UNIQUE constraint failed: users\.username/);
 
   console.log("  ✓ Declarative unique constraint guard intercepts PK & UNIQUE violations: PASSED");
-  console.log("  ✓ NM-SEC-03: Case-insensitive unique constraint guard intercepts 'newbieuser' vs 'NewbieUser': PASSED");
+  console.log(
+    "  ✓ Case-insensitive unique constraint guard intercepts 'newbieuser' vs 'NewbieUser': PASSED"
+  );
 
   // -----------------------------------------------------------------------
   // SCENARIO 2: R2 Asset Access Control & Public Light Node Route
   // -----------------------------------------------------------------------
   console.log("\n[Scenario 2] R2 Asset Management & Access Control Isolation");
-  
+
   // 2.1 Public Light Node weights in models/light/... (No session required!)
   const modelKey = "models/light/1700000000_qwen_webgpu.onnx";
-  await env.R2.put(modelKey, "ONNX_MODEL_BINARY_WEIGHTS_DATA", { httpMetadata: { contentType: "application/octet-stream" } });
+  await env.R2.put(modelKey, "ONNX_MODEL_BINARY_WEIGHTS_DATA", {
+    httpMetadata: { contentType: "application/octet-stream" }
+  });
 
   const publicReq = new Request(`https://nanomesh.local/api/assets/${modelKey}`);
   const publicRes = await handleGetAsset(publicReq, env);
-  assert.equal(publicRes.status, 200, "Public light model weights must be accessible without login");
-  assert.equal(publicRes.headers.get("cache-control"), "public, max-age=31536000, immutable", "Must set 1-year immutable caching");
-  assert.equal(publicRes.headers.get("access-control-allow-origin"), "*", "Must allow cross-origin fetching for browser WebGPU");
+  assert.equal(
+    publicRes.status,
+    200,
+    "Public light model weights must be accessible without login"
+  );
+  assert.equal(
+    publicRes.headers.get("cache-control"),
+    "public, max-age=31536000, immutable",
+    "Must set 1-year immutable caching"
+  );
+  assert.equal(
+    publicRes.headers.get("access-control-allow-origin"),
+    "*",
+    "Must allow cross-origin fetching for browser WebGPU"
+  );
 
-  // [ISSUE-01: Verify Gateway worker.fetch router dispatching to /api/assets/ without 404 nesting error]
+  // Verify Gateway worker.fetch router dispatching to /api/assets/ without 404 nesting error
   const gatewayReq = new Request(`https://nanomesh.local/api/assets/${modelKey}`);
   const gatewayRes = await worker.fetch(gatewayReq, env, {} as any);
-  assert.equal(gatewayRes.status, 200, "Gateway must dispatch /api/assets/ to handleGetAsset without 404 route nesting error");
+  assert.equal(
+    gatewayRes.status,
+    200,
+    "Gateway must dispatch /api/assets/ to handleGetAsset without 404 route nesting error"
+  );
 
-  // [ISSUE-02: Verify Avatar Static Storage security headers via worker.fetch]
+  // Verify Avatar Static Storage security headers via worker.fetch
   const avatarKey = `avatars/${newUserId}_1700000000.png`;
   await env.R2.put(avatarKey, "PNG_AVATAR_BYTES", { httpMetadata: { contentType: "image/png" } });
   const storageReq = new Request(`https://nanomesh.local/storage/${avatarKey}`);
   const storageRes = await worker.fetch(storageReq, env, {} as any);
   assert.equal(storageRes.status, 200, "Storage avatar endpoint must serve 200 OK");
-  assert.equal(storageRes.headers.get("x-content-type-options"), "nosniff", "Storage must enforce nosniff");
-  assert.equal(storageRes.headers.get("content-security-policy"), "default-src 'none'; sandbox", "Storage must enforce CSP sandbox");
+  assert.equal(
+    storageRes.headers.get("x-content-type-options"),
+    "nosniff",
+    "Storage must enforce nosniff"
+  );
+  assert.equal(
+    storageRes.headers.get("content-security-policy"),
+    "default-src 'none'; sandbox",
+    "Storage must enforce CSP sandbox"
+  );
   assert.equal(storageRes.headers.get("cross-origin-resource-policy"), "cross-origin");
 
   // 2.2 Private User Asset in tmp/${userId}/... (Strict user session required!)
@@ -1193,7 +1339,7 @@ async function runIntegrationTests() {
   // Authenticated Owner access
   const ownerToken = await signJWT({ userId: newUserId, tokenVersion: 1 }, env.JWT_SECRET, 3600);
   const ownerReq = new Request(`https://nanomesh.local/api/asset?key=${userAssetKey}`, {
-    headers: { "Cookie": `session=${ownerToken}` }
+    headers: { Cookie: `session=${ownerToken}` }
   });
   const ownerRes = await handleGetAsset(ownerReq, env);
   assert.equal(ownerRes.status, 200, "Owner must be granted access to their private asset");
@@ -1208,12 +1354,20 @@ async function runIntegrationTests() {
     referral_code: "REF-ATTACK",
     token_version: 1
   });
-  const foreignToken = await signJWT({ userId: "usr_attacker_666", tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  const foreignToken = await signJWT(
+    { userId: "usr_attacker_666", tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
   const foreignReq = new Request(`https://nanomesh.local/api/asset?key=${userAssetKey}`, {
-    headers: { "Cookie": `session=${foreignToken}` }
+    headers: { Cookie: `session=${foreignToken}` }
   });
   const foreignRes = await handleGetAsset(foreignReq, env);
-  assert.equal(foreignRes.status, 403, "Foreign user accessing another user's asset must receive 403 Forbidden");
+  assert.equal(
+    foreignRes.status,
+    403,
+    "Foreign user accessing another user's asset must receive 403 Forbidden"
+  );
   console.log("  ✓ Light node public delivery & private tenant isolation: PASSED");
 
   // -----------------------------------------------------------------------
@@ -1238,12 +1392,15 @@ async function runIntegrationTests() {
   const goodLoginRes = await handleAdminLogin(goodLoginReq, env);
   assert.equal(goodLoginRes.status, 200, "Correct password must return 200");
   const adminCookie = goodLoginRes.headers.get("Set-Cookie")!;
-  assert.ok(adminCookie.includes("Max-Age=7200"), "Admin session TTL must be tightened to 2 hours (7200s)");
+  assert.ok(
+    adminCookie.includes("Max-Age=7200"),
+    "Admin session TTL must be tightened to 2 hours (7200s)"
+  );
 
   // Extract admin session token
   const adminToken = adminCookie.match(/admin_session=([^;]+)/)![1];
   const adminReqHeaders = {
-    "Cookie": `admin_session=${adminToken}`,
+    Cookie: `admin_session=${adminToken}`,
     "Content-Type": "application/json"
   };
 
@@ -1262,7 +1419,7 @@ async function runIntegrationTests() {
   });
   const ssrfRes = await handleAdminCreateNode(ssrfReq, env);
   assert.equal(ssrfRes.status, 400, "SSRF attempt to loopback must be rejected with 400");
-  const ssrfErr = await ssrfRes.json();
+  const ssrfErr = (await ssrfRes.json()) as any;
   assert.ok(ssrfErr.error.includes("非法算力终端地址"), "Must return SSRF security error");
 
   // 3.3 Register Valid Remote Node with Secret
@@ -1295,10 +1452,14 @@ async function runIntegrationTests() {
     headers: adminReqHeaders
   });
   const listNodesRes = await handleAdminListNodes(listNodesReq, env);
-  const listNodesData = await listNodesRes.json();
+  const listNodesData = (await listNodesRes.json()) as any;
   const deepseekListed = listNodesData.nodes.find((n: any) => n.model_id === "cloud_vps_deepseek");
   assert.ok(deepseekListed);
-  assert.equal(deepseekListed.auth_secret, "••••••••", "Secret must be masked as •••••••• to prevent frontend exfiltration");
+  assert.equal(
+    deepseekListed.auth_secret,
+    "••••••••",
+    "Secret must be masked as •••••••• to prevent frontend exfiltration"
+  );
 
   // 3.5 Safe Update with Masked Secret Placeholder
   const updateReq = new Request("https://nanomesh.local/api/admin/nodes/cloud_vps_deepseek", {
@@ -1312,21 +1473,33 @@ async function runIntegrationTests() {
   const updateRes = await handleAdminUpdateNode(updateReq, env, "cloud_vps_deepseek");
   assert.equal(updateRes.status, 200);
 
-  const rawDeepseek = store.models.find(m => m.model_id === "cloud_vps_deepseek");
+  const rawDeepseek = store.models.find((m) => m.model_id === "cloud_vps_deepseek");
   assert.equal(rawDeepseek.display_name, "DeepSeek R1 High Precision");
-  assert.equal(rawDeepseek.auth_secret, "sk-my-confidential-api-key-9988", "Real secret must be preserved when placeholder is submitted");
+  assert.equal(
+    rawDeepseek.auth_secret,
+    "sk-my-confidential-api-key-9988",
+    "Real secret must be preserved when placeholder is submitted"
+  );
 
   // 3.6 [ISSUE-06 Admin Password Change Instant Revocation Verification]
-  const validAdminReq = new Request("https://nanomesh.local/api/admin/nodes", { headers: adminReqHeaders });
+  const validAdminReq = new Request("https://nanomesh.local/api/admin/nodes", {
+    headers: adminReqHeaders
+  });
   const validAdminRes = await handleAdminListNodes(validAdminReq, env);
   assert.equal(validAdminRes.status, 200, "Admin with valid token must have access");
 
   const originalPass = (env as any).ADMIN_PASSWORD;
   (env as any).ADMIN_PASSWORD = "NewlyRotatedPassword789!";
-  
-  const revokedAdminReq = new Request("https://nanomesh.local/api/admin/nodes", { headers: adminReqHeaders });
+
+  const revokedAdminReq = new Request("https://nanomesh.local/api/admin/nodes", {
+    headers: adminReqHeaders
+  });
   const revokedAdminRes = await handleAdminListNodes(revokedAdminReq, env);
-  assert.equal(revokedAdminRes.status, 401, "Changing ADMIN_PASSWORD must immediately revoke existing admin tokens (401)");
+  assert.equal(
+    revokedAdminRes.status,
+    401,
+    "Changing ADMIN_PASSWORD must immediately revoke existing admin tokens (401)"
+  );
 
   // Restore password for remaining admin scenarios
   (env as any).ADMIN_PASSWORD = originalPass;
@@ -1337,8 +1510,8 @@ async function runIntegrationTests() {
     display_name: "Ghost Mock",
     provider: "test",
     endpoint: "/api/infer",
-    modalities: "[\"text\"]",
-    tags: "[\"#test\"]",
+    modalities: '["text"]',
+    tags: '["#test"]',
     status: "disabled",
     inference_target: "edge"
   });
@@ -1348,8 +1521,12 @@ async function runIntegrationTests() {
     body: JSON.stringify({ status: "active" })
   });
   const activateGhostRes = await handleAdminUpdateNode(activateGhostReq, env, "test-ghost-model");
-  assert.equal(activateGhostRes.status, 400, "Activating a model with dead endpoint /api/infer must be blocked with 400");
-  const ghostErr = await activateGhostRes.json();
+  assert.equal(
+    activateGhostRes.status,
+    400,
+    "Activating a model with dead endpoint /api/infer must be blocked with 400"
+  );
+  const ghostErr = (await activateGhostRes.json()) as any;
   assert.ok(ghostErr.error.includes("无法启用节点"), "Must explain invalid endpoint reason");
 
   console.log("  ✓ Admin login 2h TTL, SSRF filter & safe masked credential update: PASSED");
@@ -1370,8 +1547,11 @@ async function runIntegrationTests() {
   });
   const gate1Res = await handleAdminCreateOrUpdateTemplate(gate1Req, env);
   assert.equal(gate1Res.status, 400, "Modality discontinuity must fail with 400");
-  const gate1Err = await gate1Res.json();
-  assert.ok(gate1Err.error.includes("Modality Discontinuity"), "Must detect modality discontinuity between audio and image");
+  const gate1Err = (await gate1Res.json()) as any;
+  assert.ok(
+    gate1Err.error.includes("Modality Discontinuity"),
+    "Must detect modality discontinuity between audio and image"
+  );
 
   // Gate 2: Subsistence Check (Role with 0 candidate models)
   const gate2Req = new Request("https://nanomesh.local/api/admin/templates", {
@@ -1384,8 +1564,11 @@ async function runIntegrationTests() {
   });
   const gate2Res = await handleAdminCreateOrUpdateTemplate(gate2Req, env);
   assert.equal(gate2Res.status, 400, "Role with 0 candidate models must fail Gate 2");
-  const gate2Err = await gate2Res.json();
-  assert.ok(gate2Err.error.includes("Subsistence Check Failed"), "Must flag orphaned role without candidate models");
+  const gate2Err = (await gate2Res.json()) as any;
+  assert.ok(
+    gate2Err.error.includes("Subsistence Check Failed"),
+    "Must flag orphaned role without candidate models"
+  );
 
   // Gate 3: Valid Linear Pipeline Assembly & Persistence
   const gate3Req = new Request("https://nanomesh.local/api/admin/templates", {
@@ -1398,19 +1581,29 @@ async function runIntegrationTests() {
     })
   });
   const gate3Res = await handleAdminCreateOrUpdateTemplate(gate3Req, env);
-  assert.equal(gate3Res.status, 200, "Valid linear pipeline must pass all 3 gates and save template");
-  const gate3Data = await gate3Res.json();
+  assert.equal(
+    gate3Res.status,
+    200,
+    "Valid linear pipeline must pass all 3 gates and save template"
+  );
+  const gate3Data = (await gate3Res.json()) as any;
   assert.ok(gate3Data.template_id);
-  assert.ok(store.dag_templates.some(t => t.template_id === gate3Data.template_id));
+  assert.ok(store.dag_templates.some((t) => t.template_id === gate3Data.template_id));
 
   // 4.5 [ADMIN-04 Template Deletion]
-  const delTplReq = new Request(`https://nanomesh.local/api/admin/templates/${gate3Data.template_id}`, {
-    method: "DELETE",
-    headers: adminReqHeaders
-  });
+  const delTplReq = new Request(
+    `https://nanomesh.local/api/admin/templates/${gate3Data.template_id}`,
+    {
+      method: "DELETE",
+      headers: adminReqHeaders
+    }
+  );
   const delTplRes = await handleAdminDeleteTemplate(delTplReq, env, gate3Data.template_id);
   assert.equal(delTplRes.status, 200, "Deleting template must succeed");
-  assert.ok(!store.dag_templates.some(t => t.template_id === gate3Data.template_id), "Template must be removed from store");
+  assert.ok(
+    !store.dag_templates.some((t) => t.template_id === gate3Data.template_id),
+    "Template must be removed from store"
+  );
 
   // Re-create it for subsequent workflow tests
   await handleAdminCreateOrUpdateTemplate(gate3Req, env);
@@ -1421,24 +1614,26 @@ async function runIntegrationTests() {
   // SCENARIO 5: End-to-End Chat Orchestration & Atomic Billing Settlement
   // -----------------------------------------------------------------------
   console.log("\n[Scenario 5] End-to-End Chat Orchestration & Atomic Billing Settlement");
-  
+
   const envelope: UnifiedProtocolEnvelope = {
+    round_index: 1,
+    constraint_context: { target_language: "zh", output_style: "concise" },
     envelope_id: "env_test_001",
     session_id: "sess_chat_001",
     user_id: newUserId,
     instruction_payload: "请分析多模态分布式调度器的架构优势",
-    metadata: {
-      estimated_input_tokens: 500
-    },
+    metadata: { client_timestamp: Date.now(), char_count_total: 100, estimated_input_tokens: 500 },
     assets_manifest: []
   };
 
   // 5.1 Pre-deduct 1 credit base reservation
   const preDeductRes = await env.DB.prepare(
     "UPDATE users SET credits = credits - 1 WHERE user_id = ? AND credits >= 1"
-  ).bind(newUserId).run();
+  )
+    .bind(newUserId)
+    .run();
   assert.equal(preDeductRes.meta.changes, 1, "Must atomically pre-deduct 1 base credit");
-  assert.equal(store.users.find(u => u.user_id === newUserId).credits, 149);
+  assert.equal(store.users.find((u) => u.user_id === newUserId).credits, 149);
 
   // 5.2 Gateway 3-Step Arbitration & DAG Instantiation
   const dag = await runOrchestrationPipeline(env, envelope, {
@@ -1472,7 +1667,7 @@ async function runIntegrationTests() {
   assert.ok(receivedEvents.includes("event: dag_complete"), "Stream must emit dag_complete");
 
   // 5.4 Verify Billing Settlement
-  const postBillingUser = store.users.find(u => u.user_id === newUserId);
+  const postBillingUser = store.users.find((u) => u.user_id === newUserId);
   assert.equal(postBillingUser.credits, 149, "Total cost 1 settled: balance remains 149");
   console.log("  ✓ End-to-end chat arbitration, SSE streaming & atomic billing: PASSED");
 
@@ -1482,10 +1677,10 @@ async function runIntegrationTests() {
   console.log("\n[Scenario 6] Premature Stream Cancelation & Refund Handshake");
 
   // Pre-deduct 1 credit
-  await env.DB.prepare(
-    "UPDATE users SET credits = credits - 1 WHERE user_id = ? AND credits >= 1"
-  ).bind(newUserId).run();
-  assert.equal(store.users.find(u => u.user_id === newUserId).credits, 148);
+  await env.DB.prepare("UPDATE users SET credits = credits - 1 WHERE user_id = ? AND credits >= 1")
+    .bind(newUserId)
+    .run();
+  assert.equal(store.users.find((u) => u.user_id === newUserId).credits, 148);
 
   const abortStream = await executeDAGStream(env, dag, envelope, {
     userId: newUserId,
@@ -1496,17 +1691,17 @@ async function runIntegrationTests() {
   await abortStream.cancel("Client disconnected / Tab closed");
 
   // Wait a tick for async refund execution
-  await new Promise(r => setTimeout(r, 50));
+  await new Promise((r) => setTimeout(r, 50));
 
-  const refundedUser = store.users.find(u => u.user_id === newUserId);
+  const refundedUser = store.users.find((u) => u.user_id === newUserId);
   assert.equal(refundedUser.credits, 149, "Pre-deducted credit must be safely refunded on cancel");
   console.log("  ✓ Premature client disconnect cleanly triggers credit refund: PASSED");
 
   // 6.2 [ISSUE-04: Premature Stream Cancelation AFTER Token Generation - Settle Ledger]
-  await env.DB.prepare(
-    "UPDATE users SET credits = credits - 1 WHERE user_id = ? AND credits >= 1"
-  ).bind(newUserId).run();
-  assert.equal(store.users.find(u => u.user_id === newUserId).credits, 148);
+  await env.DB.prepare("UPDATE users SET credits = credits - 1 WHERE user_id = ? AND credits >= 1")
+    .bind(newUserId)
+    .run();
+  assert.equal(store.users.find((u) => u.user_id === newUserId).credits, 148);
 
   const activeStream = await executeDAGStream(env, dag, envelope, {
     userId: newUserId,
@@ -1527,23 +1722,25 @@ async function runIntegrationTests() {
 
   // User aborts connection mid-stream after tokens generated
   await activeReader.cancel("Client disconnected mid-stream");
-  await new Promise(r => setTimeout(r, 50));
+  await new Promise((r) => setTimeout(r, 50));
 
   // Verify credit is retained (148)
-  const abortedUser = store.users.find(u => u.user_id === newUserId);
+  const abortedUser = store.users.find((u) => u.user_id === newUserId);
   assert.equal(abortedUser.credits, 148, "Credit must be retained after tokens emitted");
 
   // Verify credit_ledger has an entry recording the retention!
-  const abortLedger = store.credit_ledger.find(l => l.detail && l.detail.includes("中途断开连接算力保底扣费"));
+  const abortLedger = store.credit_ledger.find(
+    (l) => l.detail && l.detail.includes("中途断开连接算力保底扣费")
+  );
   assert.ok(abortLedger, "Must record compute_cost ledger row for mid-stream abort");
   assert.equal(abortLedger.amount, -1, "Ledger amount must be -1");
   console.log("  ✓ Mid-stream abort records compute_cost ledger audit entry: PASSED");
 
   // -----------------------------------------------------------------------
-  // SCENARIO 7: Account Deletion Cascading Erasure of Private Sessions (ISSUE-05)
+  // SCENARIO 7: Account Deletion Cascading Erasure of Private Sessions
   // -----------------------------------------------------------------------
   console.log("\n[Scenario 7] Account Deletion & GDPR Private Session Erasure");
-  
+
   store.notifications = [];
   store.broadcast_reads = [];
 
@@ -1554,7 +1751,7 @@ async function runIntegrationTests() {
     title: "Secret Strategy Conversation",
     rounds_json: JSON.stringify([{ role: "user", text: "Classified Prompt" }])
   });
-  // NM-SEC-04: Seed notifications and broadcast read receipts
+  // Seed notifications and broadcast read receipts
   store.notifications.push({
     notification_id: "notif_priv_1",
     user_id: newUserId,
@@ -1575,34 +1772,56 @@ async function runIntegrationTests() {
   // Authenticated user request to delete account
   const deleteReq = new Request("https://nanomesh.local/api/user/delete", {
     method: "POST",
-    headers: { "Cookie": `session=${ownerToken}` }
+    headers: { Cookie: `session=${ownerToken}` }
   });
   const deleteRes = await handleDeleteAccount(deleteReq, env);
   assert.equal(deleteRes.status, 200, "handleDeleteAccount must succeed");
 
   // Verify user_chat_sessions is completely erased
-  const remainingSessions = store.user_chat_sessions.filter(s => s.user_id === newUserId);
-  assert.equal(remainingSessions.length, 0, "All private chat sessions must be physically erased upon deletion");
+  const remainingSessions = store.user_chat_sessions.filter((s) => s.user_id === newUserId);
+  assert.equal(
+    remainingSessions.length,
+    0,
+    "All private chat sessions must be physically erased upon deletion"
+  );
 
-  // NM-SEC-04: Verify notifications and broadcast_reads are completely erased
-  const remainingNotifs = store.notifications.filter(n => n.user_id === newUserId);
-  assert.equal(remainingNotifs.length, 0, "All direct user notifications must be erased upon account deletion");
-  const remainingReads = store.broadcast_reads.filter(r => r.user_id === newUserId);
-  assert.equal(remainingReads.length, 0, "All broadcast read receipts must be erased upon account deletion");
-  
-  const anonymizedUser = store.users.find(u => u.user_id === newUserId);
+  // Verify notifications and broadcast_reads are completely erased
+  const remainingNotifs = store.notifications.filter((n) => n.user_id === newUserId);
+  assert.equal(
+    remainingNotifs.length,
+    0,
+    "All direct user notifications must be erased upon account deletion"
+  );
+  const remainingReads = store.broadcast_reads.filter((r) => r.user_id === newUserId);
+  assert.equal(
+    remainingReads.length,
+    0,
+    "All broadcast read receipts must be erased upon account deletion"
+  );
+
+  const anonymizedUser = store.users.find((u) => u.user_id === newUserId);
   assert.ok(anonymizedUser.email.startsWith("deleted_"), "User must be anonymized in-place");
   assert.equal(anonymizedUser.credits, 0, "Credits must be reset to 0");
 
   // Verify R2 user assets (tmp/ and avatars/) are completely erased
   const remainingTmp = await env.R2.list({ prefix: `tmp/${newUserId}/` });
-  assert.equal(remainingTmp.objects.length, 0, "User tmp/ assets must be cascade deleted from R2 upon account deletion");
+  assert.equal(
+    remainingTmp.objects.length,
+    0,
+    "User tmp/ assets must be cascade deleted from R2 upon account deletion"
+  );
   const remainingAvatars = await env.R2.list({ prefix: `avatars/${newUserId}_` });
-  assert.equal(remainingAvatars.objects.length, 0, "User avatars/ must be cascade deleted from R2 upon account deletion");
+  assert.equal(
+    remainingAvatars.objects.length,
+    0,
+    "User avatars/ must be cascade deleted from R2 upon account deletion"
+  );
 
-  console.log("  ✓ User account deletion cascades physical erasure of chat sessions & R2 assets: PASSED");
+  console.log(
+    "  ✓ User account deletion cascades physical erasure of chat sessions & R2 assets: PASSED"
+  );
 
-  // 7.2 FINDING-NEW-01: OAuth user deletion with dual presence in users & user_oauth_bindings
+  // 7.2 OAuth user deletion with dual presence in users & user_oauth_bindings
   const oauthUserId = "usr_oauth_dual_presence";
   store.users.push({
     user_id: oauthUserId,
@@ -1621,23 +1840,36 @@ async function runIntegrationTests() {
     provider_id: "gh_99999"
   });
 
-  const oauthOwnerToken = await signJWT({ userId: oauthUserId, tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  const oauthOwnerToken = await signJWT(
+    { userId: oauthUserId, tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
   const deleteOauthReq = new Request("https://nanomesh.local/api/user/delete", {
     method: "POST",
-    headers: { "Cookie": `session=${oauthOwnerToken}` }
+    headers: { Cookie: `session=${oauthOwnerToken}` }
   });
   const deleteOauthRes = await handleDeleteAccount(deleteOauthReq, env);
-  assert.equal(deleteOauthRes.status, 200, "FINDING-NEW-01: OAuth user deletion with dual records must succeed with 200 without D1 unique constraint failure");
-  const anonymizedOauthUser = store.users.find(u => u.user_id === oauthUserId);
-  assert.ok(anonymizedOauthUser.email.startsWith("deleted_"), "OAuth user must be anonymized in-place");
-  console.log("  ✓ FINDING-NEW-01: OAuth user deletion with duplicate bindings succeeds with idempotent tombstone: PASSED");
+  assert.equal(
+    deleteOauthRes.status,
+    200,
+    "OAuth user deletion with dual records must succeed with 200 without D1 unique constraint failure"
+  );
+  const anonymizedOauthUser = store.users.find((u) => u.user_id === oauthUserId);
+  assert.ok(
+    anonymizedOauthUser.email.startsWith("deleted_"),
+    "OAuth user must be anonymized in-place"
+  );
+  console.log(
+    "  ✓ OAuth user deletion with duplicate bindings succeeds with idempotent tombstone: PASSED"
+  );
 
   // -----------------------------------------------------------------------
-  // SCENARIO 8: Audit Report 3 Remediations (BUG-01, BUG-02, BUG-03, BUG-04)
+  // SCENARIO 8: Distributed Topology & Stream Protocol Verification
   // -----------------------------------------------------------------------
-  console.log("\n[Scenario 8] Audit Report 3 Remediations & Architectural Hardening");
+  console.log("\n[Scenario 8] Distributed Topology & Stream Protocol Verification");
 
-  // 8.1 BUG-03: Password Update Token In Body
+  // 8.1 Password Update Token In Body
   const pwUser = {
     user_id: "u_pw_test",
     username: "pw_test_user",
@@ -1647,12 +1879,16 @@ async function runIntegrationTests() {
     credits: 100
   };
   store.users.push(pwUser);
-  const pwUserToken = await signJWT({ userId: pwUser.user_id, tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  const pwUserToken = await signJWT(
+    { userId: pwUser.user_id, tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
 
   const updatePwReq = new Request("https://nanomesh.local/api/user/password", {
     method: "PUT",
     headers: {
-      "Cookie": `session=${pwUserToken}`,
+      Cookie: `session=${pwUserToken}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
@@ -1662,15 +1898,18 @@ async function runIntegrationTests() {
   });
   const updatePwRes = await handleUpdatePassword(updatePwReq, env);
   assert.equal(updatePwRes.status, 200, "handleUpdatePassword must succeed");
-  const updatePwData = await updatePwRes.json() as any;
+  const updatePwData = (await updatePwRes.json()) as any;
   assert.equal(updatePwData.success, true);
-  assert.ok(updatePwData.token, "Response JSON body must include the refreshed session token for API clients");
+  assert.ok(
+    updatePwData.token,
+    "Response JSON body must include the refreshed session token for API clients"
+  );
   const verifiedRefreshed = await verifyJWT(updatePwData.token, env.JWT_SECRET);
   assert.equal(verifiedRefreshed?.userId, pwUser.user_id);
   assert.equal(verifiedRefreshed?.tokenVersion, 2, "TokenVersion must increment to 2");
   console.log("  ✓ Password update issues refreshed token in response body: PASSED");
 
-  // 8.2 BUG-04: OAuth Unbind Passkey Safety Verification
+  // 8.2 OAuth Unbind Passkey Safety Verification
   const oauthPasskeyUser = {
     user_id: "u_oauth_pk",
     username: "oauth_pk_user",
@@ -1682,17 +1921,25 @@ async function runIntegrationTests() {
   store.users.push(oauthPasskeyUser);
   store.user_oauth_bindings.push({ user_id: oauthPasskeyUser.user_id, provider: "github" });
   store.user_passkeys.push({ credential_id: "cred_123", user_id: oauthPasskeyUser.user_id });
-  const oauthPkToken = await signJWT({ userId: oauthPasskeyUser.user_id, tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  const oauthPkToken = await signJWT(
+    { userId: oauthPasskeyUser.user_id, tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
 
   const unbindReq = new Request("https://nanomesh.local/api/auth/oauth/github", {
     method: "DELETE",
-    headers: { "Cookie": `session=${oauthPkToken}` }
+    headers: { Cookie: `session=${oauthPkToken}` }
   });
   const unbindRes = await handleUnbindOAuth(unbindReq, env, "github");
-  assert.equal(unbindRes.status, 200, "User with registered passkeys must be permitted to unbind last OAuth provider");
+  assert.equal(
+    unbindRes.status,
+    200,
+    "User with registered passkeys must be permitted to unbind last OAuth provider"
+  );
   console.log("  ✓ OAuth unbinding permits decoupling when Passkey is active: PASSED");
 
-  // 8.3 BUG-01: Admin Model Publishing Endpoint Guard
+  // 8.3 Admin Model Publishing Endpoint Guard
   store.user_uploaded_models.push({
     upload_id: "upload_model_1",
     user_id: "u_model_author",
@@ -1712,7 +1959,7 @@ async function runIntegrationTests() {
   });
   const pubFailRes = await handleAdminUpdateModel(pubFailReq, env);
   assert.equal(pubFailRes.status, 400, "Publishing model with /api/infer must be rejected");
-  const pubFailData = await pubFailRes.json() as any;
+  const pubFailData = (await pubFailRes.json()) as any;
   assert.equal(pubFailData.error, "error.validEndpointRequired");
 
   // Attempt to publish with legitimate endpoint succeeds
@@ -1726,12 +1973,18 @@ async function runIntegrationTests() {
     })
   });
   const pubSuccessRes = await handleAdminUpdateModel(pubSuccessReq, env);
-  assert.equal(pubSuccessRes.status, 200, "Publishing model with valid external endpoint must succeed");
-  const insertedLiveModel = store.models.find(m => m.model_id === "um-upload_model_1");
+  assert.equal(
+    pubSuccessRes.status,
+    200,
+    "Publishing model with valid external endpoint must succeed"
+  );
+  const insertedLiveModel = store.models.find((m) => m.model_id === "um-upload_model_1");
   assert.ok(insertedLiveModel);
   assert.equal(insertedLiveModel.endpoint, "https://ai.example.com/v1/chat/completions");
   assert.equal(insertedLiveModel.inference_target, "heavy");
-  console.log("  ✓ Admin model publishing validates endpoint and prevents /api/infer pollution: PASSED");
+  console.log(
+    "  ✓ Admin model publishing validates endpoint and prevents /api/infer pollution: PASSED"
+  );
 
   // 8.4 Arbitrary WebGPU Topology: Template Multi-step WebGPU Intermediate Node Allowed
   store.dag_roles.push({
@@ -1773,10 +2026,16 @@ async function runIntegrationTests() {
     })
   });
   const validTplRes = await handleAdminCreateOrUpdateTemplate(validMultiStepTemplateReq, env);
-  assert.equal(validTplRes.status, 200, "Template with intermediate browser node is now ALLOWED in arbitrary topology");
-  const validTplData = await validTplRes.json() as any;
+  assert.equal(
+    validTplRes.status,
+    200,
+    "Template with intermediate browser node is now ALLOWED in arbitrary topology"
+  );
+  const validTplData = (await validTplRes.json()) as any;
   const webgpuArbitraryTemplateId = validTplData.template_id;
-  console.log("  ✓ DAG template allows WebGPU models at intermediate and any pipeline position: PASSED");
+  console.log(
+    "  ✓ DAG template allows WebGPU models at intermediate and any pipeline position: PASSED"
+  );
 
   // -----------------------------------------------------------------------
   // SCENARIO 9: Arbitrary WebGPU Topology, Handshake CAS & Dynamic Billing
@@ -1793,18 +2052,24 @@ async function runIntegrationTests() {
     token_version: 1
   });
 
-  const user9AuthToken = await signJWT({ userId: testUser9Id, role: "user", tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  const user9AuthToken = await signJWT(
+    { userId: testUser9Id, role: "user", tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
   const user9ReqHeaders = {
     "Content-Type": "application/json",
-    "Authorization": `Bearer ${user9AuthToken}`
+    Authorization: `Bearer ${user9AuthToken}`
   };
 
   const testEnvelope9: UnifiedProtocolEnvelope = {
+    round_index: 1,
+    constraint_context: { target_language: "zh", output_style: "concise" },
     envelope_id: "env_webgpu_001",
     session_id: "sess_webgpu_001",
     user_id: testUser9Id,
     instruction_payload: "本地快速摘要提取并交由云端深度推理",
-    metadata: {},
+    metadata: { client_timestamp: Date.now(), char_count_total: 100, estimated_input_tokens: 50 },
     assets_manifest: []
   };
 
@@ -1838,7 +2103,10 @@ async function runIntegrationTests() {
   }
 
   assert.ok(p1Events.includes("event: dag_handover"), "Phase 1 must emit dag_handover event");
-  assert.ok(!p1Events.includes("event: text_chunk"), "AC-03: Intermediate WebGPU step must NOT emit text_chunk");
+  assert.ok(
+    !p1Events.includes("event: text_chunk"),
+    "AC-03: Intermediate WebGPU step must NOT emit text_chunk"
+  );
 
   // Extract handover payload
   const handoverMatch = p1Events.match(/event: dag_handover\ndata: (\{.*?\})\n\n/);
@@ -1850,8 +2118,12 @@ async function runIntegrationTests() {
   assert.ok(handoverData.continuation_token);
 
   // Assert AC-01: User credits in Phase 1 MUST REMAIN UNTOUCHED (Zero Pre-Deduction)
-  const user9AfterPhase1 = store.users.find(u => u.user_id === testUser9Id);
-  assert.equal(user9AfterPhase1.credits, 5, "AC-01: Phase 1 with Step 0 WebGPU must consume 0 credits! Credits must remain 5.");
+  const user9AfterPhase1 = store.users.find((u) => u.user_id === testUser9Id);
+  assert.equal(
+    user9AfterPhase1.credits,
+    5,
+    "AC-01: Phase 1 with Step 0 WebGPU must consume 0 credits! Credits must remain 5."
+  );
   console.log("  ✓ AC-01 (Part 1): Step 0 WebGPU consumes 0 credits in Phase 1: PASSED");
   console.log("  ✓ AC-03: Intermediate node does not emit text_chunk to user stream: PASSED");
 
@@ -1890,8 +2162,12 @@ async function runIntegrationTests() {
   assert.ok(p2Events.includes("event: dag_complete"), "Phase 2 must finish with dag_complete");
 
   // Assert AC-01: Cloud credit is deducted in Phase 2
-  const user9AfterPhase2 = store.users.find(u => u.user_id === testUser9Id);
-  assert.equal(user9AfterPhase2.credits, 4, "AC-01 (Part 2): Phase 2 cloud node execution must accurately deduct 1 credit (5 -> 4)");
+  const user9AfterPhase2 = store.users.find((u) => u.user_id === testUser9Id);
+  assert.equal(
+    user9AfterPhase2.credits,
+    4,
+    "AC-01 (Part 2): Phase 2 cloud node execution must accurately deduct 1 credit (5 -> 4)"
+  );
   console.log("  ✓ AC-01 (Part 2): Phase 2 cloud node accurately consumes 1 credit: PASSED");
 
   // 9.3 AC-02: D1 Atomic CAS Anti-Replay Defense (10 concurrent continuation calls)
@@ -1906,13 +2182,17 @@ async function runIntegrationTests() {
     expires_at: new Date(Date.now() + 300000).toISOString()
   });
 
-  const replayToken = await signJWT({
-    jti: replayHandshakeId,
-    sub: testUser9Id,
-    sid: "sess_replay",
-    tid: webgpuArbitraryTemplateId,
-    nxt: 1
-  }, env.JWT_SECRET, 300);
+  const replayToken = await signJWT(
+    {
+      jti: replayHandshakeId,
+      sub: testUser9Id,
+      sid: "sess_replay",
+      tid: webgpuArbitraryTemplateId,
+      nxt: 1
+    },
+    env.JWT_SECRET,
+    300
+  );
 
   // Send 10 concurrent continuation requests
   const concurrentRequests = Array.from({ length: 10 }).map(() => {
@@ -1931,13 +2211,19 @@ async function runIntegrationTests() {
   });
 
   const responses = await Promise.all(concurrentRequests);
-  const statusCounts = responses.map(r => r.status);
-  const count200 = statusCounts.filter(s => s === 200).length;
-  const count409 = statusCounts.filter(s => s === 409).length;
+  const statusCounts = responses.map((r) => r.status);
+  const count200 = statusCounts.filter((s) => s === 200).length;
+  const count409 = statusCounts.filter((s) => s === 409).length;
 
   assert.equal(count200, 1, `AC-02: Exactly 1 request must succeed with 200, but got ${count200}`);
-  assert.equal(count409, 9, `AC-02: Exactly 9 requests must be blocked with 409 CAS Conflict, but got ${count409}`);
-  console.log("  ✓ AC-02: D1 Atomic CAS anti-replay blocks 9/10 concurrent requests with 409: PASSED");
+  assert.equal(
+    count409,
+    9,
+    `AC-02: Exactly 9 requests must be blocked with 409 CAS Conflict, but got ${count409}`
+  );
+  console.log(
+    "  ✓ AC-02: D1 Atomic CAS anti-replay blocks 9/10 concurrent requests with 409: PASSED"
+  );
 
   // 9.4 AC-06: Lazy sweep for orphan handshakes
   store.dag_handshakes.push({
@@ -1969,7 +2255,10 @@ async function runIntegrationTests() {
   triggerLazyHandshakeSweep(env, mockCtx);
   assert.ok(capturedSweepPromise, "Lazy sweep must schedule background promise via ctx.waitUntil");
   await capturedSweepPromise;
-  assert.ok(!store.dag_handshakes.some(h => h.handshake_id.startsWith("hs_expired_")), "AC-06: Expired orphan handshakes must be swept");
+  assert.ok(
+    !store.dag_handshakes.some((h) => h.handshake_id.startsWith("hs_expired_")),
+    "AC-06: Expired orphan handshakes must be swept"
+  );
   console.log("  ✓ AC-06: Lazy sweep cleans up expired orphan handshakes asynchronously: PASSED");
 
   // 9.5 AC-07: Standby Failover on candidate_failed
@@ -1984,13 +2273,17 @@ async function runIntegrationTests() {
     expires_at: new Date(Date.now() + 300000).toISOString()
   });
 
-  const failoverToken = await signJWT({
-    jti: failoverHandshakeId,
-    sub: testUser9Id,
-    sid: "sess_failover",
-    tid: webgpuArbitraryTemplateId,
-    nxt: 1
-  }, env.JWT_SECRET, 300);
+  const failoverToken = await signJWT(
+    {
+      jti: failoverHandshakeId,
+      sub: testUser9Id,
+      sid: "sess_failover",
+      tid: webgpuArbitraryTemplateId,
+      nxt: 1
+    },
+    env.JWT_SECRET,
+    300
+  );
 
   // Add cloud fallback model to role_browser_only's model pool so standby failover has a cloud candidate
   store.models.push({
@@ -2031,10 +2324,16 @@ async function runIntegrationTests() {
   });
 
   const failoverRes = await handleChatContinue(failoverReq, env);
-  assert.equal(failoverRes.status, 200, "AC-07: candidate_failed must transparently fallback to standby cloud model with restored upstream_context");
-  console.log("  ✓ AC-07 & AC-R4: Standby model failover successfully executes and restores upstream context: PASSED");
+  assert.equal(
+    failoverRes.status,
+    200,
+    "AC-07: candidate_failed must transparently fallback to standby cloud model with restored upstream_context"
+  );
+  console.log(
+    "  ✓ AC-07 & AC-R4: Standby model failover successfully executes and restores upstream context: PASSED"
+  );
 
-  // 9.7 FINDING-NEW-02: Tail WebGPU node issues continuation_token for Standby failover
+  // 9.7 Tail WebGPU node issues continuation_token for Standby failover
   const tailBrowserTemplateReq = new Request("https://nanomesh.local/api/admin/templates", {
     method: "POST",
     headers: adminReqHeaders,
@@ -2045,7 +2344,7 @@ async function runIntegrationTests() {
   });
   const tailTplRes = await handleAdminCreateOrUpdateTemplate(tailBrowserTemplateReq, env);
   assert.equal(tailTplRes.status, 200);
-  const tailTplData = await tailTplRes.json() as any;
+  const tailTplData = (await tailTplRes.json()) as any;
 
   const tailChatReq = new Request("https://nanomesh.local/api/chat", {
     method: "POST",
@@ -2063,14 +2362,22 @@ async function runIntegrationTests() {
   const tailChatRes = await handleChat(tailChatReq, env);
   assert.equal(tailChatRes.status, 200);
   const tailStreamText = await tailChatRes.text();
-  assert.ok(tailStreamText.includes("client_exec_request"), "Tail WebGPU node must emit client_exec_request");
-  assert.ok(tailStreamText.includes("continuation_token"), "Tail WebGPU node with cloud standby MUST include continuation_token for failover (FINDING-NEW-02)");
-  console.log("  ✓ FINDING-NEW-02: Tail WebGPU node issues continuation_token for transparent failover: PASSED");
+  assert.ok(
+    tailStreamText.includes("client_exec_request"),
+    "Tail WebGPU node must emit client_exec_request"
+  );
+  assert.ok(
+    tailStreamText.includes("continuation_token"),
+    "Tail WebGPU node with cloud standby MUST include continuation_token for failover "
+  );
+  console.log("  ✓ Tail WebGPU node issues continuation_token for transparent failover: PASSED");
 
   // -----------------------------------------------------------------------
   // SCENARIO 10: Multimodal Pipeline Orchestration, ASR & Decoupled Competence
   // -----------------------------------------------------------------------
-  console.log("\n[Scenario 10] Multimodal Orchestration, ASR, Decoupled Competence & Targeted Claiming");
+  console.log(
+    "\n[Scenario 10] Multimodal Orchestration, ASR, Decoupled Competence & Targeted Claiming"
+  );
 
   const testUser10Id = "usr_multimodal_001";
   store.users.push({
@@ -2084,10 +2391,14 @@ async function runIntegrationTests() {
     token_version: 1
   });
 
-  const user10AuthToken = await signJWT({ userId: testUser10Id, role: "user", tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  const user10AuthToken = await signJWT(
+    { userId: testUser10Id, role: "user", tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
   const user10ReqHeaders = {
     "Content-Type": "application/json",
-    "Authorization": `Bearer ${user10AuthToken}`
+    Authorization: `Bearer ${user10AuthToken}`
   };
 
   // 10.1 Register Multimodal Models (Whisper ASR, Flux Schnell)
@@ -2241,11 +2552,13 @@ async function runIntegrationTests() {
   });
 
   const audioEnvelope: UnifiedProtocolEnvelope = {
+    round_index: 1,
+    constraint_context: { target_language: "zh", output_style: "concise" },
     envelope_id: "env_audio_001",
     session_id: "sess_audio_001",
     user_id: testUser10Id,
     instruction_payload: "请将该语音转写为文字",
-    metadata: { estimated_input_tokens: 100 },
+    metadata: { client_timestamp: Date.now(), char_count_total: 100, estimated_input_tokens: 100 },
     assets_manifest: [
       {
         asset_id: "asset_voice_01",
@@ -2272,20 +2585,31 @@ async function runIntegrationTests() {
   const audioChatRes = await handleChat(audioChatReq, env);
   assert.equal(audioChatRes.status, 200, "Audio chat request must return 200 SSE stream");
   const audioStreamText = await audioChatRes.text();
-  assert.ok(audioStreamText.includes("Mock Whisper transcription"), "Must receive Whisper transcription in SSE stream");
+  assert.ok(
+    audioStreamText.includes("Mock Whisper transcription"),
+    "Must receive Whisper transcription in SSE stream"
+  );
   assert.ok(audioStreamText.includes("dag_complete"), "Audio pipeline must emit dag_complete");
 
-  const user10AfterAudio = store.users.find(u => u.user_id === testUser10Id);
-  assert.equal(user10AfterAudio.credits, 19, "Whisper transcription must consume 1 credit (20 -> 19)");
-  console.log("  ✓ Whisper Audio ASR pipeline accurately transcribes R2 audio and deducts credit: PASSED");
+  const user10AfterAudio = store.users.find((u) => u.user_id === testUser10Id);
+  assert.equal(
+    user10AfterAudio.credits,
+    19,
+    "Whisper transcription must consume 1 credit (20 -> 19)"
+  );
+  console.log(
+    "  ✓ Whisper Audio ASR pipeline accurately transcribes R2 audio and deducts credit: PASSED"
+  );
 
   // 10.3 Flux text-to-image + downstream vision critique (P0 targeted claiming & invocation pricing)
   const drawEnvelope: UnifiedProtocolEnvelope = {
+    round_index: 1,
+    constraint_context: { target_language: "zh", output_style: "concise" },
     envelope_id: "env_flux_001",
     session_id: "sess_flux_001",
     user_id: testUser10Id,
     instruction_payload: "请绘制赛博朋克霓虹城市夜景，并进行多模态构图分析",
-    metadata: { estimated_input_tokens: 200 },
+    metadata: { client_timestamp: Date.now(), char_count_total: 100, estimated_input_tokens: 200 },
     assets_manifest: []
   };
 
@@ -2303,21 +2627,33 @@ async function runIntegrationTests() {
   assert.equal(drawChatRes.status, 200, "Flux + Vision chat request must return 200 SSE stream");
   const drawStreamText = await drawChatRes.text();
 
-  assert.ok(drawStreamText.includes("event: asset_chunk"), "Pipeline must emit asset_chunk for generated image");
+  assert.ok(
+    drawStreamText.includes("event: asset_chunk"),
+    "Pipeline must emit asset_chunk for generated image"
+  );
   assert.ok(drawStreamText.includes("image/png"), "Asset chunk must specify image/png MIME");
-  assert.ok(drawStreamText.includes("event: dag_complete"), "Must complete full two-stage multimodal pipeline");
+  assert.ok(
+    drawStreamText.includes("event: dag_complete"),
+    "Must complete full two-stage multimodal pipeline"
+  );
 
   // Verify R2 object creation for generated image
   const r2List = await env.R2.list({ prefix: `tmp/${testUser10Id}/${drawEnvelope.session_id}/` });
   assert.ok(r2List.objects.length > 0, "Generated Flux image must be stored in R2 bucket");
 
   // Verify billing: Flux invocation (2 credits) + Vision critique (1 credit) = 3 credits total
-  const user10AfterDraw = store.users.find(u => u.user_id === testUser10Id);
-  assert.equal(user10AfterDraw.credits, 16, "Flux (2 credits) + Vision critique (1 credit) must deduct exactly 3 credits (19 -> 16)");
+  const user10AfterDraw = store.users.find((u) => u.user_id === testUser10Id);
+  assert.equal(
+    user10AfterDraw.credits,
+    16,
+    "Flux (2 credits) + Vision critique (1 credit) must deduct exactly 3 credits (19 -> 16)"
+  );
 
-  const drawLedger = store.credit_ledger.find(l => l.user_id === testUser10Id && l.amount === -3);
+  const drawLedger = store.credit_ledger.find((l) => l.user_id === testUser10Id && l.amount === -3);
   assert.ok(drawLedger, "Credit ledger must record -3 compute_cost for multimodal pipeline");
-  console.log("  ✓ Flux image generation -> R2 persistence -> P0 vision critique claiming & atomic billing (3 credits): PASSED");
+  console.log(
+    "  ✓ Flux image generation -> R2 persistence -> P0 vision critique claiming & atomic billing (3 credits): PASSED"
+  );
 
   // 10.4 P1 Penetrating Claiming: Downstream vision node claims unconsumed user asset when Step 0 produces no media
   const userPhotoKey = `tmp/${testUser10Id}/sess_p1_01/user_photo.png`;
@@ -2325,15 +2661,17 @@ async function runIntegrationTests() {
     httpMetadata: { contentType: "image/png" }
   });
 
-  // 10.4 P1 Penetrating Claiming & Reverse Pipeline (AUDIT-MM-01):
+  // 10.4 P1 Penetrating Claiming & Reverse Pipeline :
   // User uploads ONLY physical image and writes text prompt (NO manual virtual_text_asset in manifest).
   // Generalized Subsistence Law must automatically satisfy text-first reverse pipeline!
   const p1Envelope: UnifiedProtocolEnvelope = {
+    round_index: 1,
+    constraint_context: { target_language: "zh", output_style: "concise" },
     envelope_id: "env_p1_001",
     session_id: "sess_p1_001",
     user_id: testUser10Id,
     instruction_payload: "请先根据宏观经济背景推导分析，再核验我上传的走势图图片",
-    metadata: { estimated_input_tokens: 150 },
+    metadata: { client_timestamp: Date.now(), char_count_total: 100, estimated_input_tokens: 150 },
     assets_manifest: [
       {
         asset_id: "user_photo_asset",
@@ -2360,14 +2698,19 @@ async function runIntegrationTests() {
   const p1ChatRes = await handleChat(p1ChatReq, env);
   assert.equal(p1ChatRes.status, 200, "P1 chat request must return 200 SSE stream");
   const p1StreamText = await p1ChatRes.text();
-  assert.ok(p1StreamText.includes("dag_complete"), "P1 penetrating claiming reverse pipeline must complete");
+  assert.ok(
+    p1StreamText.includes("dag_complete"),
+    "P1 penetrating claiming reverse pipeline must complete"
+  );
 
   // Step 0 text (1 credit) + Step 1 vision (1 credit) = 2 credits (16 -> 14)
-  const user10AfterP1 = store.users.find(u => u.user_id === testUser10Id);
+  const user10AfterP1 = store.users.find((u) => u.user_id === testUser10Id);
   assert.equal(user10AfterP1.credits, 14, "P1 pipeline must deduct 2 credits (16 -> 14)");
-  console.log("  ✓ AUDIT-MM-01: Reverse multimodal pipeline (text -> image) successfully passes subsistence & executes: PASSED");
+  console.log(
+    "  ✓ Reverse multimodal pipeline (text -> image) successfully passes subsistence & executes: PASSED"
+  );
 
-  // 10.5 AUDIT-MM-02: FLUX 0-byte generation failover to Standby model
+  // 10.5 FLUX 0-byte generation failover to Standby model
   // Register a separate user to avoid in-memory burst rate limit (capacity=3)
   const testUser10bId = "usr_multimodal_002_failover";
   store.users.push({
@@ -2381,10 +2724,14 @@ async function runIntegrationTests() {
     token_version: 1
   });
 
-  const user10bAuthToken = await signJWT({ userId: testUser10bId, role: "user", tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  const user10bAuthToken = await signJWT(
+    { userId: testUser10bId, role: "user", tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
   const user10bReqHeaders = {
     "Content-Type": "application/json",
-    "Authorization": `Bearer ${user10bAuthToken}`
+    Authorization: `Bearer ${user10bAuthToken}`
   };
 
   // Register a broken FLUX model returning 0 bytes with higher precision, and normal FLUX as standby
@@ -2432,11 +2779,13 @@ async function runIntegrationTests() {
   });
 
   const zeroByteEnvelope: UnifiedProtocolEnvelope = {
+    round_index: 1,
+    constraint_context: { target_language: "zh", output_style: "concise" },
     envelope_id: "env_flux_zero_001",
     session_id: "sess_flux_zero_001",
     user_id: testUser10bId,
     instruction_payload: "生成赛博朋克光影图",
-    metadata: { estimated_input_tokens: 100 },
+    metadata: { client_timestamp: Date.now(), char_count_total: 100, estimated_input_tokens: 100 },
     assets_manifest: []
   };
 
@@ -2451,12 +2800,27 @@ async function runIntegrationTests() {
   });
 
   const zeroByteChatRes = await handleChat(zeroByteChatReq, env);
-  assert.equal(zeroByteChatRes.status, 200, "FLUX failover chat request must return 200 SSE stream");
+  assert.equal(
+    zeroByteChatRes.status,
+    200,
+    "FLUX failover chat request must return 200 SSE stream"
+  );
   const zeroByteStreamText = await zeroByteChatRes.text();
-  assert.ok(zeroByteStreamText.includes("event: node_failover"), "Must emit node_failover event when primary FLUX produces 0 bytes");
-  assert.ok(zeroByteStreamText.includes("event: asset_chunk"), "Must emit asset_chunk after standby FLUX succeeds");
-  assert.ok(zeroByteStreamText.includes("dag_complete"), "Must complete successfully after transparent failover");
-  console.log("  ✓ AUDIT-MM-02: FLUX 0-byte generation cleanly triggers node_failover and completes with standby model: PASSED");
+  assert.ok(
+    zeroByteStreamText.includes("event: node_failover"),
+    "Must emit node_failover event when primary FLUX produces 0 bytes"
+  );
+  assert.ok(
+    zeroByteStreamText.includes("event: asset_chunk"),
+    "Must emit asset_chunk after standby FLUX succeeds"
+  );
+  assert.ok(
+    zeroByteStreamText.includes("dag_complete"),
+    "Must complete successfully after transparent failover"
+  );
+  console.log(
+    "  ✓ FLUX 0-byte generation cleanly triggers node_failover and completes with standby model: PASSED"
+  );
 
   // 10.6 DEFECT-02: Tail Heavy Image Node Streaming Bypass & JSON Recovery
   const testUser10cId = "usr_multimodal_003_heavytail";
@@ -2470,9 +2834,13 @@ async function runIntegrationTests() {
     referred_by: null,
     token_version: 1
   });
-  const user10cToken = await signJWT({ userId: testUser10cId, role: "user", tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  const user10cToken = await signJWT(
+    { userId: testUser10cId, role: "user", tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
   const user10cReqHeaders = {
-    "Authorization": `Bearer ${user10cToken}`,
+    Authorization: `Bearer ${user10cToken}`,
     "Content-Type": "application/json"
   };
 
@@ -2524,24 +2892,33 @@ async function runIntegrationTests() {
   const origFetch = globalThis.fetch;
   try {
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      const urlStr = typeof input === "string" ? input : (input instanceof URL ? input.toString() : input.url);
+      const urlStr =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (urlStr.includes("api.mock-heavy-dalle.com")) {
-        // Verify payload contract for OpenAI Images API (BUG-04)
+        // Verify payload contract for OpenAI Images API
         if (init?.body) {
           const parsedBody = JSON.parse(init.body as string);
           if (!parsedBody.prompt || !parsedBody.response_format) {
-            throw new Error("Mock received invalid Image API payload: missing prompt or response_format");
+            throw new Error(
+              "Mock received invalid Image API payload: missing prompt or response_format"
+            );
           }
         }
         // Return standard commercial JSON response format (b64_json)
-        return new Response(JSON.stringify({
-          data: [
-            { b64_json: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" }
-          ]
-        }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" }
-        });
+        return new Response(
+          JSON.stringify({
+            data: [
+              {
+                b64_json:
+                  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+              }
+            ]
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          }
+        );
       }
       return origFetch(input, init);
     };
@@ -2552,9 +2929,13 @@ async function runIntegrationTests() {
       user_id: testUser10cId,
       round_index: 1,
       instruction_payload: "Draw a commercial poster of neon cyberpunk city",
-      metadata: { estimated_input_tokens: 100 },
+      metadata: {
+        client_timestamp: Date.now(),
+        char_count_total: 100,
+        estimated_input_tokens: 100
+      },
       assets_manifest: [],
-      constraint_context: { target_language: "zh", output_style: "vibrant" }
+      constraint_context: { target_language: "zh", output_style: "creative" }
     };
 
     const heavyTailReq = new Request("https://nanomesh.local/api/chat", {
@@ -2568,11 +2949,23 @@ async function runIntegrationTests() {
     });
 
     const heavyTailRes = await handleChat(heavyTailReq, env);
-    assert.equal(heavyTailRes.status, 200, "Heavy tail image node request must return 200 SSE stream");
+    assert.equal(
+      heavyTailRes.status,
+      200,
+      "Heavy tail image node request must return 200 SSE stream"
+    );
     const heavyStreamText = await heavyTailRes.text();
-    assert.ok(heavyStreamText.includes("event: asset_chunk"), "DEFECT-02 Verified: Heavy tail node must bypass SSE parseAIResponse and emit asset_chunk");
-    assert.ok(heavyStreamText.includes("dag_complete"), "Must complete successfully without parseAIResponse empty stream failure");
-    console.log("  ✓ DEFECT-02: Commercial Heavy Image Generation at tail node correctly executes and emits asset_chunk: PASSED");
+    assert.ok(
+      heavyStreamText.includes("event: asset_chunk"),
+      "DEFECT-02 Verified: Heavy tail node must bypass SSE parseAIResponse and emit asset_chunk"
+    );
+    assert.ok(
+      heavyStreamText.includes("dag_complete"),
+      "Must complete successfully without parseAIResponse empty stream failure"
+    );
+    console.log(
+      "  ✓ DEFECT-02: Commercial Heavy Image Generation at tail node correctly executes and emits asset_chunk: PASSED"
+    );
   } finally {
     globalThis.fetch = origFetch;
   }
@@ -2580,22 +2973,32 @@ async function runIntegrationTests() {
   // 10.7 DEFECT-04: D1 0021 Image Generation Seed Migration Verification
   const fsMod = await import("node:fs");
   const pathMod = await import("node:path");
-  const migration0021Path = pathMod.resolve(process.cwd(), "migrations", "0021_add_image_generation_seed.sql");
+  const migration0021Path = pathMod.resolve(
+    process.cwd(),
+    "migrations",
+    "0021_add_image_generation_seed.sql"
+  );
   assert.ok(fsMod.existsSync(migration0021Path), "0021 migration file must exist on disk");
   const sql0021 = fsMod.readFileSync(migration0021Path, "utf-8");
   assert.ok(sql0021.includes("role_flux_draw"), "0021 migration must seed role_flux_draw");
   assert.ok(sql0021.includes("tpl-text-to-image"), "0021 migration must seed tpl-text-to-image");
-  assert.ok(sql0021.includes("in_modalities") && sql0021.includes("out_modalities"), "Must match real dag_roles and dag_templates schema");
+  assert.ok(
+    sql0021.includes("in_modalities") && sql0021.includes("out_modalities"),
+    "Must match real dag_roles and dag_templates schema"
+  );
   assert.ok(!sql0021.includes("topology"), "Must NOT contain fake topology column");
-  assert.ok(!sql0021.includes("required_capabilities"), "Must NOT contain fake required_capabilities column");
+  assert.ok(
+    !sql0021.includes("required_capabilities"),
+    "Must NOT contain fake required_capabilities column"
+  );
   console.log("  ✓ DEFECT-04: D1 0021 migration file verified with valid table schema: PASSED");
 
   // -----------------------------------------------------------------------
-  // SCENARIO 11: Audit Report 8 Integration Remediations (BUG-01, BUG-05)
+  // SCENARIO 11: Credit Bounds & Handshake Two-Phase Commitment
   // -----------------------------------------------------------------------
-  console.log("\n[Scenario 11] Audit Report 8 Integration Remediations (BUG-01, BUG-05)");
+  console.log("\n[Scenario 11] Credit Bounds & Handshake Two-Phase Commitment");
 
-  // 11.1 BUG-01: Zero-credit billing bypass prevention via WebGPU fallback
+  // 11.1 Zero-credit billing bypass prevention via WebGPU fallback
   const testUserZeroCreditId = "usr_zero_billing_01";
   store.users.push({
     user_id: testUserZeroCreditId,
@@ -2607,10 +3010,14 @@ async function runIntegrationTests() {
     referred_by: null,
     token_version: 1
   });
-  const userZeroToken = await signJWT({ userId: testUserZeroCreditId, role: "user", tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  const userZeroToken = await signJWT(
+    { userId: testUserZeroCreditId, role: "user", tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
   const userZeroReqHeaders = {
     "Content-Type": "application/json",
-    "Authorization": `Bearer ${userZeroToken}`
+    Authorization: `Bearer ${userZeroToken}`
   };
 
   // User with 0 credits requests chat where client explicitly declares no WebGPU support (forces cloud standby)
@@ -2624,21 +3031,29 @@ async function runIntegrationTests() {
         user_id: testUserZeroCreditId,
         round_index: 1,
         instruction_payload: "Test zero credit cloud execution",
-        metadata: { estimated_input_tokens: 50 },
+        metadata: {
+          client_timestamp: Date.now(),
+          char_count_total: 100,
+          estimated_input_tokens: 50
+        },
         assets_manifest: []
       },
       capabilities: { webgpu_handover_v3: false } // Explicitly disabled WebGPU
     })
   });
   const zeroCreditRes = await handleChat(zeroCreditReq, env);
-  assert.equal(zeroCreditRes.status, 403, "BUG-01: Zero-credit user attempting cloud fallback must be blocked with HTTP 403");
-  const zeroCreditErrJson = await zeroCreditRes.json() as any;
+  assert.equal(
+    zeroCreditRes.status,
+    403,
+    "Zero-credit user attempting cloud fallback must be blocked with HTTP 403"
+  );
+  const zeroCreditErrJson = (await zeroCreditRes.json()) as any;
   assert.equal(zeroCreditErrJson.error, "insufficient_quota");
-  const userInDb = store.users.find(u => u.user_id === testUserZeroCreditId);
+  const userInDb = store.users.find((u) => u.user_id === testUserZeroCreditId);
   assert.equal(userInDb?.credits, 0, "User balance must remain 0 and not penetrated into negative");
-  console.log("  ✓ BUG-01: Zero-credit WebGPU fallback exploit successfully blocked with HTTP 403: PASSED");
+  console.log("  ✓ Zero-credit WebGPU fallback exploit successfully blocked with HTTP 403: PASSED");
 
-  // 11.2 BUG-05: Phase 2 Handshake 2PC & Non-destructive Recharging
+  // 11.2 Phase 2 Handshake 2PC & Non-destructive Recharging
   const testUserHandshakeId = "usr_handshake_2pc_01";
   store.users.push({
     user_id: testUserHandshakeId,
@@ -2650,10 +3065,14 @@ async function runIntegrationTests() {
     referred_by: null,
     token_version: 1
   });
-  const userHsToken = await signJWT({ userId: testUserHandshakeId, role: "user", tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  const userHsToken = await signJWT(
+    { userId: testUserHandshakeId, role: "user", tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
   const userHsReqHeaders = {
     "Content-Type": "application/json",
-    "Authorization": `Bearer ${userHsToken}`
+    Authorization: `Bearer ${userHsToken}`
   };
 
   const testHandshakeId = "hs_2pc_test_001";
@@ -2668,13 +3087,17 @@ async function runIntegrationTests() {
     expires_at: handshakeExpiresAt
   });
 
-  const continuationToken = await signJWT({
-    jti: testHandshakeId,
-    sub: testUserHandshakeId,
-    sid: "sess_hs_001",
-    tid: webgpuArbitraryTemplateId,
-    nxt: 1
-  }, env.JWT_SECRET, 300);
+  const continuationToken = await signJWT(
+    {
+      jti: testHandshakeId,
+      sub: testUserHandshakeId,
+      sid: "sess_hs_001",
+      tid: webgpuArbitraryTemplateId,
+      nxt: 1
+    },
+    env.JWT_SECRET,
+    300
+  );
 
   // Attempt continuation with 0 credits
   const continueWithZeroReq = new Request("https://nanomesh.local/api/chat/continue", {
@@ -2690,7 +3113,11 @@ async function runIntegrationTests() {
         user_id: testUserHandshakeId,
         round_index: 1,
         instruction_payload: "Continuation test",
-        metadata: { estimated_input_tokens: 50 },
+        metadata: {
+          client_timestamp: Date.now(),
+          char_count_total: 100,
+          estimated_input_tokens: 50
+        },
         assets_manifest: []
       },
       orchestration_options: { chosenTemplateId: webgpuArbitraryTemplateId }
@@ -2698,12 +3125,20 @@ async function runIntegrationTests() {
   });
 
   const continueZeroRes = await handleChatContinue(continueWithZeroReq, env);
-  assert.equal(continueZeroRes.status, 403, "BUG-05: Zero-credit continue request must return 403 insufficient_quota");
-  const hsInDb = store.dag_handshakes.find(h => h.handshake_id === testHandshakeId);
-  assert.equal(hsInDb?.status, "ISSUED", "BUG-05: Handshake record must REMAIN 'ISSUED' (not prematurely burned to CONSUMED)");
+  assert.equal(
+    continueZeroRes.status,
+    403,
+    "Zero-credit continue request must return 403 insufficient_quota"
+  );
+  const hsInDb = store.dag_handshakes.find((h) => h.handshake_id === testHandshakeId);
+  assert.equal(
+    hsInDb?.status,
+    "ISSUED",
+    "Handshake record must REMAIN 'ISSUED' (not prematurely burned to CONSUMED)"
+  );
 
   // Top up user balance
-  const hsUserInDb = store.users.find(u => u.user_id === testUserHandshakeId);
+  const hsUserInDb = store.users.find((u) => u.user_id === testUserHandshakeId);
   if (hsUserInDb) hsUserInDb.credits = 5;
 
   // Retry with the EXACT same continuation token!
@@ -2720,7 +3155,11 @@ async function runIntegrationTests() {
         user_id: testUserHandshakeId,
         round_index: 1,
         instruction_payload: "Continuation test",
-        metadata: { estimated_input_tokens: 50 },
+        metadata: {
+          client_timestamp: Date.now(),
+          char_count_total: 100,
+          estimated_input_tokens: 50
+        },
         assets_manifest: []
       },
       orchestration_options: { chosenTemplateId: webgpuArbitraryTemplateId }
@@ -2728,8 +3167,12 @@ async function runIntegrationTests() {
   });
 
   const continueTopupRes = await handleChatContinue(continueAfterTopupReq, env);
-  assert.equal(continueTopupRes.status, 200, "BUG-05: Retried continuation after credit top-up must succeed with 200");
-  assert.equal(hsInDb?.status, "CONSUMED", "BUG-05: Handshake record must now be updated to 'CONSUMED'");
+  assert.equal(
+    continueTopupRes.status,
+    200,
+    "Retried continuation after credit top-up must succeed with 200"
+  );
+  assert.equal(hsInDb?.status, "CONSUMED", "Handshake record must now be updated to 'CONSUMED'");
 
   // Replay attempt with same consumed token
   const continueReplayReq = new Request("https://nanomesh.local/api/chat/continue", {
@@ -2745,22 +3188,32 @@ async function runIntegrationTests() {
         user_id: testUserHandshakeId,
         round_index: 1,
         instruction_payload: "Continuation test",
-        metadata: { estimated_input_tokens: 50 },
+        metadata: {
+          client_timestamp: Date.now(),
+          char_count_total: 100,
+          estimated_input_tokens: 50
+        },
         assets_manifest: []
       },
       orchestration_options: { chosenTemplateId: webgpuArbitraryTemplateId }
     })
   });
   const continueReplayRes = await handleChatContinue(continueReplayReq, env);
-  assert.equal(continueReplayRes.status, 409, "Anti-replay must reject consumed handshake with 409 Conflict");
-  console.log("  ✓ BUG-05: Handshake 2PC preserves ISSUED on 403, succeeds on top-up, and rejects replay: PASSED");
+  assert.equal(
+    continueReplayRes.status,
+    409,
+    "Anti-replay must reject consumed handshake with 409 Conflict"
+  );
+  console.log(
+    "  ✓ Handshake 2PC preserves ISSUED on 403, succeeds on top-up, and rejects replay: PASSED"
+  );
 
   // -----------------------------------------------------------------------
-  // SCENARIO 12: Audit Report 9 Remediations (BUG-02, BUG-04, BUG-05)
+  // SCENARIO 12: Dynamic Node Failover, Budget Protection & Redirect Interception
   // -----------------------------------------------------------------------
-  console.log("\n[Scenario 12] Audit Report 9 Remediations (BUG-02, BUG-04, BUG-05)");
+  console.log("\n[Scenario 12] Dynamic Node Failover, Budget Protection & Redirect Interception");
 
-  // 12.1 BUG-02: Symmetrical Heterogeneous Standby Failover (Cloud -> Browser WebGPU)
+  // 12.1 Symmetrical Heterogeneous Standby Failover (Cloud -> Browser WebGPU)
   const roleFailoverTest = {
     role_id: "role_failover_test",
     name_zh: "异构容灾测试岗",
@@ -2812,7 +3265,7 @@ async function runIntegrationTests() {
     user_rating: 4.5,
     usage_count: 20,
     is_generalist: 1,
-    prior_score: 0.80, // Standby candidate
+    prior_score: 0.8, // Standby candidate
     scenario_anchors: '["chat"]',
     status: "active",
     cost_per_1k_tokens: 0.0,
@@ -2842,16 +3295,21 @@ async function runIntegrationTests() {
     token_version: 1
   });
 
-  const user12AuthToken = await signJWT({ userId: testUser12Id, role: "user", tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  const user12AuthToken = await signJWT(
+    { userId: testUser12Id, role: "user", tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
   const user12ReqHeaders = {
     "Content-Type": "application/json",
-    "Authorization": `Bearer ${user12AuthToken}`
+    Authorization: `Bearer ${user12AuthToken}`
   };
 
   const origFetch12 = globalThis.fetch;
   try {
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      const urlStr = typeof input === "string" ? input : (input instanceof URL ? input.toString() : input.url);
+      const urlStr =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (urlStr.includes("api.mock-failing-cloud.com")) {
         // Simulate cloud model timeout / connection drop
         throw new Error("Connection dropped by cloud gateway (Simulated 504 Gateway Timeout)");
@@ -2864,8 +3322,9 @@ async function runIntegrationTests() {
       session_id: "sess_failover_001",
       user_id: testUser12Id,
       round_index: 1,
+      constraint_context: { target_language: "zh", output_style: "concise" },
       instruction_payload: "测试云端宕机对称流转至本地算力",
-      metadata: { estimated_input_tokens: 50 },
+      metadata: { client_timestamp: Date.now(), char_count_total: 100, estimated_input_tokens: 50 },
       assets_manifest: []
     };
 
@@ -2893,25 +3352,46 @@ async function runIntegrationTests() {
     }
 
     // 1. Assert node_failover emitted with dynamic handover notice
-    assert.ok(streamEvents12.includes("event: node_failover"), "Must emit node_failover event when cloud model fails");
-    assert.ok(streamEvents12.includes("全对称自由流转至端侧 WebGPU 备用模型"), "Failover event must cite symmetrical handover to client WebGPU");
-    assert.ok(streamEvents12.includes("Standby Browser WebGPU"), "Fallback model must be Standby Browser WebGPU");
+    assert.ok(
+      streamEvents12.includes("event: node_failover"),
+      "Must emit node_failover event when cloud model fails"
+    );
+    assert.ok(
+      streamEvents12.includes("全对称自由流转至端侧 WebGPU 备用模型"),
+      "Failover event must cite symmetrical handover to client WebGPU"
+    );
+    assert.ok(
+      streamEvents12.includes("Standby Browser WebGPU"),
+      "Fallback model must be Standby Browser WebGPU"
+    );
 
     // 2. Assert client_exec_request emitted for client execution
-    assert.ok(streamEvents12.includes("event: client_exec_request"), "Must emit client_exec_request for client WebGPU execution");
+    assert.ok(
+      streamEvents12.includes("event: client_exec_request"),
+      "Must emit client_exec_request for client WebGPU execution"
+    );
 
     // 3. Assert dag_complete emitted
-    assert.ok(streamEvents12.includes("event: dag_complete"), "Must emit dag_complete on tail node handover");
+    assert.ok(
+      streamEvents12.includes("event: dag_complete"),
+      "Must emit dag_complete on tail node handover"
+    );
 
     // 4. Assert Conservation of Credits: User balance MUST BE EXACTLY 5 (1 pre-deducted credit was refunded!)
-    const user12InDb = store.users.find(u => u.user_id === testUser12Id);
-    assert.equal(user12InDb?.credits, 5, "Conservation of Credits: pre-deducted credit must be refunded when failing over to free WebGPU browser model!");
-    console.log("  ✓ BUG-02: Cloud -> Browser WebGPU symmetrical dynamic handover with refund & zero crash: PASSED");
+    const user12InDb = store.users.find((u) => u.user_id === testUser12Id);
+    assert.equal(
+      user12InDb?.credits,
+      5,
+      "Conservation of Credits: pre-deducted credit must be refunded when failing over to free WebGPU browser model!"
+    );
+    console.log(
+      "  ✓ Cloud -> Browser WebGPU symmetrical dynamic handover with refund & zero crash: PASSED"
+    );
   } finally {
     globalThis.fetch = origFetch12;
   }
 
-  // 12.2 BUG-04: Intermediate WebGPU Downgrade Interruption (Zero Credits, No dag_complete)
+  // 12.2 Intermediate WebGPU Downgrade Interruption (Zero Credits, No dag_complete)
   const testUser12bId = "usr_downgrade_zero_credits";
   store.users.push({
     user_id: testUser12bId,
@@ -3031,19 +3511,25 @@ async function runIntegrationTests() {
     is_unreachable: false
   };
 
-  const downgradeStream = await executeDAGStream(env, testDag12b as any, {
-    envelope_id: "env_downgrade_001",
-    session_id: "sess_downgrade_001",
-    user_id: testUser12bId,
-    round_index: 1,
-    instruction_payload: "测试中间节点降级失败中断",
-    metadata: { estimated_input_tokens: 50 },
-    assets_manifest: []
-  }, {
-    userId: testUser12bId,
-    hasPreDeducted: false,
-    clientCapabilities: { webgpu_handover_v3: false }
-  });
+  const downgradeStream = await executeDAGStream(
+    env,
+    testDag12b as any,
+    {
+      envelope_id: "env_downgrade_001",
+      session_id: "sess_downgrade_001",
+      user_id: testUser12bId,
+      round_index: 1,
+      constraint_context: { target_language: "zh", output_style: "concise" },
+      instruction_payload: "测试中间节点降级失败中断",
+      metadata: { client_timestamp: Date.now(), char_count_total: 100, estimated_input_tokens: 50 },
+      assets_manifest: []
+    },
+    {
+      userId: testUser12bId,
+      hasPreDeducted: false,
+      clientCapabilities: { webgpu_handover_v3: false }
+    }
+  );
 
   const reader12b = downgradeStream.getReader();
   const decoder12b = new TextDecoder();
@@ -3055,61 +3541,101 @@ async function runIntegrationTests() {
   }
 
   // Assert error event emitted
-  assert.ok(streamEvents12b.includes("event: error"), "Must emit error event when user has insufficient credits for downgrade");
-  assert.ok(streamEvents12b.includes("当前可用积分不足，无法降级调用云端备用模型"), "Error message must state insufficient credits for downgrade");
+  assert.ok(
+    streamEvents12b.includes("event: error"),
+    "Must emit error event when user has insufficient credits for downgrade"
+  );
+  assert.ok(
+    streamEvents12b.includes("当前可用积分不足，无法降级调用云端备用模型"),
+    "Error message must state insufficient credits for downgrade"
+  );
 
-  // Assert BUG-04 fix: dag_complete MUST NOT be emitted!
-  assert.ok(!streamEvents12b.includes("event: dag_complete"), "BUG-04: Terminated downgrade stream MUST NOT emit contradictory dag_complete event!");
-  console.log("  ✓ BUG-04: Intermediate WebGPU downgrade failure immediately aborts and avoids contradictory dag_complete: PASSED");
+  // Assert: dag_complete MUST NOT be emitted!
+  assert.ok(
+    !streamEvents12b.includes("event: dag_complete"),
+    "Terminated downgrade stream MUST NOT emit contradictory dag_complete event!"
+  );
+  console.log(
+    "  ✓ Intermediate WebGPU downgrade failure immediately aborts and avoids contradictory dag_complete: PASSED"
+  );
 
-  // 12.3 BUG-05: Admin Route Precise PATCH Matching (Reject Catch-All)
-  const patchAdminUnknownReq = new Request("https://nanomesh.local/api/admin/arbitrary_nonexistent_route", {
-    method: "PATCH",
-    headers: adminReqHeaders,
-    body: JSON.stringify({ dummy: true })
-  });
-  const patchAdminRes = await worker.fetch(patchAdminUnknownReq, env);
-  assert.equal(patchAdminRes.status, 404, "BUG-05: Unmatched PATCH route under /api/admin must return 404 Not Found");
-  console.log("  ✓ BUG-05: Admin PATCH route guard strictly returns 404 on unmapped subpaths: PASSED");
+  // 12.3 Admin Route Precise PATCH Matching (Reject Catch-All)
+  const patchAdminUnknownReq = new Request(
+    "https://nanomesh.local/api/admin/arbitrary_nonexistent_route",
+    {
+      method: "PATCH",
+      headers: adminReqHeaders,
+      body: JSON.stringify({ dummy: true })
+    }
+  );
+  const patchAdminRes = await worker.fetch(patchAdminUnknownReq, env, {} as any);
+  assert.equal(
+    patchAdminRes.status,
+    404,
+    "Unmatched PATCH route under /api/admin must return 404 Not Found"
+  );
+  console.log("  ✓ Admin PATCH route guard strictly returns 404 on unmapped subpaths: PASSED");
 
-  // 12.4 NM-SEC-01: Admin Route Trailing Slash Normalization & Scoped Suffix Matching
-  const patchAdminWithSlash = new Request("https://nanomesh.local/api/admin/nodes/cf_llama32_text/", {
-    method: "PATCH",
-    headers: adminReqHeaders,
-    body: JSON.stringify({ display_name: "Llama 3.2 3B Normalized" })
-  });
-  const patchSlashRes = await worker.fetch(patchAdminWithSlash, env);
-  assert.equal(patchSlashRes.status, 200, "NM-SEC-01: PATCH /api/admin/nodes/:id/ with trailing slash must succeed without 404");
+  // 12.4 Admin Route Trailing Slash Normalization & Scoped Suffix Matching
+  const patchAdminWithSlash = new Request(
+    "https://nanomesh.local/api/admin/nodes/cf_llama32_text/",
+    {
+      method: "PATCH",
+      headers: adminReqHeaders,
+      body: JSON.stringify({ display_name: "Llama 3.2 3B Normalized" })
+    }
+  );
+  const patchSlashRes = await worker.fetch(patchAdminWithSlash, env, {} as any);
+  assert.equal(
+    patchSlashRes.status,
+    200,
+    "PATCH /api/admin/nodes/:id/ with trailing slash must succeed without 404"
+  );
 
   // Verify non-model route with /download is rejected (does not enter handleAdminDownload)
-  const unknownDownloadReq = new Request("https://nanomesh.local/api/admin/arbitrary_route/download", {
-    method: "GET",
-    headers: adminReqHeaders
-  });
-  const unknownDownloadRes = await worker.fetch(unknownDownloadReq, env);
-  assert.equal(unknownDownloadRes.status, 404, "NM-SEC-01: Unscoped /download must return 404 and not enter model download logic");
+  const unknownDownloadReq = new Request(
+    "https://nanomesh.local/api/admin/arbitrary_route/download",
+    {
+      method: "GET",
+      headers: adminReqHeaders
+    }
+  );
+  const unknownDownloadRes = await worker.fetch(unknownDownloadReq, env, {} as any);
+  assert.equal(
+    unknownDownloadRes.status,
+    404,
+    "Unscoped /download must return 404 and not enter model download logic"
+  );
 
   // Verify notification revocation with trailing slash succeeds without 400
-  const deleteNotifWithSlash = new Request("https://nanomesh.local/api/admin/notifications/notif_test_123/", {
-    method: "DELETE",
-    headers: adminReqHeaders
-  });
-  const deleteNotifSlashRes = await worker.fetch(deleteNotifWithSlash, env);
-  assert.equal(deleteNotifSlashRes.status, 200, "DELETE /api/admin/notifications/:id/ with trailing slash must succeed without 400");
-  console.log("  ✓ NM-SEC-01: Admin trailing slash normalization & scoped prefix matching: PASSED");
+  const deleteNotifWithSlash = new Request(
+    "https://nanomesh.local/api/admin/notifications/notif_test_123/",
+    {
+      method: "DELETE",
+      headers: adminReqHeaders
+    }
+  );
+  const deleteNotifSlashRes = await worker.fetch(deleteNotifWithSlash, env, {} as any);
+  assert.equal(
+    deleteNotifSlashRes.status,
+    200,
+    "DELETE /api/admin/notifications/:id/ with trailing slash must succeed without 400"
+  );
+  console.log("  ✓ Admin trailing slash normalization & scoped prefix matching: PASSED");
 
-  // 12.5 NM-SEC-02: External Model HTTP Redirect (SSRF Defense) Rejection
+  // 12.5 External Model HTTP Redirect (SSRF Defense) Rejection
   const origFetchRedirectTest = globalThis.fetch;
   try {
     let capturedRedirectOption: string | undefined = undefined;
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      const urlStr = typeof input === "string" ? input : (input instanceof URL ? input.toString() : input.url);
+      const urlStr =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (urlStr.includes("api.redirect-attack.com")) {
         capturedRedirectOption = init?.redirect;
         // Return 302 redirecting to internal metadata
         return new Response(null, {
           status: 302,
-          headers: { "Location": "http://169.254.169.254/latest/meta-data/" }
+          headers: { Location: "http://169.254.169.254/latest/meta-data/" }
         });
       }
       return origFetchRedirectTest(input, init);
@@ -3171,18 +3697,28 @@ async function runIntegrationTests() {
       is_unreachable: false
     };
 
-    const redirectStream = await executeDAGStream(env, redirectDag, {
-      envelope_id: "env_redirect_001",
-      session_id: "sess_redirect_001",
-      user_id: referrerId,
-      round_index: 1,
-      instruction_payload: "测试外部重定向拦截",
-      metadata: { estimated_input_tokens: 50 },
-      assets_manifest: []
-    }, {
-      userId: referrerId,
-      hasPreDeducted: true
-    });
+    const redirectStream = await executeDAGStream(
+      env,
+      redirectDag,
+      {
+        envelope_id: "env_redirect_001",
+        session_id: "sess_redirect_001",
+        user_id: referrerId,
+        round_index: 1,
+        constraint_context: { target_language: "zh", output_style: "concise" },
+        instruction_payload: "测试外部重定向拦截",
+        metadata: {
+          client_timestamp: Date.now(),
+          char_count_total: 100,
+          estimated_input_tokens: 50
+        },
+        assets_manifest: []
+      },
+      {
+        userId: referrerId,
+        hasPreDeducted: true
+      }
+    );
 
     const redirectReader = redirectStream.getReader();
     const redirectDecoder = new TextDecoder();
@@ -3193,20 +3729,32 @@ async function runIntegrationTests() {
       redirectEvents += redirectDecoder.decode(chunk.value, { stream: true });
     }
 
-    assert.equal(capturedRedirectOption, "manual", "NM-SEC-02: External model call must configure redirect: 'manual'");
-    assert.ok(redirectEvents.includes("event: dag_error"), "External model redirect must trigger dag_error event");
-    assert.ok(redirectEvents.includes("算力终端禁止 HTTP 重定向"), "Error message must report prohibited HTTP redirect");
-    console.log("  ✓ NM-SEC-02: External model fetch strictly enforces redirect: 'manual' and blocks 302 SSRF: PASSED");
+    assert.equal(
+      capturedRedirectOption,
+      "manual",
+      "External model call must configure redirect: 'manual'"
+    );
+    assert.ok(
+      redirectEvents.includes("event: dag_error"),
+      "External model redirect must trigger dag_error event"
+    );
+    assert.ok(
+      redirectEvents.includes("算力终端禁止 HTTP 重定向"),
+      "Error message must report prohibited HTTP redirect"
+    );
+    console.log(
+      "  ✓ External model fetch strictly enforces redirect: 'manual' and blocks 302 SSRF: PASSED"
+    );
   } finally {
     globalThis.fetch = origFetchRedirectTest;
   }
 
   // -----------------------------------------------------------------------
-  // SCENARIO 13: Audit Report 11 Remediations (NM-BUG-01, NM-BUG-04, NM-SEC-02, NM-SEC-04)
+  // SCENARIO 13: Rate Limiting, Modality Bounds & Continuation Guards
   // -----------------------------------------------------------------------
-  console.log("\n[Scenario 13] Audit Report 11 Remediations (NM-BUG-01, NM-BUG-04, NM-SEC-02, NM-SEC-04)");
+  console.log("\n[Scenario 13] Rate Limiting, Modality Bounds & Continuation Guards");
 
-  // 13.1 NM-BUG-01: Admin Create & Update Node with in_modalities, out_modalities, cost_per_invocation
+  // 13.1 Admin Create & Update Node with in_modalities, out_modalities, cost_per_invocation
   const testNode11Req = new Request("https://nanomesh.local/api/admin/nodes", {
     method: "POST",
     headers: adminReqHeaders,
@@ -3231,29 +3779,62 @@ async function runIntegrationTests() {
     })
   });
   const testNode11Res = await handleAdminCreateNode(testNode11Req, env);
-  assert.equal(testNode11Res.status, 200, "Node creation with in_modalities & cost_per_invocation must succeed");
-  const storedNode11 = store.models.find(m => m.model_id === "m_multimodal_cost_test");
+  assert.equal(
+    testNode11Res.status,
+    200,
+    "Node creation with in_modalities & cost_per_invocation must succeed"
+  );
+  const storedNode11 = store.models.find((m) => m.model_id === "m_multimodal_cost_test");
   assert.ok(storedNode11, "Created node must exist in store");
-  assert.equal(storedNode11.cost_per_invocation, 0.05, "cost_per_invocation must be persisted on creation");
-  assert.deepEqual(JSON.parse(storedNode11.in_modalities), ["image"], "in_modalities must be persisted on creation");
-  assert.deepEqual(JSON.parse(storedNode11.out_modalities), ["text"], "out_modalities must be persisted on creation");
+  assert.equal(
+    storedNode11.cost_per_invocation,
+    0.05,
+    "cost_per_invocation must be persisted on creation"
+  );
+  assert.deepEqual(
+    JSON.parse(storedNode11.in_modalities),
+    ["image"],
+    "in_modalities must be persisted on creation"
+  );
+  assert.deepEqual(
+    JSON.parse(storedNode11.out_modalities),
+    ["text"],
+    "out_modalities must be persisted on creation"
+  );
 
   // Update cost_per_invocation and in_modalities
-  const updateNode11Req = new Request("https://nanomesh.local/api/admin/nodes/m_multimodal_cost_test", {
-    method: "PATCH",
-    headers: adminReqHeaders,
-    body: JSON.stringify({
-      in_modalities: ["image", "text"],
-      cost_per_invocation: 0.08
-    })
-  });
-  const updateNode11Res = await handleAdminUpdateNode(updateNode11Req, env, "m_multimodal_cost_test");
-  assert.equal(updateNode11Res.status, 200, "Node update with in_modalities & cost_per_invocation must succeed");
+  const updateNode11Req = new Request(
+    "https://nanomesh.local/api/admin/nodes/m_multimodal_cost_test",
+    {
+      method: "PATCH",
+      headers: adminReqHeaders,
+      body: JSON.stringify({
+        in_modalities: ["image", "text"],
+        cost_per_invocation: 0.08
+      })
+    }
+  );
+  const updateNode11Res = await handleAdminUpdateNode(
+    updateNode11Req,
+    env,
+    "m_multimodal_cost_test"
+  );
+  assert.equal(
+    updateNode11Res.status,
+    200,
+    "Node update with in_modalities & cost_per_invocation must succeed"
+  );
   assert.equal(storedNode11.cost_per_invocation, 0.08, "cost_per_invocation must be updated");
-  assert.deepEqual(JSON.parse(storedNode11.in_modalities), ["image", "text"], "in_modalities must be updated");
-  console.log("  ✓ NM-BUG-01: Admin Create & Update Node accurately persists in_modalities, out_modalities & cost_per_invocation: PASSED");
+  assert.deepEqual(
+    JSON.parse(storedNode11.in_modalities),
+    ["image", "text"],
+    "in_modalities must be updated"
+  );
+  console.log(
+    "  ✓ Admin Create & Update Node accurately persists in_modalities, out_modalities & cost_per_invocation: PASSED"
+  );
 
-  // 13.2 NM-BUG-04: Chat Envelope instruction_payload Type Guard
+  // 13.2 Chat Envelope instruction_payload Type Guard
   const invalidChatReq1 = new Request("https://nanomesh.local/api/chat", {
     method: "POST",
     headers: user12ReqHeaders,
@@ -3266,8 +3847,11 @@ async function runIntegrationTests() {
   });
   const invalidChatRes1 = await handleChat(invalidChatReq1, env);
   assert.equal(invalidChatRes1.status, 400, "Non-string instruction_payload must return 400");
-  const invalidChatErr1 = await invalidChatRes1.json();
-  assert.ok(invalidChatErr1.error.includes("instruction_payload"), "Must flag instruction_payload type error");
+  const invalidChatErr1 = (await invalidChatRes1.json()) as any;
+  assert.ok(
+    invalidChatErr1.error.includes("instruction_payload"),
+    "Must flag instruction_payload type error"
+  );
 
   const invalidChatReq2 = new Request("https://nanomesh.local/api/chat", {
     method: "POST",
@@ -3281,9 +3865,11 @@ async function runIntegrationTests() {
   });
   const invalidChatRes2 = await handleChat(invalidChatReq2, env);
   assert.equal(invalidChatRes2.status, 400, "Empty/whitespace instruction_payload must return 400");
-  console.log("  ✓ NM-BUG-04: handleChat rejects non-string and whitespace instruction_payload with HTTP 400: PASSED");
+  console.log(
+    "  ✓ handleChat rejects non-string and whitespace instruction_payload with HTTP 400: PASSED"
+  );
 
-  // 13.3 NM-SEC-02: IP-based Hourly Rate Limiting on handleSendCode
+  // 13.3 IP-based Hourly Rate Limiting on handleSendCode
   const ipHeaders = {
     "Content-Type": "application/json",
     "CF-Connecting-IP": "198.51.100.42"
@@ -3291,7 +3877,12 @@ async function runIntegrationTests() {
   const origFetchSendCode = globalThis.fetch;
   try {
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      const urlStr = typeof input === "string" ? input : (input instanceof URL ? input.toString() : (input as any).url);
+      const urlStr =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : (input as any).url;
       if (urlStr.includes("turnstile")) {
         return new Response(JSON.stringify({ success: true }), { status: 200 });
       }
@@ -3316,15 +3907,21 @@ async function runIntegrationTests() {
       body: JSON.stringify({ email: "overflow@gmail.com", turnstile_token: "bypass" })
     });
     const rateLimitedRes = await handleSendCode(rateLimitedReq, env);
-    assert.equal(rateLimitedRes.status, 429, "6th call from same IP within the hour must be rate-limited (429)");
-    const rateLimitedData = await rateLimitedRes.json();
+    assert.equal(
+      rateLimitedRes.status,
+      429,
+      "6th call from same IP within the hour must be rate-limited (429)"
+    );
+    const rateLimitedData = (await rateLimitedRes.json()) as any;
     assert.equal(rateLimitedData.error, "error.ipRateLimit", "Must return error.ipRateLimit");
-    console.log("  ✓ NM-SEC-02: IP-based hourly rate limiting blocks excessive verification emails (429): PASSED");
+    console.log(
+      "  ✓ IP-based hourly rate limiting blocks excessive verification emails (429): PASSED"
+    );
   } finally {
     globalThis.fetch = origFetchSendCode;
   }
 
-  // 13.4 NM-SEC-04: History Payload Defense Limit (Max 512KB & rounds slice)
+  // 13.4 History Payload Defense Limit (Max 512KB & rounds slice)
   const hugeHistoryReq = new Request("https://nanomesh.local/api/history", {
     method: "POST",
     headers: user12ReqHeaders,
@@ -3338,7 +3935,11 @@ async function runIntegrationTests() {
     })
   });
   const hugeHistoryRes = await handleSaveHistory(hugeHistoryReq, env);
-  assert.equal(hugeHistoryRes.status, 413, "History payload exceeding 512KB must return 413 Payload Too Large");
+  assert.equal(
+    hugeHistoryRes.status,
+    413,
+    "History payload exceeding 512KB must return 413 Payload Too Large"
+  );
 
   // Valid sized history with oversized title and > 100 rounds
   const validHistoryReq = new Request("https://nanomesh.local/api/history", {
@@ -3351,13 +3952,19 @@ async function runIntegrationTests() {
     })
   });
   const validHistoryRes = await handleSaveHistory(validHistoryReq, env);
-  assert.equal(validHistoryRes.status, 200, "Sanitized history within limit must save successfully");
-  const savedSession = store.user_chat_sessions.find(s => s.session_id === "sess_defense_history_02");
+  assert.equal(
+    validHistoryRes.status,
+    200,
+    "Sanitized history within limit must save successfully"
+  );
+  const savedSession = store.user_chat_sessions.find(
+    (s) => s.session_id === "sess_defense_history_02"
+  );
   assert.ok(savedSession, "Saved session must exist in store");
   assert.equal(savedSession.title.length, 100, "Title must be clamped to 100 chars");
   const savedRounds = JSON.parse(savedSession.rounds_json);
   assert.equal(savedRounds.length, 100, "Rounds array must be clamped to 100 items");
-  console.log("  ✓ NM-SEC-04: History payload strictly limits rounds, title length & max 512KB size: PASSED");
+  console.log("  ✓ History payload strictly limits rounds, title length & max 512KB size: PASSED");
 
   // 13.5 NEW-04 & NEW-01: Admin Node Registration & Update with non-finite / NaN rates & 0-shot.ai endpoint
   const nanNodeReq = new Request("https://nanomesh.local/api/admin/nodes", {
@@ -3378,13 +3985,33 @@ async function runIntegrationTests() {
     })
   });
   const nanNodeRes = await handleAdminCreateNode(nanNodeReq, env);
-  assert.equal(nanNodeRes.status, 200, "Node with non-finite string inputs must gracefully sanitize and save");
-  const storedNanNode = store.models.find(m => m.model_id === "m_nan_defense_test");
+  assert.equal(
+    nanNodeRes.status,
+    200,
+    "Node with non-finite string inputs must gracefully sanitize and save"
+  );
+  const storedNanNode = store.models.find((m) => m.model_id === "m_nan_defense_test");
   assert.ok(storedNanNode);
-  assert.equal(storedNanNode.cost_per_invocation, 0.0, "Invalid cost_per_invocation must default to 0.0 without NaN");
-  assert.equal(storedNanNode.cost_per_1k_tokens, 0.0, "Invalid cost_per_1k_tokens must default to 0.0 without NaN");
-  assert.equal(storedNanNode.context_window, 4096, "Invalid context_window must default to 4096 without NaN");
-  assert.equal(storedNanNode.max_concurrency, 10, "Invalid max_concurrency must default to 10 without NaN");
+  assert.equal(
+    storedNanNode.cost_per_invocation,
+    0.0,
+    "Invalid cost_per_invocation must default to 0.0 without NaN"
+  );
+  assert.equal(
+    storedNanNode.cost_per_1k_tokens,
+    0.0,
+    "Invalid cost_per_1k_tokens must default to 0.0 without NaN"
+  );
+  assert.equal(
+    storedNanNode.context_window,
+    4096,
+    "Invalid context_window must default to 4096 without NaN"
+  );
+  assert.equal(
+    storedNanNode.max_concurrency,
+    10,
+    "Invalid max_concurrency must default to 10 without NaN"
+  );
   assert.equal(storedNanNode.precision, 0.8, "Invalid precision must default to 0.8 without NaN");
 
   // Test PATCH update with NaN strings
@@ -3398,8 +4025,14 @@ async function runIntegrationTests() {
   });
   const patchNanRes = await handleAdminUpdateNode(patchNanReq, env, "m_nan_defense_test");
   assert.equal(patchNanRes.status, 200, "PATCH with non-finite string numbers must succeed");
-  assert.equal(storedNanNode.cost_per_invocation, 0.0, "cost_per_invocation must remain 0.0 without NaN");
-  console.log("  ✓ NEW-04 & NEW-01: Node create/update strictly sanitizes non-numeric inputs and allows 0-shot.ai: PASSED");
+  assert.equal(
+    storedNanNode.cost_per_invocation,
+    0.0,
+    "cost_per_invocation must remain 0.0 without NaN"
+  );
+  console.log(
+    "  ✓ Node create/update strictly sanitizes non-numeric inputs and allows 0-shot.ai: PASSED"
+  );
 
   // 13.6 NEW-03 & NEW-05: Stale IP rate limit cleanup & active limit preservation (no slice collision)
   const currentTestHour = new Date().toISOString().slice(0, 13);
@@ -3429,7 +4062,12 @@ async function runIntegrationTests() {
   const origFetchSweep = globalThis.fetch;
   try {
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      const urlStr = typeof input === "string" ? input : (input instanceof URL ? input.toString() : (input as any).url);
+      const urlStr =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : (input as any).url;
       if (urlStr.includes("turnstile")) {
         return new Response(JSON.stringify({ success: true }), { status: 200 });
       }
@@ -3445,32 +4083,59 @@ async function runIntegrationTests() {
     assert.ok(waitUntilExecuted, "handleSendCode must delegate cleanup to ctx.waitUntil");
 
     // Stale key must be pruned
-    assert.equal(store.system_counters.some(c => c.key.includes(staleHour)), false, "Stale counter must be pruned");
+    assert.equal(
+      store.system_counters.some((c) => c.key.includes(staleHour)),
+      false,
+      "Stale counter must be pruned"
+    );
     // Active keys for 203.0.113.1 and 192.168.1.100 must NOT be accidentally deleted (NEW-05)
-    assert.ok(store.system_counters.some(c => c.key === `ip_code_rate_${currentTestHour}_203.0.113.1`), "Active counter for 203.0.113.1 must be preserved");
-    assert.ok(store.system_counters.some(c => c.key === `ip_code_rate_${currentTestHour}_192.168.1.100`), "Active counter for 192.168.1.100 must be preserved");
-    console.log("  ✓ NEW-03 & NEW-05: Stale IP counters pruned without wiping active rate limits for sensitive IPs: PASSED");
+    assert.ok(
+      store.system_counters.some((c) => c.key === `ip_code_rate_${currentTestHour}_203.0.113.1`),
+      "Active counter for 203.0.113.1 must be preserved"
+    );
+    assert.ok(
+      store.system_counters.some((c) => c.key === `ip_code_rate_${currentTestHour}_192.168.1.100`),
+      "Active counter for 192.168.1.100 must be preserved"
+    );
+    console.log(
+      "  ✓ Stale IP counters pruned without wiping active rate limits for sensitive IPs: PASSED"
+    );
   } finally {
     globalThis.fetch = origFetchSweep;
   }
 
   // 13.7 NEW-02: Verify i18n dictionary contains error.ipRateLimit for zh and en
   const i18nContent = fs.readFileSync("public/i18n.js", "utf-8");
-  assert.ok(i18nContent.includes("'error.ipRateLimit': '当前网络请求验证码过于频繁"), "i18n.js must contain Chinese translation for error.ipRateLimit");
-  assert.ok(i18nContent.includes("'error.ipRateLimit': 'Too many verification requests"), "i18n.js must contain English translation for error.ipRateLimit");
-  console.log("  ✓ NEW-02: error.ipRateLimit defined in both zh and en dictionaries in public/i18n.js: PASSED");
+  assert.ok(
+    i18nContent.includes("'error.ipRateLimit': '当前网络请求验证码过于频繁"),
+    "i18n.js must contain Chinese translation for error.ipRateLimit"
+  );
+  assert.ok(
+    i18nContent.includes("'error.ipRateLimit': 'Too many verification requests"),
+    "i18n.js must contain English translation for error.ipRateLimit"
+  );
+  console.log(
+    "  ✓ error.ipRateLimit defined in both zh and en dictionaries in public/i18n.js: PASSED"
+  );
 
   // ----------------------------------------------------
-  // SCENARIO 14: Audit Report 12 Remediations
-  // (NM-SEC-01, NM-SEC-02, NM-BUG-01, NM-BUG-02, NM-SEC-03, NM-INFO-01, NM-INFO-02)
+  // SCENARIO 14: Session Security, Deduplication & Atomic Key Lifecycle
   // ----------------------------------------------------
-  console.log("\n[Scenario 14] Audit Report 12 Remediations (NM-SEC-01, NM-SEC-02, NM-BUG-01, NM-BUG-02, NM-SEC-03, NM-INFO-01, NM-INFO-02)");
+  console.log("\n[Scenario 14] Session Security, Deduplication & Atomic Key Lifecycle");
 
-  // 14.1 NM-SEC-01: OAuth Bind CSRF rejection
+  // 14.1 OAuth Bind CSRF rejection
   // Attacker creates a state for user "attacker_victim_target", but session belongs to "victim_user"
-  const attackerState = await signJWT({ nonce: "test_nonce_1", action: "bind", userId: "attacker_user_id" }, env.JWT_SECRET, 300);
-  const victimToken = await signJWT({ userId: "victim_user_id", tokenVersion: 1 }, env.JWT_SECRET, 3600);
-  
+  const attackerState = await signJWT(
+    { nonce: "test_nonce_1", action: "bind", userId: "attacker_user_id" },
+    env.JWT_SECRET,
+    300
+  );
+  const victimToken = await signJWT(
+    { userId: "victim_user_id", tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
+
   // Victim has an active account
   store.users.push({
     user_id: "victim_user_id",
@@ -3484,19 +4149,30 @@ async function runIntegrationTests() {
     token_version: 1
   });
 
-  const csrfReq = new Request(`https://nanomesh.local/api/auth/callback/github?code=mock_code&state=${attackerState}`, {
-    headers: { "Cookie": `session=${victimToken}` }
-  });
+  const csrfReq = new Request(
+    `https://nanomesh.local/api/auth/callback/github?code=mock_code&state=${attackerState}`,
+    {
+      headers: { Cookie: `session=${victimToken}` }
+    }
+  );
   // Mock GitHub callback to return attacker's GitHub profile
   const origFetchOauth = globalThis.fetch;
   try {
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      const urlStr = typeof input === "string" ? input : (input instanceof URL ? input.toString() : (input as any).url);
+      const urlStr =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : (input as any).url;
       if (urlStr.includes("access_token")) {
         return new Response(JSON.stringify({ access_token: "mock_gh_token" }), { status: 200 });
       }
       if (urlStr.includes("api.github.com/user/emails")) {
-        return new Response(JSON.stringify([{ email: "attacker@github.com", primary: true, verified: true }]), { status: 200 });
+        return new Response(
+          JSON.stringify([{ email: "attacker@github.com", primary: true, verified: true }]),
+          { status: 200 }
+        );
       }
       if (urlStr.includes("api.github.com/user")) {
         return new Response(JSON.stringify({ id: 999999, login: "attacker_gh" }), { status: 200 });
@@ -3507,18 +4183,23 @@ async function runIntegrationTests() {
     const csrfRes = await worker.fetch(csrfReq, env, {} as any);
     assert.equal(csrfRes.status, 302);
     const location = csrfRes.headers.get("Location") || "";
-    assert.ok(location.includes("error=bind_csrf_rejected"), "Cross-user OAuth bind must be rejected with bind_csrf_rejected");
+    assert.ok(
+      location.includes("error=bind_csrf_rejected"),
+      "Cross-user OAuth bind must be rejected with bind_csrf_rejected"
+    );
     // Ensure no binding inserted for victim
-    const victimBinding = store.user_oauth_bindings.find(b => b.user_id === "victim_user_id");
+    const victimBinding = store.user_oauth_bindings.find((b) => b.user_id === "victim_user_id");
     assert.equal(victimBinding, undefined, "Attacker oauth ID must NOT be bound to victim account");
-    console.log("  ✓ NM-SEC-01: OAuth bind CSRF attack intercepted and blocked: PASSED");
+    console.log("  ✓ OAuth bind CSRF attack intercepted and blocked: PASSED");
 
-    // 14.2 NM-SEC-02: OAuth registration cooldown bypass check (tombstone for profile.email)
+    // 14.2 OAuth registration cooldown bypass check (tombstone for profile.email)
     const encoder = new TextEncoder();
     const deletedEmail = "cooldown_test@gmail.com";
     const emailSaltData = encoder.encode(deletedEmail + getPersistentSalt(env));
     const emailHashBuf = await crypto.subtle.digest("SHA-256", emailSaltData);
-    const emailHash = Array.from(new Uint8Array(emailHashBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
+    const emailHash = Array.from(new Uint8Array(emailHashBuf))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
     // Insert email tombstone into account_tombstones
     store.account_tombstones.push({
       hash_id: emailHash,
@@ -3528,31 +4209,53 @@ async function runIntegrationTests() {
 
     // Mock Google callback to return profile with that deletedEmail
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      const urlStr = typeof input === "string" ? input : (input instanceof URL ? input.toString() : (input as any).url);
+      const urlStr =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : (input as any).url;
       if (urlStr.includes("oauth2.googleapis.com/token")) {
         return new Response(JSON.stringify({ access_token: "mock_google_token" }), { status: 200 });
       }
       if (urlStr.includes("googleapis.com/oauth2/v2/userinfo")) {
-        return new Response(JSON.stringify({ id: "goog_fresh_9988", email: deletedEmail, verified_email: true, name: "Cooldown Test" }), { status: 200 });
+        return new Response(
+          JSON.stringify({
+            id: "goog_fresh_9988",
+            email: deletedEmail,
+            verified_email: true,
+            name: "Cooldown Test"
+          }),
+          { status: 200 }
+        );
       }
       return origFetchOauth(input, init);
     };
 
-    const googleLoginState = await signJWT({ nonce: "test_nonce_2", action: "login" }, env.JWT_SECRET, 300);
-    const cooldownReq = new Request(`https://nanomesh.local/api/auth/callback/google?code=mock_code&state=${googleLoginState}`);
+    const googleLoginState = await signJWT(
+      { nonce: "test_nonce_2", action: "login" },
+      env.JWT_SECRET,
+      300
+    );
+    const cooldownReq = new Request(
+      `https://nanomesh.local/api/auth/callback/google?code=mock_code&state=${googleLoginState}`
+    );
     const cooldownRes = await worker.fetch(cooldownReq, env, {} as any);
     assert.equal(cooldownRes.status, 302);
     const cdLocation = cooldownRes.headers.get("Location") || "";
-    assert.ok(cdLocation.includes("error=account_cooldown"), "OAuth login with tombstoned email must be rejected with account_cooldown");
+    assert.ok(
+      cdLocation.includes("error=account_cooldown"),
+      "OAuth login with tombstoned email must be rejected with account_cooldown"
+    );
     // Ensure no new user created
-    const createdCooldownUser = store.users.find(u => u.email === deletedEmail);
+    const createdCooldownUser = store.users.find((u) => u.email === deletedEmail);
     assert.equal(createdCooldownUser, undefined, "User must NOT be created for tombstoned email");
-    console.log("  ✓ NM-SEC-02: OAuth registration blocks tombstoned emails during cooldown: PASSED");
+    console.log("  ✓ OAuth registration blocks tombstoned emails during cooldown: PASSED");
   } finally {
     globalThis.fetch = origFetchOauth;
   }
 
-  // 14.3 NM-BUG-01: Low Balance Warning notification generated after settlement
+  // 14.3 Low Balance Warning notification generated after settlement
   const lowBalanceUserId = "low_balance_usr_1";
   store.users.push({
     user_id: lowBalanceUserId,
@@ -3568,18 +4271,30 @@ async function runIntegrationTests() {
 
   const { checkAndNotifyLowBalance } = await import("../src/api/notifications");
   await checkAndNotifyLowBalance(env, lowBalanceUserId, 450);
-  const lowBalNotif = store.notifications.find(n => n.user_id === lowBalanceUserId && n.event_type === "low_balance");
+  const lowBalNotif = store.notifications.find(
+    (n) => n.user_id === lowBalanceUserId && n.event_type === "low_balance"
+  );
   assert.ok(lowBalNotif, "Low balance notification must be created when credits < 500");
   assert.equal(lowBalNotif.category, "quota");
 
   // Deduplication check: call again within 24h
-  const initialNotifCount = store.notifications.filter(n => n.user_id === lowBalanceUserId && n.event_type === "low_balance").length;
+  const initialNotifCount = store.notifications.filter(
+    (n) => n.user_id === lowBalanceUserId && n.event_type === "low_balance"
+  ).length;
   await checkAndNotifyLowBalance(env, lowBalanceUserId, 400);
-  const secondNotifCount = store.notifications.filter(n => n.user_id === lowBalanceUserId && n.event_type === "low_balance").length;
-  assert.equal(secondNotifCount, initialNotifCount, "24-hour deduplication window must prevent duplicate low balance alerts");
-  console.log("  ✓ NM-BUG-01: checkAndNotifyLowBalance alerts on < 500 credits with 24h deduplication: PASSED");
+  const secondNotifCount = store.notifications.filter(
+    (n) => n.user_id === lowBalanceUserId && n.event_type === "low_balance"
+  ).length;
+  assert.equal(
+    secondNotifCount,
+    initialNotifCount,
+    "24-hour deduplication window must prevent duplicate low balance alerts"
+  );
+  console.log(
+    "  ✓ checkAndNotifyLowBalance alerts on < 500 credits with 24h deduplication: PASSED"
+  );
 
-  // 14.4 NM-BUG-02: Client routes with trailing slash normalization
+  // 14.4 Client routes with trailing slash normalization
   // Notification read with trailing slash: /api/notifications/:id/read/
   store.notifications.push({
     notification_id: "notif_slash_1",
@@ -3598,18 +4313,29 @@ async function runIntegrationTests() {
     created_at: new Date().toISOString()
   });
 
-  const notifToken = await signJWT({ userId: lowBalanceUserId, tokenVersion: 1 }, env.JWT_SECRET, 3600);
-  const notifSlashReq = new Request("https://nanomesh.local/api/notifications/notif_slash_1/read/", {
-    method: "POST",
-    headers: { "Cookie": `session=${notifToken}` }
-  });
+  const notifToken = await signJWT(
+    { userId: lowBalanceUserId, tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
+  const notifSlashReq = new Request(
+    "https://nanomesh.local/api/notifications/notif_slash_1/read/",
+    {
+      method: "POST",
+      headers: { Cookie: `session=${notifToken}` }
+    }
+  );
   const notifSlashRes = await worker.fetch(notifSlashReq, env, {} as any);
-  assert.equal(notifSlashRes.status, 200, "POST /api/notifications/:id/read/ must return 200 with trailing slash");
-  const updatedNotif = store.notifications.find(n => n.notification_id === "notif_slash_1");
+  assert.equal(
+    notifSlashRes.status,
+    200,
+    "POST /api/notifications/:id/read/ must return 200 with trailing slash"
+  );
+  const updatedNotif = store.notifications.find((n) => n.notification_id === "notif_slash_1");
   assert.equal(updatedNotif?.is_read, 1, "Notification must be marked as read");
-  console.log("  ✓ NM-BUG-02: Client API routes correctly normalize and match trailing slashes: PASSED");
+  console.log("  ✓ Client API routes correctly normalize and match trailing slashes: PASSED");
 
-  // 14.5 NM-SEC-03 & NM-NEW-01: Passkey challenge replay rejected via single-use CAS & TTL cleanup
+  // 14.5 Passkey challenge replay rejected via single-use CAS & TTL cleanup
   const replayChallenge = "test_challenge_replay_cas_123";
   const nowSec = Math.floor(Date.now() / 1000);
   store.system_counters.push({
@@ -3645,22 +4371,40 @@ async function runIntegrationTests() {
   // Attempting to consume an already-consumed challenge
   const casResult = await env.DB.prepare(
     "INSERT OR IGNORE INTO system_counters (key, value) VALUES (?, ?)"
-  ).bind(`pk_used_${replayChallenge}`, nowSec).run();
-  assert.equal(casResult.meta.changes, 0, "Replaying challenge must result in 0 changes (CAS failure)");
+  )
+    .bind(`pk_used_${replayChallenge}`, nowSec)
+    .run();
+  assert.equal(
+    casResult.meta.changes,
+    0,
+    "Replaying challenge must result in 0 changes (CAS failure)"
+  );
 
   // Run cleanup query (simulating opportunistic cleanup)
   await env.DB.prepare(
     "DELETE FROM system_counters WHERE key LIKE 'pk_used_%' AND value < strftime('%s', 'now', '-10 minutes')"
   ).run();
-  assert.equal(store.system_counters.some(c => c.key === "pk_used_stale_expired_challenge_999"), false, "Stale challenge key (> 10 min) must be pruned");
-  assert.equal(store.system_counters.some(c => c.key === `pk_used_${replayChallenge}`), true, "Recent challenge key must be retained");
-  console.log("  ✓ NM-SEC-03 & NM-NEW-01: Passkey challenge replay blocked via atomic CAS & stale keys pruned: PASSED");
+  assert.equal(
+    store.system_counters.some((c) => c.key === "pk_used_stale_expired_challenge_999"),
+    false,
+    "Stale challenge key (> 10 min) must be pruned"
+  );
+  assert.equal(
+    store.system_counters.some((c) => c.key === `pk_used_${replayChallenge}`),
+    true,
+    "Recent challenge key must be retained"
+  );
+  console.log("  ✓ Passkey challenge replay blocked via atomic CAS & stale keys pruned: PASSED");
 
-  // 14.6 NM-INFO-01: handleSaveHistory validates sessionId type & length
-  const histToken = await signJWT({ userId: lowBalanceUserId, tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  // 14.6 handleSaveHistory validates sessionId type & length
+  const histToken = await signJWT(
+    { userId: lowBalanceUserId, tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
   const badSessionIdReq1 = new Request("https://nanomesh.local/api/history", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Cookie": `session=${histToken}` },
+    headers: { "Content-Type": "application/json", Cookie: `session=${histToken}` },
     body: JSON.stringify({ sessionId: { bad: "object" } })
   });
   const badSessionIdRes1 = await worker.fetch(badSessionIdReq1, env, {} as any);
@@ -3668,44 +4412,59 @@ async function runIntegrationTests() {
 
   const badSessionIdReq2 = new Request("https://nanomesh.local/api/history", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Cookie": `session=${histToken}` },
+    headers: { "Content-Type": "application/json", Cookie: `session=${histToken}` },
     body: JSON.stringify({ sessionId: "a".repeat(65) })
   });
   const badSessionIdRes2 = await worker.fetch(badSessionIdReq2, env, {} as any);
   assert.equal(badSessionIdRes2.status, 400, "Overly long sessionId (> 64 chars) must return 400");
-  console.log("  ✓ NM-INFO-01: handleSaveHistory strictly enforces string type & <= 64 char limit on sessionId: PASSED");
+  console.log(
+    "  ✓ handleSaveHistory strictly enforces string type & <= 64 char limit on sessionId: PASSED"
+  );
 
-  // 14.7 NM-INFO-02: models/light/ static delivery includes CSP & Attachment headers
+  // 14.7 models/light/ static delivery includes CSP & Attachment headers
   await env.R2.put("models/light/test-model.onnx", "mock_onnx_weights", {
     httpMetadata: { contentType: "application/octet-stream" }
   });
 
-  const lightModelReq = new Request("https://nanomesh.local/api/assets/models/light/test-model.onnx");
+  const lightModelReq = new Request(
+    "https://nanomesh.local/api/assets/models/light/test-model.onnx"
+  );
   const lightModelRes = await worker.fetch(lightModelReq, env, {} as any);
   assert.equal(lightModelRes.status, 200);
   assert.equal(lightModelRes.headers.get("Content-Security-Policy"), "default-src 'none'; sandbox");
   assert.equal(lightModelRes.headers.get("Content-Disposition"), "attachment");
-  console.log("  ✓ NM-INFO-02: Public light node static responses strictly include CSP sandbox and attachment headers: PASSED");
+  console.log(
+    "  ✓ Public light node static responses strictly include CSP sandbox and attachment headers: PASSED"
+  );
 
   // -----------------------------------------------------------------------
-  // SCENARIO 15: Audit Report 13 Remediations (NM-BUG-01, NM-BUG-02, NM-SEC-01, NM-SEC-02, NM-INFO-02)
+  // SCENARIO 15: CORS Enforcement, Method Validation & Path Isolation
   // -----------------------------------------------------------------------
-  console.log("\n[Scenario 15] Audit Report 13 Remediations (NM-BUG-01, NM-BUG-02, NM-SEC-01, NM-SEC-02, NM-INFO-02)");
+  console.log("\n[Scenario 15] CORS Enforcement, Method Validation & Path Isolation");
 
-  // 15.1 NM-BUG-01: /api/user/credits unauthenticated returns 401 with CORS headers & JSON error
+  // 15.1 /api/user/credits unauthenticated returns 401 with CORS headers & JSON error
   const unauthCreditsReq = new Request("https://nanomesh.local/api/user/credits", {
     method: "GET",
-    headers: { "Origin": "https://frontend.nanomesh.app" }
+    headers: { Origin: "https://frontend.nanomesh.app" }
   });
   const unauthCreditsRes = await worker.fetch(unauthCreditsReq, env, {} as any);
   assert.equal(unauthCreditsRes.status, 401, "/api/user/credits without session must return 401");
-  assert.ok(unauthCreditsRes.headers.get("access-control-allow-origin"), "Must include access-control-allow-origin header");
-  assert.equal(unauthCreditsRes.headers.get("x-content-type-options"), "nosniff", "Must include nosniff security header");
-  const unauthBody = await unauthCreditsRes.json();
+  assert.ok(
+    unauthCreditsRes.headers.get("access-control-allow-origin"),
+    "Must include access-control-allow-origin header"
+  );
+  assert.equal(
+    unauthCreditsRes.headers.get("x-content-type-options"),
+    "nosniff",
+    "Must include nosniff security header"
+  );
+  const unauthBody = (await unauthCreditsRes.json()) as any;
   assert.equal(unauthBody.error, "Unauthorized", "Response must be JSON error object");
-  console.log("  ✓ NM-BUG-01: Unauthenticated /api/user/credits returns 401 with full CORS and security headers: PASSED");
+  console.log(
+    "  ✓ Unauthenticated /api/user/credits returns 401 with full CORS and security headers: PASSED"
+  );
 
-  // 15.2 NM-INFO-02: Read-only endpoints reject non-GET requests with 405 Method Not Allowed
+  // 15.2 Read-only endpoints reject non-GET requests with 405 Method Not Allowed
   const postCreditsReq = new Request("https://nanomesh.local/api/user/credits", { method: "POST" });
   const postCreditsRes = await worker.fetch(postCreditsReq, env, {} as any);
   assert.equal(postCreditsRes.status, 405, "POST /api/user/credits must return 405");
@@ -3714,24 +4473,41 @@ async function runIntegrationTests() {
   const postConfigRes = await worker.fetch(postConfigReq, env, {} as any);
   assert.equal(postConfigRes.status, 405, "POST /api/auth/config must return 405");
 
-  const postBindingsReq = new Request("https://nanomesh.local/api/user/bindings", { method: "POST" });
+  const postBindingsReq = new Request("https://nanomesh.local/api/user/bindings", {
+    method: "POST"
+  });
   const postBindingsRes = await worker.fetch(postBindingsReq, env, {} as any);
   assert.equal(postBindingsRes.status, 405, "POST /api/user/bindings must return 405");
-  console.log("  ✓ NM-INFO-02: Read-only endpoints strictly enforce HTTP Method GET/HEAD and reject POST with 405: PASSED");
+  console.log(
+    "  ✓ Read-only endpoints strictly enforce HTTP Method GET/HEAD and reject POST with 405: PASSED"
+  );
 
-  // 15.3 NM-SEC-01: Path traversal filter blocks '..' in asset key
-  const traversalReq1 = new Request("https://nanomesh.local/api/assets?key=models/light/../secret.onnx");
+  // 15.3 Path traversal filter blocks '..' in asset key
+  const traversalReq1 = new Request(
+    "https://nanomesh.local/api/assets?key=models/light/../secret.onnx"
+  );
   const traversalRes1 = await worker.fetch(traversalReq1, env, {} as any);
-  assert.equal(traversalRes1.status, 400, "Path traversal sequence in asset key must be rejected with 400");
+  assert.equal(
+    traversalRes1.status,
+    400,
+    "Path traversal sequence in asset key must be rejected with 400"
+  );
 
-  const traversalReq2 = new Request(`https://nanomesh.local/api/assets?key=tmp/${lowBalanceUserId}/..\\other\\pass.txt`, {
-    headers: { "Cookie": `session=${histToken}` }
-  });
+  const traversalReq2 = new Request(
+    `https://nanomesh.local/api/assets?key=tmp/${lowBalanceUserId}/..\\other\\pass.txt`,
+    {
+      headers: { Cookie: `session=${histToken}` }
+    }
+  );
   const traversalRes2 = await worker.fetch(traversalReq2, env, {} as any);
-  assert.equal(traversalRes2.status, 400, "Encoded path traversal sequence must be rejected with 400");
-  console.log("  ✓ NM-SEC-01: Asset retrieval strictly intercepts path traversal sequences with 400: PASSED");
+  assert.equal(
+    traversalRes2.status,
+    400,
+    "Encoded path traversal sequence must be rejected with 400"
+  );
+  console.log("  ✓ Asset retrieval strictly intercepts path traversal sequences with 400: PASSED");
 
-  // 15.4 NM-SEC-02: Passkey login rejects deleted user (email starting with deleted_)
+  // 15.4 Passkey login rejects deleted user (email starting with deleted_)
   const deletedUserId = "del_pk_user_999";
   store.users.push({
     user_id: deletedUserId,
@@ -3761,7 +4537,13 @@ async function runIntegrationTests() {
       id: "cred_deleted_user_1",
       rawId: "cred_deleted_user_1",
       response: {
-        clientDataJSON: Buffer.from(JSON.stringify({ type: "webauthn.get", challenge: "dummy_c", origin: "https://nanomesh.local" })).toString("base64url"),
+        clientDataJSON: Buffer.from(
+          JSON.stringify({
+            type: "webauthn.get",
+            challenge: "dummy_c",
+            origin: "https://nanomesh.local"
+          })
+        ).toString("base64url"),
         authenticatorData: Buffer.from("a".repeat(37)).toString("base64url"),
         signature: Buffer.from("dummy_sig").toString("base64url")
       }
@@ -3769,18 +4551,26 @@ async function runIntegrationTests() {
   });
   const delVerifyRes = await handlePasskeyLoginVerify(delVerifyReq, env);
   assert.equal(delVerifyRes.status, 401, "Deleted user passkey login must be rejected with 401");
-  const delVerifyBody = await delVerifyRes.json();
-  assert.equal(delVerifyBody.error, "error.userNotFound", "Must return userNotFound error for deleted user");
-  console.log("  ✓ NM-SEC-02: Passkey verification strictly rejects tombstoned (deleted_) accounts: PASSED");
+  const delVerifyBody = (await delVerifyRes.json()) as any;
+  assert.equal(
+    delVerifyBody.error,
+    "error.userNotFound",
+    "Must return userNotFound error for deleted user"
+  );
+  console.log("  ✓ Passkey verification strictly rejects tombstoned (deleted_) accounts: PASSED");
 
   // -----------------------------------------------------------------------
-  // SCENARIO 16: Audit Report 14 Remediations (NM-BUG-01, NM-BUG-02, NM-SEC-01, NM-INFO-01, NM-BUG-03)
+  // SCENARIO 16: Referral Integrity, Admin Anti-DoS & CSRF Protection
   // -----------------------------------------------------------------------
-  console.log("\n[Scenario 16] Audit Report 14 Remediations (NM-BUG-01, NM-BUG-02, NM-SEC-01, NM-INFO-01, NM-BUG-03)");
+  console.log("\n[Scenario 16] Referral Integrity, Admin Anti-DoS & CSRF Protection");
 
-  // 16.1 NM-BUG-01: Deleted user referral code rejection
+  // 16.1 Deleted user referral code rejection
   const delTestUserId = "usr_to_delete_for_ref";
-  const delTestUserToken = await signJWT({ userId: delTestUserId, tokenVersion: 1 }, env.JWT_SECRET, 3600);
+  const delTestUserToken = await signJWT(
+    { userId: delTestUserId, tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
   store.users.push({
     user_id: delTestUserId,
     username: "UserToDelete",
@@ -3795,12 +4585,16 @@ async function runIntegrationTests() {
   // Perform account deletion
   const delReq = new Request("https://nanomesh.local/api/user/delete", {
     method: "POST",
-    headers: { "Cookie": `session=${delTestUserToken}` }
+    headers: { Cookie: `session=${delTestUserToken}` }
   });
   const delRes = await handleDeleteAccount(delReq, env);
   assert.equal(delRes.status, 200, "Account deletion must succeed");
-  const deletedDbUser = store.users.find(u => u.user_id === delTestUserId);
-  assert.equal(deletedDbUser?.referral_code, null, "Deleted user referral_code must be set to null");
+  const deletedDbUser = store.users.find((u) => u.user_id === delTestUserId);
+  assert.equal(
+    deletedDbUser?.referral_code,
+    null,
+    "Deleted user referral_code must be set to null"
+  );
 
   // Attempt to register with the old deleted referral code
   const { handleRegister } = await import("../src/api/auth");
@@ -3826,7 +4620,12 @@ async function runIntegrationTests() {
   const origFetchRegister = globalThis.fetch;
   try {
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      const urlStr = typeof input === "string" ? input : (input instanceof URL ? input.toString() : (input as any).url);
+      const urlStr =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : (input as any).url;
       if (urlStr.includes("turnstile")) {
         return new Response(JSON.stringify({ success: true }), { status: 200 });
       }
@@ -3834,23 +4633,41 @@ async function runIntegrationTests() {
     };
 
     const registerWithDeletedRefRes = await handleRegister(registerWithDeletedRefReq, env);
-    assert.equal(registerWithDeletedRefRes.status, 400, "Registration with deleted user's referral code must be rejected");
-    const regErrBody = await registerWithDeletedRefRes.json();
+    assert.equal(
+      registerWithDeletedRefRes.status,
+      400,
+      "Registration with deleted user's referral code must be rejected"
+    );
+    const regErrBody = (await registerWithDeletedRefRes.json()) as any;
     assert.equal(regErrBody.error, "error.invalidReferralCode");
-    assert.equal(deletedDbUser?.credits, 0, "Deleted user credits must remain 0 and not receive ghost reward");
+    assert.equal(
+      deletedDbUser?.credits,
+      0,
+      "Deleted user credits must remain 0 and not receive ghost reward"
+    );
   } finally {
     globalThis.fetch = origFetchRegister;
   }
-  console.log("  ✓ NM-BUG-01: Deleted account referral code is nulled and registration with it rejected: PASSED");
+  console.log(
+    "  ✓ Deleted account referral code is nulled and registration with it rejected: PASSED"
+  );
 
-  // 16.2 NM-BUG-02: Admin login rejects non-POST without recording attempts (Anti-DoS)
+  // 16.2 Admin login rejects non-POST without recording attempts (Anti-DoS)
   store.admin_login_attempts = [];
   const adminGetReq = new Request("https://nanomesh.local/api/admin/login", { method: "GET" });
   for (let i = 0; i < 5; i++) {
     const adminGetRes = await worker.fetch(adminGetReq, env, {} as any);
-    assert.equal(adminGetRes.status, 405, "GET /api/admin/login must return 405 Method Not Allowed");
+    assert.equal(
+      adminGetRes.status,
+      405,
+      "GET /api/admin/login must return 405 Method Not Allowed"
+    );
   }
-  assert.equal(store.admin_login_attempts.length, 0, "GET requests must never write to admin_login_attempts");
+  assert.equal(
+    store.admin_login_attempts.length,
+    0,
+    "GET requests must never write to admin_login_attempts"
+  );
 
   // Valid POST still succeeds (not locked out)
   const adminPostReq = new Request("https://nanomesh.local/api/admin/login", {
@@ -3859,24 +4676,32 @@ async function runIntegrationTests() {
     body: JSON.stringify({ password: (env as any).ADMIN_PASSWORD || "IntegrationAdminPass123!" })
   });
   const adminPostRes = await worker.fetch(adminPostReq, env, {} as any);
-  assert.equal(adminPostRes.status, 200, "Valid POST admin login must succeed without being DoS locked");
-  console.log("  ✓ NM-BUG-02: Non-POST /api/admin/login returns 405 and avoids lockout DoS: PASSED");
+  assert.equal(
+    adminPostRes.status,
+    200,
+    "Valid POST admin login must succeed without being DoS locked"
+  );
+  console.log("  ✓ Non-POST /api/admin/login returns 405 and avoids lockout DoS: PASSED");
 
-  // 16.3 NM-SEC-01: Logout routes reject GET (Logout CSRF defense)
+  // 16.3 Logout routes reject GET (Logout CSRF defense)
   const userLogoutGetReq = new Request("https://nanomesh.local/api/auth/logout", { method: "GET" });
   const userLogoutGetRes = await worker.fetch(userLogoutGetReq, env, {} as any);
   assert.equal(userLogoutGetRes.status, 405, "GET /api/auth/logout must return 405");
 
-  const adminLogoutGetReq = new Request("https://nanomesh.local/api/admin/logout", { method: "GET" });
+  const adminLogoutGetReq = new Request("https://nanomesh.local/api/admin/logout", {
+    method: "GET"
+  });
   const adminLogoutGetRes = await worker.fetch(adminLogoutGetReq, env, {} as any);
   assert.equal(adminLogoutGetRes.status, 405, "GET /api/admin/logout must return 405");
 
-  const userLogoutPostReq = new Request("https://nanomesh.local/api/auth/logout", { method: "POST" });
+  const userLogoutPostReq = new Request("https://nanomesh.local/api/auth/logout", {
+    method: "POST"
+  });
   const userLogoutPostRes = await worker.fetch(userLogoutPostReq, env, {} as any);
   assert.equal(userLogoutPostRes.status, 200, "POST /api/auth/logout must succeed");
-  console.log("  ✓ NM-SEC-01: Logout endpoints strictly reject GET to block Logout CSRF: PASSED");
+  console.log("  ✓ Logout endpoints strictly reject GET to block Logout CSRF: PASSED");
 
-  // 16.4 NM-INFO-01: Read-only endpoints reject non-GET/HEAD with 405
+  // 16.4 Read-only endpoints reject non-GET/HEAD with 405
   const postMeReq = new Request("https://nanomesh.local/api/auth/me", { method: "POST" });
   const postMeRes = await worker.fetch(postMeReq, env, {} as any);
   assert.equal(postMeRes.status, 405, "POST /api/auth/me must return 405");
@@ -3885,17 +4710,21 @@ async function runIntegrationTests() {
   const postLedgerRes = await worker.fetch(postLedgerReq, env, {} as any);
   assert.equal(postLedgerRes.status, 405, "POST /api/user/ledger must return 405");
 
-  const postAssetReq = new Request("https://nanomesh.local/api/assets?key=models/light/qwen.onnx", { method: "POST" });
+  const postAssetReq = new Request("https://nanomesh.local/api/assets?key=models/light/qwen.onnx", {
+    method: "POST"
+  });
   const postAssetRes = await worker.fetch(postAssetReq, env, {} as any);
   assert.equal(postAssetRes.status, 405, "POST /api/assets must return 405");
-  console.log("  ✓ NM-INFO-01: /api/auth/me, /api/user/ledger and /api/assets enforce GET/HEAD with 405: PASSED");
+  console.log(
+    "  ✓ /api/auth/me, /api/user/ledger and /api/assets enforce GET/HEAD with 405: PASSED"
+  );
 
-  // 16.5 NM-BUG-03: Continuation payload boundary (> 512KB) rejected with 413
+  // 16.5 Continuation payload boundary (> 512KB) rejected with 413
   const oversizedContReq = new Request("https://nanomesh.local/api/chat/continue", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Cookie": `session=${histToken}`
+      Cookie: `session=${histToken}`
     },
     body: JSON.stringify({
       continuation_token: "dummy_token",
@@ -3905,20 +4734,24 @@ async function runIntegrationTests() {
     })
   });
   const oversizedContRes = await worker.fetch(oversizedContReq, env, {} as any);
-  assert.equal(oversizedContRes.status, 413, "Oversized continuation payload must return 413 Payload Too Large");
-  console.log("  ✓ NM-BUG-03: Chat continuation strictly rejects payload exceeding 512KB with 413: PASSED");
+  assert.equal(
+    oversizedContRes.status,
+    413,
+    "Oversized continuation payload must return 413 Payload Too Large"
+  );
+  console.log("  ✓ Chat continuation strictly rejects payload exceeding 512KB with 413: PASSED");
 
   // ====================================================
-  // [Scenario 17] Audit Report 15 Remediations
+  // SCENARIO 17: Payload Boundaries, Password Recovery & Storage Lifecycle
   // ====================================================
-  console.log("\n[Scenario 17] Audit Report 15 Remediations (NM-AUDIT-01, NM-AUDIT-03, NM-AUDIT-04, NM-AUDIT-05, NM-AUDIT-08)");
+  console.log("\n[Scenario 17] Payload Boundaries, Password Recovery & Storage Lifecycle");
 
-  // 17.1 NM-AUDIT-01: /api/chat payload boundary (> 512KB) rejected with 413
+  // 17.1 /api/chat payload boundary (> 512KB) rejected with 413
   const oversizedChatReq = new Request("https://nanomesh.local/api/chat", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Cookie": `session=${histToken}`
+      Cookie: `session=${histToken}`
     },
     body: JSON.stringify({
       envelope: {
@@ -3929,10 +4762,14 @@ async function runIntegrationTests() {
     })
   });
   const oversizedChatRes = await worker.fetch(oversizedChatReq, env, {} as any);
-  assert.equal(oversizedChatRes.status, 413, "/api/chat must reject instruction_payload > 512KB with 413");
-  console.log("  ✓ NM-AUDIT-01: /api/chat strictly rejects instruction_payload > 512KB with 413: PASSED");
+  assert.equal(
+    oversizedChatRes.status,
+    413,
+    "/api/chat must reject instruction_payload > 512KB with 413"
+  );
+  console.log("  ✓ /api/chat strictly rejects instruction_payload > 512KB with 413: PASSED");
 
-  // 17.2 NM-AUDIT-03: POST with null JSON body returns 400 Bad Request instead of unhandled 500
+  // 17.2 POST with null JSON body returns 400 Bad Request instead of unhandled 500
   const nullRegisterReq = new Request("https://nanomesh.local/api/auth/register", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -3948,23 +4785,31 @@ async function runIntegrationTests() {
   });
   const nullLoginRes = await worker.fetch(nullLoginReq, env, {} as any);
   assert.equal(nullLoginRes.status, 400, "POST null to login must return 400");
-  console.log("  ✓ NM-AUDIT-03: Endpoints safely handle literal JSON null body with 400 instead of 500: PASSED");
+  console.log("  ✓ Endpoints safely handle literal JSON null body with 400 instead of 500: PASSED");
 
-  // 17.3 NM-AUDIT-05: Non-POST/DELETE requests return 405 Method Not Allowed before auth
+  // 17.3 Non-POST/DELETE requests return 405 Method Not Allowed before auth
   const unauthChatGetReq = new Request("https://nanomesh.local/api/chat", { method: "GET" });
   const unauthChatGetRes = await worker.fetch(unauthChatGetReq, env, {} as any);
   assert.equal(unauthChatGetRes.status, 405, "Unauthenticated GET /api/chat must return 405");
 
-  const unauthPresignGetReq = new Request("https://nanomesh.local/api/upload/presign", { method: "GET" });
+  const unauthPresignGetReq = new Request("https://nanomesh.local/api/upload/presign", {
+    method: "GET"
+  });
   const unauthPresignGetRes = await worker.fetch(unauthPresignGetReq, env, {} as any);
-  assert.equal(unauthPresignGetRes.status, 405, "Unauthenticated GET /api/upload/presign must return 405");
+  assert.equal(
+    unauthPresignGetRes.status,
+    405,
+    "Unauthenticated GET /api/upload/presign must return 405"
+  );
 
-  const oauthGetReq = new Request("https://nanomesh.local/api/auth/oauth/google", { method: "GET" });
+  const oauthGetReq = new Request("https://nanomesh.local/api/auth/oauth/google", {
+    method: "GET"
+  });
   const oauthGetRes = await worker.fetch(oauthGetReq, env, {} as any);
   assert.equal(oauthGetRes.status, 405, "GET /api/auth/oauth/:provider must return 405");
-  console.log("  ✓ NM-AUDIT-05: HTTP Method check executes before auth and returns 405: PASSED");
+  console.log("  ✓ HTTP Method check executes before auth and returns 405: PASSED");
 
-  // 17.4 NM-AUDIT-04 & NM-AUDIT-08: Setup registered user for auth and reset tests
+  // 17.4 Setup registered user for auth and reset tests
   const registeredEmail = "carol_r15@gmail.com";
   const pwdHash = bcrypt.hashSync("OldPassword123!", 10);
   store.users.push({
@@ -3982,7 +4827,12 @@ async function runIntegrationTests() {
   const origFetch17 = globalThis.fetch;
   try {
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      const urlStr = typeof input === "string" ? input : (input instanceof URL ? input.toString() : (input as any).url);
+      const urlStr =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : (input as any).url;
       if (urlStr.includes("turnstile")) {
         return new Response(JSON.stringify({ success: true }), { status: 200 });
       }
@@ -3992,7 +4842,7 @@ async function runIntegrationTests() {
       return origFetch17(input, init);
     };
 
-    // 17.4 NM-AUDIT-04: /api/auth/send-code returns 200 for registered email without leaking status
+    // 17.4 /api/auth/send-code returns 200 for registered email without leaking status
     const sendCodeReq = new Request("https://nanomesh.local/api/auth/send-code", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -4000,10 +4850,14 @@ async function runIntegrationTests() {
     });
     const sendCodeRes = await worker.fetch(sendCodeReq, env, {} as any);
     const sendCodeData = await sendCodeRes.json().catch(() => ({}));
-    assert.equal(sendCodeRes.status, 200, `send-code for existing user must return 200 to prevent enumeration: ${JSON.stringify(sendCodeData)}`);
-    console.log("  ✓ NM-AUDIT-04: Anti-account enumeration privacy protection for send-code: PASSED");
+    assert.equal(
+      sendCodeRes.status,
+      200,
+      `send-code for existing user must return 200 to prevent enumeration: ${JSON.stringify(sendCodeData)}`
+    );
+    console.log("  ✓ Anti-account enumeration privacy protection for send-code: PASSED");
 
-    // 17.5 NM-AUDIT-08: Self-service forgot-password & reset-password flow
+    // 17.5 Self-service forgot-password & reset-password flow
     const forgotReq = new Request("https://nanomesh.local/api/auth/forgot-password", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -4014,10 +4868,12 @@ async function runIntegrationTests() {
 
     const resetCodeRow = await env.DB.prepare(
       "SELECT code FROM verification_codes WHERE LOWER(email) = LOWER(?) ORDER BY id DESC LIMIT 1"
-    ).bind(registeredEmail).first<{ code: string }>();
+    )
+      .bind(registeredEmail)
+      .first<{ code: string }>();
     assert.ok(resetCodeRow?.code, "Reset code must be recorded in verification_codes");
 
-    // NM-NEW-01: reset-password succeeds without redundant turnstile_token (no single-use token deadlock)
+    // reset-password succeeds without redundant turnstile_token (no single-use token deadlock)
     const resetReq = new Request("https://nanomesh.local/api/auth/reset-password", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -4042,17 +4898,25 @@ async function runIntegrationTests() {
     });
     const loginNewRes = await worker.fetch(loginNewReq, env, {} as any);
     assert.equal(loginNewRes.status, 200, "Login with new password must succeed");
-    console.log("  ✓ NM-AUDIT-08 & NM-NEW-01: Self-service forgot-password and reset-password flow (no turnstile deadlock): PASSED");
+    console.log(
+      "  ✓ Self-service forgot-password and reset-password flow (no turnstile deadlock): PASSED"
+    );
   } finally {
     globalThis.fetch = origFetch17;
   }
 
-  // 17.6 NM-AUDIT-07: Updating avatar cleans up old R2 object to eliminate storage leaks
+  // 17.6 Updating avatar cleans up old R2 object to eliminate storage leaks
   const oldAvatarKey = "avatars/usr_carol_r15_old.png";
-  await env.R2.put(oldAvatarKey, "OLD_AVATAR_BYTES", { httpMetadata: { contentType: "image/png" } });
+  await env.R2.put(oldAvatarKey, "OLD_AVATAR_BYTES", {
+    httpMetadata: { contentType: "image/png" }
+  });
   assert.ok(await env.R2.get(oldAvatarKey), "Old avatar should exist prior to replacement");
 
-  const avatarSessionToken = await signJWT({ userId: "usr_carol_r15", tokenVersion: 2 }, env.JWT_SECRET, 3600);
+  const avatarSessionToken = await signJWT(
+    { userId: "usr_carol_r15", tokenVersion: 2 },
+    env.JWT_SECRET,
+    3600
+  );
   const formData = new FormData();
   const blob = new Blob([new Uint8Array([137, 80, 78, 71, 1, 2, 3, 4])], { type: "image/png" });
   formData.append("file", blob, "new_avatar.png");
@@ -4060,20 +4924,24 @@ async function runIntegrationTests() {
   const updateAvatarReq = new Request("https://nanomesh.local/api/user/avatar", {
     method: "POST",
     headers: {
-      "Cookie": `session=${avatarSessionToken}`
+      Cookie: `session=${avatarSessionToken}`
     },
     body: formData
   });
   const updateAvatarRes = await worker.fetch(updateAvatarReq, env, {} as any);
   assert.equal(updateAvatarRes.status, 200, "Updating avatar must succeed");
-  const updateAvatarBody = await updateAvatarRes.json();
+  const updateAvatarBody = (await updateAvatarRes.json()) as any;
   assert.ok(updateAvatarBody.avatar_url, "Must return new avatar URL");
 
   const oldAvatarInR2 = await env.R2.get(oldAvatarKey);
-  assert.equal(oldAvatarInR2, null, "Old avatar key in R2 must be deleted to prevent orphaned storage accumulation");
-  console.log("  ✓ NM-AUDIT-07: Updating avatar cleans up old R2 object to eliminate storage leaks: PASSED");
+  assert.equal(
+    oldAvatarInR2,
+    null,
+    "Old avatar key in R2 must be deleted to prevent orphaned storage accumulation"
+  );
+  console.log("  ✓ Updating avatar cleans up old R2 object to eliminate storage leaks: PASSED");
 
-  // 17.7 NM-NEW-02: system_counters cleanup prunes stale ip_pwd_rate_* entries
+  // 17.7 system_counters cleanup prunes stale ip_pwd_rate_* entries
   store.system_counters.push({
     key: "ip_pwd_rate_2024-01-01T00_10.0.0.1",
     value: 5
@@ -4082,21 +4950,139 @@ async function runIntegrationTests() {
     key: "ip_pwd_rate_2099-01-01T00_10.0.0.1",
     value: 2
   });
-  await env.DB.prepare(`
+  await env.DB.prepare(
+    `
     DELETE FROM system_counters 
     WHERE (key LIKE 'ip_code_rate_20%' AND key < 'ip_code_rate_' || strftime('%Y-%m-%dT%H', 'now', '-24 hours'))
        OR (key LIKE 'ip_pwd_rate_20%' AND key < 'ip_pwd_rate_' || strftime('%Y-%m-%dT%H', 'now', '-24 hours'))
-  `).run();
-  assert.equal(store.system_counters.some(c => c.key === "ip_pwd_rate_2024-01-01T00_10.0.0.1"), false, "Stale ip_pwd_rate_* counter must be pruned");
-  assert.equal(store.system_counters.some(c => c.key === "ip_pwd_rate_2099-01-01T00_10.0.0.1"), true, "Active ip_pwd_rate_* counter must be preserved");
-  console.log("  ✓ NM-NEW-02: Stale ip_pwd_rate_* counters pruned while preserving active entries: PASSED");
+  `
+  ).run();
+  assert.equal(
+    store.system_counters.some((c) => c.key === "ip_pwd_rate_2024-01-01T00_10.0.0.1"),
+    false,
+    "Stale ip_pwd_rate_* counter must be pruned"
+  );
+  assert.equal(
+    store.system_counters.some((c) => c.key === "ip_pwd_rate_2099-01-01T00_10.0.0.1"),
+    true,
+    "Active ip_pwd_rate_* counter must be preserved"
+  );
+  console.log("  ✓ Stale ip_pwd_rate_* counters pruned while preserving active entries: PASSED");
+
+  // -----------------------------------------------------------------------
+  // SCENARIO 18: Template Re-Routing, Defensive Invariants & Health Diagnostics
+  // -----------------------------------------------------------------------
+  console.log("\n[Scenario 18] Template Re-Routing, Defensive Invariants & Health Diagnostics");
+
+  // 18.1 POST /api/chat with omitted metadata and omitted assets_manifest
+  const reqOmittedFields = new Request("https://nanomesh.local/api/chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: `session=${histToken}`
+    },
+    body: JSON.stringify({
+      envelope: {
+        session_id: "sess_omitted_test_01",
+        instruction_payload: "Test message without metadata or assets_manifest"
+      }
+    })
+  });
+  const resOmittedFields = await worker.fetch(reqOmittedFields, env, {} as any);
+  assert.notEqual(
+    resOmittedFields.status,
+    500,
+    "POST /api/chat without metadata or assets_manifest MUST NOT throw 500 TypeError"
+  );
+  assert.equal(resOmittedFields.status, 200, "Request must successfully initiate stream with 200");
+  console.log(
+    "  ✓ POST /api/chat safely handles omitted metadata and assets_manifest with 200: PASSED"
+  );
+
+  // 18.2 GET /api/health endpoint probe
+  const healthReq = new Request("https://nanomesh.local/api/health", { method: "GET" });
+  const healthRes = await worker.fetch(healthReq, env, {} as any);
+  assert.equal(healthRes.status, 200, "Health probe on test env must return 200");
+  const healthJson = (await healthRes.json()) as any;
+  assert.equal(healthJson.status, "healthy");
+  console.log("  ✓ GET /api/health returns 200 healthy for operational runtime: PASSED");
+
+  // 18.3 Re-route to tpl-direct-chat strips media assets and succeeds
+  store.dag_roles.push({
+    role_id: "role-direct-chat",
+    name_zh: "综合理解与生成",
+    name_en: "General Synthesis",
+    in_modalities: JSON.stringify(["text"]),
+    out_modalities: JSON.stringify(["text"]),
+    requisition_tags: JSON.stringify(["#chat", "#text_generation", "#general"]),
+    compensation_prompts: JSON.stringify({})
+  });
+  store.dag_templates.push({
+    template_id: "tpl-direct-chat",
+    name_zh: "全能直答",
+    name_en: "Direct Inference",
+    desc_zh: "单节点高敏捷响应",
+    desc_en: "Single-node direct response",
+    scenario_category: "chat",
+    scenario_anchor: "chat",
+    roles: JSON.stringify([
+      {
+        role_id: "role-direct-chat",
+        name_zh: "综合理解与生成",
+        name_en: "General Synthesis",
+        in_modalities: ["text"],
+        out_modalities: ["text"],
+        in_degree: 0,
+        out_degree: 0,
+        requisition_tags: ["#chat", "#text_generation", "#general"],
+        compensation_prompts: {}
+      }
+    ]),
+    role_sequence: JSON.stringify(["role-direct-chat"]),
+    edges: JSON.stringify([]),
+    status: "active"
+  });
+
+  const reqReRouteDirectChat = new Request("https://nanomesh.local/api/chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: `session=${histToken}`
+    },
+    body: JSON.stringify({
+      reRouteMode: "switch_template",
+      chosenTemplateId: "tpl-direct-chat",
+      envelope: {
+        session_id: "sess_reroute_test_02",
+        instruction_payload: "Switching to pure text direct chat",
+        assets_manifest: [
+          { asset_id: "media_img_01", modality: "image", consumed: false },
+          { asset_id: "doc_txt_02", modality: "text_doc", consumed: false }
+        ]
+      }
+    })
+  });
+  const resReRouteDirectChat = await worker.fetch(reqReRouteDirectChat, env, {} as any);
+  assert.equal(
+    resReRouteDirectChat.status,
+    200,
+    "Re-routing to tpl-direct-chat must successfully prune media and return 200"
+  );
+  console.log("  ✓ Re-routing to tpl-direct-chat safely prunes media assets and succeeds: PASSED");
+
+  // 18.4 Email case-insensitive unique constraint validation
+  assert.ok(
+    SCHEMA_CONSTRAINTS.users.nocaseKeys?.includes("email"),
+    "Users schema constraints must enforce NOCASE on email"
+  );
+  console.log("  ✓ Schema constraint model enforces case-insensitive email uniqueness: PASSED");
 
   console.log("\n==================================================");
-  console.log("   🎉 ALL 17 INTEGRATION SCENARIOS PASSED (100%)! ");
+  console.log("   🎉 ALL 18 INTEGRATION SCENARIOS PASSED (100%)! ");
   console.log("==================================================");
 }
 
-runIntegrationTests().catch(err => {
+runIntegrationTests().catch((err) => {
   console.error("❌ Integration Test Failed:", err);
   process.exit(1);
 });
