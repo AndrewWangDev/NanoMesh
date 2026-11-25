@@ -33,7 +33,7 @@ function applySecurityHeaders(res: Response): Response {
   res.headers.set(
     "Content-Security-Policy",
     "default-src 'self'; " +
-      "script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; " +
+      "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://challenges.cloudflare.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; " +
       "worker-src 'self' blob: https://cdnjs.cloudflare.com; " +
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
       "font-src 'self' https://fonts.gstatic.com; " +
@@ -402,6 +402,17 @@ export default {
         return applySecurityHeaders(res);
       }
 
+      if (
+        url.pathname === "/admin" ||
+        url.pathname === "/admin/" ||
+        url.pathname === "/admin.html"
+      ) {
+        const assetRes = await env.ASSETS.fetch(new Request(new URL("/admin.html", request.url)));
+        const res = new Response(assetRes.body, assetRes);
+        res.headers.set("X-Robots-Tag", "noindex, nofollow");
+        return applySecurityHeaders(res);
+      }
+
       // Serve R2 Storage (strictly restricted to public avatars)
       if (url.pathname.startsWith("/storage/")) {
         const key = url.pathname.slice("/storage/".length);
@@ -428,14 +439,13 @@ export default {
       if (assetResponse.status === 404) {
         const notFoundUrl = new URL("/404.html", request.url);
         const fallbackResponse = await env.ASSETS.fetch(new Request(notFoundUrl));
-        return new Response(fallbackResponse.body, {
+        const notFoundRes = new Response(fallbackResponse.body, {
           status: 404,
           headers: {
-            "Content-Type": "text/html;charset=UTF-8",
-            "X-Content-Type-Options": "nosniff",
-            "X-Frame-Options": "SAMEORIGIN"
+            "Content-Type": "text/html;charset=UTF-8"
           }
         });
+        return applySecurityHeaders(notFoundRes);
       }
       const secureAssetRes = new Response(assetResponse.body, assetResponse);
       applySecurityHeaders(secureAssetRes);

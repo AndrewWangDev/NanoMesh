@@ -14,7 +14,7 @@ export async function getSession(request: Request, env: Env): Promise<SessionPay
   if (!token) {
     const cookieHeader = request.headers.get("Cookie");
     if (cookieHeader) {
-      const match = cookieHeader.match(/session=([^;]+)/);
+      const match = cookieHeader.match(/(?:^|;\s*)session=([^;]+)/);
       if (match) token = match[1];
     }
   }

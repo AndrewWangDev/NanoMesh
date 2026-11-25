@@ -3,7 +3,7 @@ import {
   t, setLocale, getLocale, 
   getCompactRoleName, getCompactModelName, 
   getCompactTemplateName, getCompactIntentName, getCompactArbitrationText 
-} from './i18n.js?v=1791547200000';
+} from './i18n.js?v=1791660000000';
 
 function localToast(message, type = 'error') {
   const container = document.getElementById('toast-container');
@@ -4260,7 +4260,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       window._activeLocalRunnerPromise = new Promise((resolve, reject) => {
         try {
           if (!window._localWorker) {
-            window._localWorker = new Worker('/local-runner.js', { type: 'module' });
+            window._localWorker = new Worker('/local-runner.js?v=1791660000000', { type: 'module' });
           }
           const worker = window._localWorker;
 
@@ -5559,25 +5559,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   const personalSettingsBtn = document.getElementById('settings-menu-btn');
   const settingsModalOverlay = document.getElementById('settings-modal-overlay');
   const settingsCloseBtn = document.getElementById('settings-close-btn');
-
-  window.openSettingsModal = function(tabName = 'account') {
-    const overlay = document.getElementById('settings-modal-overlay');
-    if (!overlay) return;
-    overlay.style.display = 'flex';
-    const userMenu = document.getElementById('user-menu');
-    if (userMenu) userMenu.style.display = 'none';
-    const targetNav = document.querySelector(`.settings-nav-item[data-tab="${tabName}"]`);
-    if (targetNav) targetNav.click();
-    if (typeof window.fetchUserData === 'function') {
-      window.fetchUserData();
-    }
-    if (window.refreshOAuthBindings) {
-      window.refreshOAuthBindings();
-    }
-    if (window.refreshPasskeys) {
-      window.refreshPasskeys();
-    }
-  };
 
   if (personalSettingsBtn && settingsModalOverlay && settingsCloseBtn) {
     personalSettingsBtn.addEventListener('click', () => {

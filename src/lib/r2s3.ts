@@ -59,32 +59,6 @@ export async function createMultipartUpload(
 }
 
 /**
- * Generates an array of pre-signed PUT URLs for S3 multipart upload parts.
- */
-export async function getPresignedUrls(
-  env: Env,
-  objectKey: string,
-  uploadId: string,
-  partsCount: number,
-  expiresInSeconds: number = 300
-): Promise<string[]> {
-  const aws = getClient(env);
-  const endpoint = getEndpoint(env);
-  const urls: string[] = [];
-
-  for (let i = 1; i <= partsCount; i++) {
-    const url = new URL(`${endpoint}/${objectKey}?partNumber=${i}&uploadId=${uploadId}`);
-    url.searchParams.set("X-Amz-Expires", String(expiresInSeconds));
-    const request = await aws.sign(url, {
-      method: "PUT",
-      aws: { signQuery: true }
-    });
-    urls.push(request.url);
-  }
-  return urls;
-}
-
-/**
  * Completes a multipart upload by assembling uploaded parts with their ETags.
  */
 export async function completeMultipartUpload(

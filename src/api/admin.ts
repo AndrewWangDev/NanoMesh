@@ -51,7 +51,7 @@ export async function getAdminSigningSecret(env: Env): Promise<string> {
 
 export async function getAdminSession(request: Request, env: Env) {
   const cookie = request.headers.get("Cookie") || "";
-  const match = cookie.match(/admin_session=([^;]+)/);
+  const match = cookie.match(/(?:^|;\s*)admin_session=([^;]+)/);
   if (!match) return null;
   const token = match[1];
   try {

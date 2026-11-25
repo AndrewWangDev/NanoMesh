@@ -1,5 +1,5 @@
 /* public/auth.js */
-import { t, setLocale, getLocale } from './i18n.js?v=1791442000000';
+import { t, setLocale, getLocale } from './i18n.js?v=1791660000000';
 
 export function checkTermsAgreed() {
   const termsCheckbox = document.getElementById('terms-checkbox');
