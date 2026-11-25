@@ -5624,9 +5624,11 @@ async function runIntegrationTests() {
     const exploitRes3 = await worker.fetch(exploitReq3, env, {} as any);
     assert.equal(
       exploitRes3.status,
-      404,
-      "Pure OAuth user password reset must be rejected with 404"
+      400,
+      "Pure OAuth user password reset must return generic 400 error.invalidCode"
     );
+    const exploitJson3 = (await exploitRes3.json()) as any;
+    assert.equal(exploitJson3.error, "error.invalidCode");
     const victimUserAfter = store.users.find((u) => u.user_id === oauthVictimId);
     assert.equal(
       victimUserAfter.password_hash,
@@ -5634,6 +5636,75 @@ async function runIntegrationTests() {
       "Victim password_hash must remain strictly null"
     );
     console.log("  ✓ NM-20: Pure OAuth account takeover attempt completely blocked: PASSED");
+
+    // 19.5.1 Anti-Enumeration Oracle Invariance (NM-22)
+    // Probe 1: Unregistered email
+    const probeUnregisteredReq = new Request("https://nanomesh.local/api/auth/reset-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "CF-Connecting-IP": "198.51.100.99" },
+      body: JSON.stringify({
+        email: "completely_nonexistent_user_999@gmail.com",
+        code: "654321",
+        newPassword: "TestPassword123!"
+      })
+    });
+    const probeUnregRes = await worker.fetch(probeUnregisteredReq, env, {} as any);
+    assert.equal(probeUnregRes.status, 400, "Unregistered user reset probe must return 400");
+    const probeUnregJson = (await probeUnregRes.json()) as any;
+    assert.equal(probeUnregJson.error, "error.invalidCode");
+
+    // Probe 2: Pure OAuth user
+    const probeOAuthReq = new Request("https://nanomesh.local/api/auth/reset-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "CF-Connecting-IP": "198.51.100.99" },
+      body: JSON.stringify({
+        email: oauthVictimEmail,
+        code: "654321",
+        newPassword: "TestPassword123!"
+      })
+    });
+    const probeOAuthRes = await worker.fetch(probeOAuthReq, env, {} as any);
+    assert.equal(probeOAuthRes.status, 400, "Pure OAuth user reset probe must return 400");
+    const probeOAuthJson = (await probeOAuthRes.json()) as any;
+    assert.equal(probeOAuthJson.error, "error.invalidCode");
+
+    // Probe 3: Registered password user
+    const freshPwdEmail = "probe_pwd_user@gmail.com";
+    store.users.push({
+      user_id: "usr_probe_pwd",
+      username: "ProbePwdUser",
+      email: freshPwdEmail,
+      password_hash: "hash_exists_123",
+      credits: 10,
+      token_version: 1
+    });
+    const probePasswordReq = new Request("https://nanomesh.local/api/auth/reset-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "CF-Connecting-IP": "198.51.100.123" },
+      body: JSON.stringify({
+        email: freshPwdEmail,
+        code: "654321",
+        newPassword: "TestPassword123!"
+      })
+    });
+    const probePasswordRes = await worker.fetch(probePasswordReq, env, {} as any);
+    assert.equal(probePasswordRes.status, 400, "Password user reset probe must return 400");
+    const probePasswordJson = (await probePasswordRes.json()) as any;
+    assert.equal(probePasswordJson.error, "error.invalidCode");
+
+    assert.equal(
+      probeUnregRes.status,
+      probeOAuthRes.status,
+      "Response status must be invariant across user types"
+    );
+    assert.equal(
+      probeOAuthRes.status,
+      probePasswordRes.status,
+      "Response status must be invariant across user types"
+    );
+    console.log(
+      "  ✓ NM-22: Reset-password returns uniform 400 error.invalidCode with zero enumeration leakage: PASSED"
+    );
   } finally {
     globalThis.fetch = origFetchForgot;
   }

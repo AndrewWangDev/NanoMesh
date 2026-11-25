@@ -1158,18 +1158,7 @@ export async function handleResetPassword(
     return Response.json({ error: "error.invalidPasswordFormat" }, { status: 400 });
   }
 
-  // Find user and verify password reset eligibility (pure OAuth accounts without password cannot be reset via code)
-  const user = await env.DB.prepare(
-    "SELECT user_id, email, password_hash FROM users WHERE LOWER(email) = LOWER(?)"
-  )
-    .bind(email)
-    .first<{ user_id: string; email: string; password_hash: string | null }>();
-
-  if (!user || user.email.startsWith("deleted_") || !user.password_hash) {
-    return Response.json({ error: "error.userNotFound" }, { status: 404 });
-  }
-
-  // Check code with anti-brute force tracking (strictly exclude non-numeric notice records)
+  // Check code with anti-brute force tracking FIRST to prevent account enumeration side channel
   const activeCode = await env.DB.prepare(
     "SELECT id, code, attempts FROM verification_codes WHERE LOWER(email) = ? AND code NOT LIKE 'NOTICE_%' AND code != 'OAUTH_NOTICE' AND expires_at > datetime('now') ORDER BY id DESC LIMIT 1"
   )
@@ -1193,6 +1182,19 @@ export async function handleResetPassword(
   }
 
   if (activeCode.code !== code.trim()) {
+    return Response.json({ error: "error.invalidCode" }, { status: 400 });
+  }
+
+  // Code is verified. Now verify user existence & password reset eligibility
+  const user = await env.DB.prepare(
+    "SELECT user_id, email, password_hash FROM users WHERE LOWER(email) = LOWER(?)"
+  )
+    .bind(email)
+    .first<{ user_id: string; email: string; password_hash: string | null }>();
+
+  // If user does not exist, is deleted, or is pure OAuth without password, return generic error.invalidCode to prevent enumeration
+  if (!user || user.email.startsWith("deleted_") || !user.password_hash) {
+    await env.DB.prepare("DELETE FROM verification_codes WHERE id = ?").bind(activeCode.id).run();
     return Response.json({ error: "error.invalidCode" }, { status: 400 });
   }
 
