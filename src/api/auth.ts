@@ -138,13 +138,13 @@ export async function handleRegister(req: Request, env: Env) {
     return Response.json({ error: "error.invalidPasswordFormat" }, { status: 400 });
   }
 
-  if (!code || typeof code !== "string") {
+  if (!code || typeof code !== "string" || !/^\d{6}$/.test(code.trim())) {
     return Response.json({ error: "error.invalidCode" }, { status: 400 });
   }
 
   // Check code with anti-brute force tracking
   const activeCode = await env.DB.prepare(
-    "SELECT id, code, attempts FROM verification_codes WHERE email = ? AND expires_at > datetime('now') ORDER BY id DESC LIMIT 1"
+    "SELECT id, code, attempts FROM verification_codes WHERE email = ? AND code NOT LIKE 'NOTICE_%' AND code != 'OAUTH_NOTICE' AND expires_at > datetime('now') ORDER BY id DESC LIMIT 1"
   )
     .bind(email || "")
     .first<{ id: number; code: string; attempts: number }>();
@@ -977,11 +977,12 @@ export async function handleForgotPassword(
   const isZh = lang === "zh";
 
   if (!user.password_hash) {
-    // Record cooldown in verification_codes to protect OAuth users from being spammed
+    // Record cooldown in verification_codes to protect OAuth users from being spammed (using unguessable notice token)
+    const noticeToken = "NOTICE_OAUTH_" + crypto.randomUUID();
     await env.DB.prepare(
-      "INSERT INTO verification_codes (email, code, expires_at) VALUES (?, 'OAUTH_NOTICE', datetime('now', '+10 minutes'))"
+      "INSERT INTO verification_codes (email, code, expires_at) VALUES (?, ?, datetime('now', '+10 minutes'))"
     )
-      .bind(email)
+      .bind(email, noticeToken)
       .run();
 
     // User is OAuth-only, send helpful email
@@ -1142,7 +1143,7 @@ export async function handleResetPassword(
     .bind(emailRateKey)
     .run();
 
-  if (!code || typeof code !== "string") {
+  if (!code || typeof code !== "string" || !/^\d{6}$/.test(code.trim())) {
     return Response.json({ error: "error.invalidCode" }, { status: 400 });
   }
 
@@ -1157,14 +1158,25 @@ export async function handleResetPassword(
     return Response.json({ error: "error.invalidPasswordFormat" }, { status: 400 });
   }
 
-  // Check code with anti-brute force tracking
+  // Find user and verify password reset eligibility (pure OAuth accounts without password cannot be reset via code)
+  const user = await env.DB.prepare(
+    "SELECT user_id, email, password_hash FROM users WHERE LOWER(email) = LOWER(?)"
+  )
+    .bind(email)
+    .first<{ user_id: string; email: string; password_hash: string | null }>();
+
+  if (!user || user.email.startsWith("deleted_") || !user.password_hash) {
+    return Response.json({ error: "error.userNotFound" }, { status: 404 });
+  }
+
+  // Check code with anti-brute force tracking (strictly exclude non-numeric notice records)
   const activeCode = await env.DB.prepare(
-    "SELECT id, code, attempts FROM verification_codes WHERE LOWER(email) = ? AND expires_at > datetime('now') ORDER BY id DESC LIMIT 1"
+    "SELECT id, code, attempts FROM verification_codes WHERE LOWER(email) = ? AND code NOT LIKE 'NOTICE_%' AND code != 'OAUTH_NOTICE' AND expires_at > datetime('now') ORDER BY id DESC LIMIT 1"
   )
     .bind(email)
     .first<{ id: number; code: string; attempts: number }>();
 
-  if (!activeCode) {
+  if (!activeCode || !/^\d{6}$/.test(activeCode.code)) {
     return Response.json({ error: "error.invalidCode" }, { status: 400 });
   }
 
@@ -1182,17 +1194,6 @@ export async function handleResetPassword(
 
   if (activeCode.code !== code.trim()) {
     return Response.json({ error: "error.invalidCode" }, { status: 400 });
-  }
-
-  // Find user
-  const user = await env.DB.prepare(
-    "SELECT user_id, email FROM users WHERE LOWER(email) = LOWER(?)"
-  )
-    .bind(email)
-    .first<{ user_id: string; email: string }>();
-
-  if (!user || user.email.startsWith("deleted_")) {
-    return Response.json({ error: "error.userNotFound" }, { status: 404 });
   }
 
   // Hash new password using bcrypt

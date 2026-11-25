@@ -582,10 +582,15 @@ export async function handleChatContinue(
   let hasReservedCredit = false;
   const remainingNodes = dag.nodes.slice(startStepIndex);
   let expectedContinueCost = 0;
+  const clientSupportsWebGPU =
+    (body as any).capabilities?.webgpu_handover_v3 ??
+    (body as any).orchestration_options?.capabilities?.webgpu_handover_v3 ??
+    true;
+
   for (const n of remainingNodes) {
     if (n.selected_model && n.selected_model.inference_target !== "browser") {
       expectedContinueCost += calculateExpectedNodeCost(n.selected_model);
-    } else if ((body as any).capabilities?.webgpu_handover_v3) {
+    } else if (clientSupportsWebGPU) {
       // Reached next client WebGPU step, execution will handover here
       break;
     }

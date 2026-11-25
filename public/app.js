@@ -4302,6 +4302,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                       failed_model_id: data.model_id,
                       error_reason: err.message || 'Worker thread execution error',
                       upstream_context: data.user_prompt || '',
+                      capabilities: { webgpu_handover_v3: true },
                       envelope: window._lastChatEnvelope,
                       orchestration_options: window._lastOrchestrationOptions
                     })
@@ -4423,6 +4424,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                         continuation_token: data.continuation_token,
                         status: 'success',
                         client_step_output: msg.output || '',
+                        capabilities: { webgpu_handover_v3: true },
                         envelope: window._lastChatEnvelope,
                         orchestration_options: window._lastOrchestrationOptions
                       })
@@ -4545,6 +4547,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                         failed_model_id: data.model_id,
                         error_reason: msg.error || 'Local execution failed',
                         upstream_context: data.user_prompt || '',
+                        capabilities: { webgpu_handover_v3: true },
                         envelope: window._lastChatEnvelope,
                         orchestration_options: window._lastOrchestrationOptions
                       })

@@ -319,6 +319,13 @@ function createMockD1(store: TableStore) {
               const nowIso = new Date().toISOString();
               res = res.filter((v) => {
                 if ((v.email || "").toLowerCase() !== emailArg) return false;
+                if (
+                  cleanSql.includes("code NOT LIKE 'NOTICE_%'") &&
+                  String(v.code || "").startsWith("NOTICE_")
+                )
+                  return false;
+                if (cleanSql.includes("code != 'OAUTH_NOTICE'") && v.code === "OAUTH_NOTICE")
+                  return false;
                 if (cleanSql.includes("expires_at > datetime('now')") && v.expires_at < nowIso)
                   return false;
                 if (cleanSql.includes("created_at > datetime('now', '-60 seconds')")) {
@@ -5511,6 +5518,258 @@ async function runIntegrationTests() {
   assert.equal(richLedgerEntry.amount, -4, "Ledger entry amount must be -4");
   console.log(
     "  ✓ Multi-node dynamic token + invocation cost pre-deduction & settlement (NM-15): PASSED"
+  );
+
+  // 19.5 Pure OAuth Account Takeover Prevention (NM-20)
+  const oauthVictimEmail = "oauth_victim_user@gmail.com";
+  const oauthVictimId = "usr_oauth_victim_01";
+  store.users.push({
+    user_id: oauthVictimId,
+    username: "OAuthVictim",
+    email: oauthVictimEmail,
+    password_hash: null, // Pure OAuth user!
+    credits: 10,
+    token_version: 1
+  });
+
+  // 1. Attacker calls forgot-password on the victim's email
+  const origFetchForgot = globalThis.fetch;
+  try {
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const urlStr =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : (input as any).url;
+      if (urlStr.includes("turnstile")) {
+        return new Response(JSON.stringify({ success: true }), { status: 200 });
+      }
+      if (urlStr.includes("resend.com")) {
+        return new Response(JSON.stringify({ id: "mock_resend_notice_id" }), { status: 200 });
+      }
+      return origFetchForgot(input, init);
+    };
+
+    const forgotReq = new Request("https://nanomesh.local/api/auth/forgot-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "CF-Connecting-IP": "198.51.100.99" },
+      body: JSON.stringify({
+        email: oauthVictimEmail,
+        turnstile_token: "mock_turnstile_pass"
+      })
+    });
+    const forgotRes = await worker.fetch(forgotReq, env, {} as any);
+    assert.equal(forgotRes.status, 200, "Forgot password for OAuth user returns 200 notice");
+
+    // Check that code recorded in verification_codes is an unguessable NOTICE_ token, NOT 'OAUTH_NOTICE'
+    const noticeEntry = store.verification_codes.find((c) => c.email === oauthVictimEmail);
+    assert.ok(noticeEntry, "Notice entry must exist for cooldown");
+    assert.ok(
+      String(noticeEntry.code).startsWith("NOTICE_OAUTH_"),
+      "Notice code must be prefixed with NOTICE_OAUTH_ and contain random UUID"
+    );
+    assert.notEqual(
+      noticeEntry.code,
+      "OAUTH_NOTICE",
+      "Static OAUTH_NOTICE string must not be stored"
+    );
+
+    // 2. Attacker attempts to call reset-password with code = 'OAUTH_NOTICE'
+    const exploitReq1 = new Request("https://nanomesh.local/api/auth/reset-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "CF-Connecting-IP": "198.51.100.99" },
+      body: JSON.stringify({
+        email: oauthVictimEmail,
+        code: "OAUTH_NOTICE",
+        newPassword: "HackedPassword123!"
+      })
+    });
+    const exploitRes1 = await worker.fetch(exploitReq1, env, {} as any);
+    assert.equal(exploitRes1.status, 400, "Non-6-digit code string must be rejected with 400");
+    const exploitJson1 = (await exploitRes1.json()) as any;
+    assert.equal(exploitJson1.error, "error.invalidCode");
+
+    // 3. Attacker attempts to call reset-password with the actual notice token
+    const exploitReq2 = new Request("https://nanomesh.local/api/auth/reset-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "CF-Connecting-IP": "198.51.100.99" },
+      body: JSON.stringify({
+        email: oauthVictimEmail,
+        code: noticeEntry.code,
+        newPassword: "HackedPassword123!"
+      })
+    });
+    const exploitRes2 = await worker.fetch(exploitReq2, env, {} as any);
+    assert.equal(exploitRes2.status, 400, "Notice token must be rejected with 400 invalid code");
+
+    // 4. Even with a simulated 6-digit code, pure OAuth user must be rejected with 404 error.userNotFound
+    store.verification_codes.push({
+      id: 9999,
+      email: oauthVictimEmail,
+      code: "123456",
+      attempts: 0,
+      created_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 600000).toISOString()
+    });
+    const exploitReq3 = new Request("https://nanomesh.local/api/auth/reset-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "CF-Connecting-IP": "198.51.100.99" },
+      body: JSON.stringify({
+        email: oauthVictimEmail,
+        code: "123456",
+        newPassword: "HackedPassword123!"
+      })
+    });
+    const exploitRes3 = await worker.fetch(exploitReq3, env, {} as any);
+    assert.equal(
+      exploitRes3.status,
+      404,
+      "Pure OAuth user password reset must be rejected with 404"
+    );
+    const victimUserAfter = store.users.find((u) => u.user_id === oauthVictimId);
+    assert.equal(
+      victimUserAfter.password_hash,
+      null,
+      "Victim password_hash must remain strictly null"
+    );
+    console.log("  ✓ NM-20: Pure OAuth account takeover attempt completely blocked: PASSED");
+  } finally {
+    globalThis.fetch = origFetchForgot;
+  }
+
+  // 19.6 Continuation Multi-WebGPU Handover Break (NM-21)
+  const templateInterleavedId = "tpl_interleaved_webgpu_billing";
+  store.dag_templates.push({
+    template_id: templateInterleavedId,
+    name_zh: "交替WebGPU多步编排",
+    name_en: "Interleaved WebGPU Orchestration",
+    desc_zh: "端侧与云端多步交替",
+    desc_en: "Alternating client WebGPU and cloud nodes",
+    scenario_category: "chat",
+    scenario_anchor: "chat",
+    roles: JSON.stringify([
+      {
+        role_id: "role_browser_only",
+        name_zh: "端侧独占角色",
+        name_en: "Browser Only Role",
+        in_modalities: ["text"],
+        out_modalities: ["text"],
+        in_degree: 0,
+        out_degree: 1,
+        requisition_tags: ["#browser_exclusive"],
+        compensation_prompts: {}
+      },
+      {
+        role_id: dynRole1Id,
+        name_zh: "高精度推理节点",
+        name_en: "High Precision Reasoning Node",
+        in_modalities: ["text"],
+        out_modalities: ["text"],
+        in_degree: 1,
+        out_degree: 1,
+        requisition_tags: ["#qwq_reasoning"],
+        compensation_prompts: {}
+      },
+      {
+        role_id: "role_browser_only",
+        name_zh: "端侧独占角色",
+        name_en: "Browser Only Role",
+        in_modalities: ["text"],
+        out_modalities: ["text"],
+        in_degree: 1,
+        out_degree: 1,
+        requisition_tags: ["#browser_exclusive"],
+        compensation_prompts: {}
+      },
+      {
+        role_id: dynRole2Id,
+        name_zh: "综合生成节点",
+        name_en: "General Generation Node",
+        in_modalities: ["text"],
+        out_modalities: ["text"],
+        in_degree: 1,
+        out_degree: 0,
+        requisition_tags: ["#llama_generation"],
+        compensation_prompts: {}
+      }
+    ]),
+    role_sequence: JSON.stringify([
+      "role_browser_only",
+      dynRole1Id,
+      "role_browser_only",
+      dynRole2Id
+    ]),
+    edges: JSON.stringify([]),
+    status: "active",
+    priority: 10
+  });
+
+  const userNm21Id = "usr_nm21_handover_test";
+  store.users.push({
+    user_id: userNm21Id,
+    username: "UserNM21",
+    email: "user_nm21@nanomesh.local",
+    password_hash: "hash",
+    credits: 3, // Sufficient for Step 1 (2 credits), but insufficient for Step 1 + Step 3 (4 credits)
+    token_version: 1
+  });
+
+  const handshakeNm21Id = "hs_nm21_interleaved_01";
+  store.dag_handshakes.push({
+    handshake_id: handshakeNm21Id,
+    user_id: userNm21Id,
+    session_id: "sess_nm21_interleaved",
+    template_id: templateInterleavedId,
+    next_step: 1,
+    status: "ISSUED",
+    expires_at: new Date(Date.now() + 300000).toISOString()
+  });
+
+  const contTokenNm21 = await signJWT(
+    {
+      jti: handshakeNm21Id,
+      sub: userNm21Id,
+      sid: "sess_nm21_interleaved",
+      tid: templateInterleavedId,
+      nxt: 1
+    },
+    env.JWT_SECRET,
+    300
+  );
+
+  // Client continues from Step 0 WebGPU completion into Step 1 Cloud (without explicit capabilities in body)
+  const contNm21Req = new Request("https://nanomesh.local/api/chat/continue", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: `session=${await signJWT({ userId: userNm21Id, role: "user", tokenVersion: 1 }, env.JWT_SECRET, 3600)}`
+    },
+    body: JSON.stringify({
+      continuation_token: contTokenNm21,
+      status: "success",
+      client_step_output: "Client WebGPU Step 0 Completed",
+      envelope: {
+        session_id: "sess_nm21_interleaved",
+        instruction_payload: "Testing continuation multi-webgpu break"
+      }
+      // Note: capabilities omitted intentionally to test NM-21 default handover break
+    })
+  });
+
+  const contNm21Res = await worker.fetch(contNm21Req, env, {} as any);
+  assert.equal(
+    contNm21Res.status,
+    200,
+    "Continuation with next WebGPU node must break and only pre-deduct immediate cloud step (200 OK)"
+  );
+  const contStreamText = await contNm21Res.text();
+  assert.ok(
+    contStreamText.includes("node_start"),
+    "Continuation stream must start executing cloud node"
+  );
+  console.log(
+    "  ✓ NM-21: Continuation multi-WebGPU handover break correctly isolates billing: PASSED"
   );
 
   console.log("\n==================================================");
