@@ -302,33 +302,8 @@ export async function handlePasskeyLoginOptions(request: Request, env: Env): Pro
   const rpId = getRpId(request);
   const { challenge, cookieHeader } = await createChallenge("login", env.JWT_SECRET);
 
-  let allowCredentials: any[] = [];
-
-  if (email) {
-    const user = await env.DB.prepare("SELECT user_id FROM users WHERE LOWER(email) = ?")
-      .bind(email)
-      .first<{ user_id: string }>();
-
-    if (user) {
-      const keys = await env.DB.prepare(
-        "SELECT credential_id, transports FROM user_passkeys WHERE user_id = ?"
-      )
-        .bind(user.user_id)
-        .all<{ credential_id: string; transports: string }>();
-
-      allowCredentials = (keys.results || []).map((k) => {
-        let transports = ["internal"];
-        try {
-          if (k.transports) transports = JSON.parse(k.transports);
-        } catch {}
-        return {
-          id: k.credential_id,
-          type: "public-key",
-          transports
-        };
-      });
-    }
-  }
+  // WebAuthn Resident Key (Discoverable Credentials): keep allowCredentials empty to eliminate email enumeration surface
+  const allowCredentials: any[] = [];
 
   const options = {
     challenge,

@@ -671,6 +671,17 @@ async function callWithTimeout<T>(
 }
 
 /**
+ * Calculates the expected billing cost for a given node model based on both token and invocation costs.
+ * Strictly unifies pre-deduction and settlement formulas: Math.max(1, tokenCost + invocationCost).
+ */
+export function calculateExpectedNodeCost(model: ModelMetadata): number {
+  if (model.inference_target === "browser") return 0;
+  const tokenCost = Math.max(0, Math.round(model.cost_per_1k_tokens ?? 1));
+  const invocationCost = Math.max(0, Math.round(model.cost_per_invocation ?? 0));
+  return Math.max(1, tokenCost + invocationCost);
+}
+
+/**
  * Executes an instantiated DAG via SSE (Server-Sent Events) Stream
  */
 export async function executeDAGStream(
@@ -685,6 +696,7 @@ export async function executeDAGStream(
   let isStreamCancelled = false;
   let hasEmittedTokens = false;
   let isLedgerSettled = false;
+  let totalCost = 0;
 
   return new ReadableStream({
     async start(controller) {
@@ -724,7 +736,7 @@ export async function executeDAGStream(
       }, 2500);
 
       let upstreamOutput = options.injectedUpstreamText || "";
-      let totalCost = 0;
+      totalCost = 0;
       const startTime = Date.now();
       const startIdx = options.startStepIndex || 0;
 
@@ -1171,13 +1183,21 @@ export async function executeDAGStream(
               } else {
                 // Settle Phase 1 cloud cost if any cloud models executed prior to this step
                 if (options.hasPreDeducted) {
+                  const reservedCredits = options.preDeductedCredits ?? 1;
                   if (totalCost === 0) {
                     await refundReservedCredit();
                   } else {
-                    const remainingCost = totalCost - 1;
+                    const refundDelta = reservedCredits - totalCost;
                     const ledgerId = crypto.randomUUID();
                     const statements = [];
-                    if (remainingCost > 0) {
+                    if (refundDelta > 0) {
+                      statements.push(
+                        env.DB.prepare(
+                          "UPDATE users SET credits = credits + ? WHERE user_id = ?"
+                        ).bind(refundDelta, options.userId)
+                      );
+                    } else if (refundDelta < 0) {
+                      const remainingCost = Math.abs(refundDelta);
                       statements.push(
                         env.DB.prepare(
                           "UPDATE users SET credits = MAX(0, credits - ?) WHERE user_id = ?"
@@ -1446,13 +1466,21 @@ export async function executeDAGStream(
                   // Tail Node WebGPU Handover
                   // Conservation of Credits: Refund or settle Phase 1 cloud pre-deduction
                   if (options.hasPreDeducted) {
+                    const reservedCredits = options.preDeductedCredits ?? 1;
                     if (totalCost === 0) {
                       await refundReservedCredit();
                     } else {
-                      const remainingCost = totalCost - 1;
+                      const refundDelta = reservedCredits - totalCost;
                       const ledgerId = crypto.randomUUID();
                       const statements = [];
-                      if (remainingCost > 0) {
+                      if (refundDelta > 0) {
+                        statements.push(
+                          env.DB.prepare(
+                            "UPDATE users SET credits = credits + ? WHERE user_id = ?"
+                          ).bind(refundDelta, options.userId)
+                        );
+                      } else if (refundDelta < 0) {
+                        const remainingCost = Math.abs(refundDelta);
                         statements.push(
                           env.DB.prepare(
                             "UPDATE users SET credits = MAX(0, credits - ?) WHERE user_id = ?"
@@ -1552,13 +1580,21 @@ export async function executeDAGStream(
                 } else {
                   // Intermediate Node WebGPU Handover
                   if (options.hasPreDeducted) {
+                    const reservedCredits = options.preDeductedCredits ?? 1;
                     if (totalCost === 0) {
                       await refundReservedCredit();
                     } else {
-                      const remainingCost = totalCost - 1;
+                      const refundDelta = reservedCredits - totalCost;
                       const ledgerId = crypto.randomUUID();
                       const statements = [];
-                      if (remainingCost > 0) {
+                      if (refundDelta > 0) {
+                        statements.push(
+                          env.DB.prepare(
+                            "UPDATE users SET credits = credits + ? WHERE user_id = ?"
+                          ).bind(refundDelta, options.userId)
+                        );
+                      } else if (refundDelta < 0) {
+                        const remainingCost = Math.abs(refundDelta);
                         statements.push(
                           env.DB.prepare(
                             "UPDATE users SET credits = MAX(0, credits - ?) WHERE user_id = ?"
@@ -1923,7 +1959,7 @@ export async function executeDAGStream(
                               preview_url: `/api/assets/${generatedAssetId}?key=${encodeURIComponent(newAssetKey)}`
                             });
 
-                            return `[外部商业生图模型已存入账本: ${generatedAssetId}.png (体积: ${(imgBuffer.byteLength / 1024).toFixed(1)} KB)]\n提示词: ${promptContent}`;
+                            return `[外部商业生图模型已存入账本: ${generatedAssetId}.png (体积: ${(imgBuffer.byteLength / 1024).toFixed(1)} KB)]\n提示词: ${guardedPromptContent}`;
                           }
                         }
                         return await parseAIResponse(jsonRes);
@@ -2236,12 +2272,7 @@ export async function executeDAGStream(
             }
 
             // Calculate cost (derived from actual executing model's cost + cost_per_invocation)
-            const tokenCost = Math.max(0, Math.round(actualExecutingModel.cost_per_1k_tokens ?? 1));
-            const invocationCost = Math.max(
-              0,
-              Math.round(actualExecutingModel.cost_per_invocation ?? 0)
-            );
-            nodeCost = Math.max(1, tokenCost + invocationCost);
+            nodeCost = calculateExpectedNodeCost(actualExecutingModel);
             totalCost += nodeCost;
 
             sendEvent("node_complete", {
@@ -2289,9 +2320,10 @@ export async function executeDAGStream(
               if (refundDelta > 0) {
                 // Actual cost is less than reserved (e.g. some node cached or skipped), refund difference
                 statements.push(
-                  env.DB.prepare(
-                    "UPDATE users SET credits = credits + ? WHERE user_id = ?"
-                  ).bind(refundDelta, options.userId)
+                  env.DB.prepare("UPDATE users SET credits = credits + ? WHERE user_id = ?").bind(
+                    refundDelta,
+                    options.userId
+                  )
                 );
               } else if (refundDelta < 0) {
                 // Actual cost exceeded reservation, deduct remaining delta
@@ -2383,12 +2415,13 @@ export async function executeDAGStream(
       try {
         abortController.abort();
       } catch (e) {}
+      const reservedCredits = options.preDeductedCredits ?? 1;
       // If user aborted before any real tokens were generated, release pre-deducted reservation
       if (options.hasPreDeducted && !hasEmittedTokens) {
         options.hasPreDeducted = false;
         try {
-          await env.DB.prepare("UPDATE users SET credits = credits + 1 WHERE user_id = ?")
-            .bind(options.userId)
+          await env.DB.prepare("UPDATE users SET credits = credits + ? WHERE user_id = ?")
+            .bind(reservedCredits, options.userId)
             .run();
         } catch (refundErr) {
           console.error("[Dispatcher] Failed to refund reserved credit on cancel:", refundErr);
@@ -2397,21 +2430,32 @@ export async function executeDAGStream(
         options.hasPreDeducted = false;
         isLedgerSettled = true;
         try {
+          const actualCost = Math.min(totalCost > 0 ? totalCost : 1, reservedCredits);
+          const refundDelta = reservedCredits - actualCost;
           const ledgerId = crypto.randomUUID();
-          await env.DB.prepare(
-            `
-            INSERT INTO credit_ledger 
-            (ledger_id, user_id, category, amount, balance, title, detail, created_at)
-            VALUES (?, ?, 'compute_cost', -1, (SELECT credits FROM users WHERE user_id = ?), 'DAG智能编排调用', ?, datetime('now'))
-          `
-          )
-            .bind(
+          const statements = [];
+          if (refundDelta > 0) {
+            statements.push(
+              env.DB.prepare("UPDATE users SET credits = credits + ? WHERE user_id = ?").bind(
+                refundDelta,
+                options.userId
+              )
+            );
+          }
+          statements.push(
+            env.DB.prepare(
+              `INSERT INTO credit_ledger 
+               (ledger_id, user_id, category, amount, balance, title, detail, created_at)
+               VALUES (?, ?, 'compute_cost', ?, (SELECT credits FROM users WHERE user_id = ?), 'DAG智能编排调用', ?, datetime('now'))`
+            ).bind(
               ledgerId,
               options.userId,
+              -actualCost,
               options.userId,
               `中途断开连接算力保底扣费 (工序: ${dag.template.name_zh})`
             )
-            .run();
+          );
+          await env.DB.batch(statements);
         } catch (ledgerErr) {
           console.error("[Dispatcher] Failed to record credit ledger on cancel:", ledgerErr);
         }

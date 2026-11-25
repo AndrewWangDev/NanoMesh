@@ -3,7 +3,11 @@ import { Env } from "../types";
 import { getSession } from "../auth/middleware";
 import { verifyJWT } from "../auth/jwt";
 import { runOrchestrationPipeline, OrchestrationOptions } from "../orchestration/orchestrator";
-import { executeDAGStream, sanitizeClientStepOutput } from "../orchestration/dispatcher";
+import {
+  executeDAGStream,
+  sanitizeClientStepOutput,
+  calculateExpectedNodeCost
+} from "../orchestration/dispatcher";
 import { UnifiedProtocolEnvelope } from "../orchestration/types";
 
 /**
@@ -259,8 +263,7 @@ export async function handleChat(
     if (!isFirstNodeWebGPU || !clientSupportsWebGPU) {
       for (const n of dag.nodes) {
         if (n.selected_model && n.selected_model.inference_target !== "browser") {
-          const nCost = Number(n.selected_model.cost_per_invocation) || 1;
-          expectedCloudCost += Math.max(1, Math.round(nCost));
+          expectedCloudCost += calculateExpectedNodeCost(n.selected_model);
         } else if (clientSupportsWebGPU) {
           // Reached a client WebGPU node, execution will handover here
           break;
@@ -581,8 +584,10 @@ export async function handleChatContinue(
   let expectedContinueCost = 0;
   for (const n of remainingNodes) {
     if (n.selected_model && n.selected_model.inference_target !== "browser") {
-      const nCost = Number(n.selected_model.cost_per_invocation) || 1;
-      expectedContinueCost += Math.max(1, Math.round(nCost));
+      expectedContinueCost += calculateExpectedNodeCost(n.selected_model);
+    } else if ((body as any).capabilities?.webgpu_handover_v3) {
+      // Reached next client WebGPU step, execution will handover here
+      break;
     }
   }
 

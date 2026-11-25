@@ -301,7 +301,7 @@ export async function handleLogin(req: Request, env: Env) {
   if (!user) return Response.json({ error: "Invalid credentials" }, { status: 401 });
 
   if (!user.password_hash) {
-    return Response.json({ error: "Please login with OAuth" }, { status: 401 });
+    return Response.json({ error: "Invalid credentials" }, { status: 401 });
   }
 
   const valid = bcrypt.compareSync(password, user.password_hash);
@@ -977,6 +977,13 @@ export async function handleForgotPassword(
   const isZh = lang === "zh";
 
   if (!user.password_hash) {
+    // Record cooldown in verification_codes to protect OAuth users from being spammed
+    await env.DB.prepare(
+      "INSERT INTO verification_codes (email, code, expires_at) VALUES (?, 'OAUTH_NOTICE', datetime('now', '+10 minutes'))"
+    )
+      .bind(email)
+      .run();
+
     // User is OAuth-only, send helpful email
     const subject = isZh ? "[NanoMesh] 重置密码提醒" : "[NanoMesh] Password Reset Notice";
     const greeting = isZh ? "您好！" : "Hello!";
@@ -987,7 +994,7 @@ export async function handleForgotPassword(
       ? "&copy; 2026 NanoMesh 灵微络. 保留所有权利。"
       : "&copy; 2026 NanoMesh. All rights reserved.";
 
-    await fetch("https://api.resend.com/emails", {
+    const resendRes = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${env.RESEND_API_KEY}`,
@@ -1007,13 +1014,18 @@ export async function handleForgotPassword(
           </div>
         `
       })
-    }).catch((err) => console.error("Failed to send oauth reset notice email:", err));
+    }).catch((err) => {
+      console.error("Failed to send oauth reset notice email:", err);
+      return null;
+    });
 
-    await env.DB.prepare(
-      "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
-    )
-      .bind(dailyKey)
-      .run();
+    if (resendRes && resendRes.ok) {
+      await env.DB.prepare(
+        "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
+      )
+        .bind(dailyKey)
+        .run();
+    }
 
     return Response.json({
       success: true,
@@ -1054,7 +1066,7 @@ export async function handleForgotPassword(
     </div>
   `;
 
-  await fetch("https://api.resend.com/emails", {
+  const resendRes = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${env.RESEND_API_KEY}`,
@@ -1066,13 +1078,18 @@ export async function handleForgotPassword(
       subject: subject,
       html: htmlContent
     })
-  }).catch((err) => console.error("Failed to send reset code email:", err));
+  }).catch((err) => {
+    console.error("Failed to send reset code email:", err);
+    return null;
+  });
 
-  await env.DB.prepare(
-    "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
-  )
-    .bind(dailyKey)
-    .run();
+  if (resendRes && resendRes.ok) {
+    await env.DB.prepare(
+      "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
+    )
+      .bind(dailyKey)
+      .run();
+  }
 
   return Response.json({
     success: true,
@@ -1080,7 +1097,11 @@ export async function handleForgotPassword(
   });
 }
 
-export async function handleResetPassword(req: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
+export async function handleResetPassword(
+  req: Request,
+  env: Env,
+  ctx?: ExecutionContext
+): Promise<Response> {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
   const body: any = await safeJsonBody(req);
   let { email, code, newPassword } = body;

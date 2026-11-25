@@ -474,6 +474,26 @@ window.handleAddPasskey = async function() {
   }
 };
 
+// Global settings modal opener hoisted to top-level to prevent race conditions during early URL hash navigation
+window.openSettingsModal = function(tabName = 'account') {
+  const overlay = document.getElementById('settings-modal-overlay');
+  if (!overlay) return;
+  overlay.style.display = 'flex';
+  const userMenu = document.getElementById('user-menu');
+  if (userMenu) userMenu.style.display = 'none';
+  const targetNav = document.querySelector(`.settings-nav-item[data-tab="${tabName}"]`);
+  if (targetNav) targetNav.click();
+  if (typeof window.fetchUserData === 'function') {
+    window.fetchUserData();
+  }
+  if (window.refreshOAuthBindings) {
+    window.refreshOAuthBindings();
+  }
+  if (window.refreshPasskeys) {
+    window.refreshPasskeys();
+  }
+};
+
 document.addEventListener('DOMContentLoaded', async () => {
 
   // Billing Filters
@@ -549,6 +569,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   window.loadBillingLedger = async function(category = 'all', page = 1) {
+    if (typeof window.fetchUserData === 'function') {
+      window.fetchUserData();
+    }
     const tbody = document.getElementById('billing-tbody');
     if (!tbody) return;
     
@@ -5542,6 +5565,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (userMenu) userMenu.style.display = 'none';
     const targetNav = document.querySelector(`.settings-nav-item[data-tab="${tabName}"]`);
     if (targetNav) targetNav.click();
+    if (typeof window.fetchUserData === 'function') {
+      window.fetchUserData();
+    }
     if (window.refreshOAuthBindings) {
       window.refreshOAuthBindings();
     }

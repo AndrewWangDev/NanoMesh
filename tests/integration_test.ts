@@ -600,8 +600,9 @@ function createMockD1(store: TableStore) {
           // UPDATE users credits
           if (cleanSql.includes("UPDATE users SET credits")) {
             const userId =
-              boundArgs.find((arg) => typeof arg === "string" && store.users.some((u) => u.user_id === arg)) ||
-              boundArgs[boundArgs.length - 1];
+              boundArgs.find(
+                (arg) => typeof arg === "string" && store.users.some((u) => u.user_id === arg)
+              ) || boundArgs[boundArgs.length - 1];
             const user = store.users.find((u) => u.user_id === userId);
             if (user) {
               if (cleanSql.includes("credits = credits + ?")) {
@@ -5114,7 +5115,9 @@ async function runIntegrationTests() {
   // -----------------------------------------------------------------------
   // SCENARIO 19: Password Reset Lockout & IP Limits, Dynamic Multi-Node Pre-Deduction & Presign Bounds
   // -----------------------------------------------------------------------
-  console.log("\n[Scenario 19] Password Reset Lockout, Multi-Node Dynamic Billing & Presign Bounds");
+  console.log(
+    "\n[Scenario 19] Password Reset Lockout, Multi-Node Dynamic Billing & Presign Bounds"
+  );
 
   // 19.1 Verification Code Attempt Exhaustion & Atomic Lockout
   const lockoutUserEmail = "lockout_victim@gmail.com";
@@ -5166,7 +5169,9 @@ async function runIntegrationTests() {
     "error.codeLockedTooManyAttempts",
     "Must state code is locked due to too many attempts"
   );
-  console.log("  ✓ Password reset atomic attempt exhaustion (attempts >= 5) locks out brute force: PASSED");
+  console.log(
+    "  ✓ Password reset atomic attempt exhaustion (attempts >= 5) locks out brute force: PASSED"
+  );
 
   // Rapid requests exceeding email rate limit (max 5/min) trigger 429
   let hitRateLimit = false;
@@ -5212,6 +5217,23 @@ async function runIntegrationTests() {
   });
   const invalidPresignRes = await worker.fetch(invalidPresignReq, env, {} as any);
   assert.equal(invalidPresignRes.status, 400, "Zero or negative fileSize must return 400");
+
+  // Fractional or float fileSize must also return 400 (NM-17 integer enforcement)
+  const floatPresignReq = new Request("https://nanomesh.local/api/upload/presign", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${presignUserToken}`
+    },
+    body: JSON.stringify({
+      file_name: "test.png",
+      mime_type: "image/png",
+      file_size: 0.4,
+      sessionId: "sess_upload_01"
+    })
+  });
+  const floatPresignRes = await worker.fetch(floatPresignReq, env, {} as any);
+  assert.equal(floatPresignRes.status, 400, "Fractional fileSize must return 400");
 
   const validPresignReq = new Request("https://nanomesh.local/api/upload/presign", {
     method: "POST",
@@ -5264,11 +5286,232 @@ async function runIntegrationTests() {
     })
   });
   const updateEnumRes = await handleAdminUpdateNode(updateEnumReq, env, testNodeId);
-  assert.equal(updateEnumRes.status, 200, "Admin node update with non-string and invalid enums handled safely");
+  assert.equal(
+    updateEnumRes.status,
+    200,
+    "Admin node update with non-string and invalid enums handled safely"
+  );
   const nodeAfterUpdate = store.models.find((m) => m.model_id === testNodeId);
-  assert.equal(nodeAfterUpdate.auth_mode, "none", "Invalid auth_mode must be rejected and preserve existing value");
-  assert.equal(nodeAfterUpdate.api_format, "openai_compat", "Invalid api_format must be rejected and preserve existing value");
+  assert.equal(
+    nodeAfterUpdate.auth_mode,
+    "none",
+    "Invalid auth_mode must be rejected and preserve existing value"
+  );
+  assert.equal(
+    nodeAfterUpdate.api_format,
+    "openai_compat",
+    "Invalid api_format must be rejected and preserve existing value"
+  );
   console.log("  ✓ Admin node update strictly validates enums and type guards strings: PASSED");
+
+  // 19.4 Multi-Node Dynamic Billing & Pre-deduction Alignment (NM-15)
+  const dynRole1Id = "role_dyn_qwq";
+  const dynRole2Id = "role_dyn_llama";
+  const dynModel1Id = "m_dyn_qwq_node";
+  const dynModel2Id = "m_dyn_llama_node";
+
+  store.dag_roles.push(
+    {
+      role_id: dynRole1Id,
+      name_zh: "高精度推理节点",
+      name_en: "High Precision Reasoning Node",
+      in_modalities: JSON.stringify(["text"]),
+      out_modalities: JSON.stringify(["text"]),
+      requisition_tags: JSON.stringify(["#qwq_reasoning"]),
+      compensation_prompts: JSON.stringify({})
+    },
+    {
+      role_id: dynRole2Id,
+      name_zh: "综合生成节点",
+      name_en: "General Generation Node",
+      in_modalities: JSON.stringify(["text"]),
+      out_modalities: JSON.stringify(["text"]),
+      requisition_tags: JSON.stringify(["#llama_generation"]),
+      compensation_prompts: JSON.stringify({})
+    }
+  );
+
+  store.models.push(
+    {
+      model_id: dynModel1Id,
+      display_name: "QwQ 32B Cloud",
+      provider: "Workers AI",
+      endpoint: "@cf/qwen/qwq-32b-preview",
+      modalities: JSON.stringify(["text"]),
+      tags: JSON.stringify(["#qwq_reasoning"]),
+      context_window: 8192,
+      max_concurrency: 10,
+      active_connections: 0,
+      precision: 0.95,
+      user_rating: 4.9,
+      status: "active",
+      cost_per_1k_tokens: 2.0,
+      cost_per_invocation: 0.0,
+      auth_mode: "none",
+      api_format: "openai_compat",
+      inference_target: "cloud"
+    },
+    {
+      model_id: dynModel2Id,
+      display_name: "LLaMA 3.1 8B Cloud",
+      provider: "Workers AI",
+      endpoint: "@cf/meta/llama-3.1-8b-instruct",
+      modalities: JSON.stringify(["text"]),
+      tags: JSON.stringify(["#llama_generation"]),
+      context_window: 4096,
+      max_concurrency: 10,
+      active_connections: 0,
+      precision: 0.88,
+      user_rating: 4.7,
+      status: "active",
+      cost_per_1k_tokens: 1.0,
+      cost_per_invocation: 1.0,
+      auth_mode: "none",
+      api_format: "openai_compat",
+      inference_target: "cloud"
+    }
+  );
+
+  store.dag_templates.push({
+    template_id: "tpl_multi_dyn_billing",
+    name_zh: "多节点动态计费模板",
+    name_en: "Multi-Node Dynamic Billing",
+    desc_zh: "前序QwQ推理与后序LLaMA生成",
+    desc_en: "Sequential QwQ and LLaMA nodes",
+    scenario_category: "chat",
+    scenario_anchor: "chat",
+    roles: JSON.stringify([
+      {
+        role_id: dynRole1Id,
+        name_zh: "高精度推理节点",
+        name_en: "High Precision Reasoning Node",
+        in_modalities: ["text"],
+        out_modalities: ["text"],
+        in_degree: 0,
+        out_degree: 1,
+        requisition_tags: ["#qwq_reasoning"],
+        compensation_prompts: {}
+      },
+      {
+        role_id: dynRole2Id,
+        name_zh: "综合生成节点",
+        name_en: "General Generation Node",
+        in_modalities: ["text"],
+        out_modalities: ["text"],
+        in_degree: 1,
+        out_degree: 0,
+        requisition_tags: ["#llama_generation"],
+        compensation_prompts: {}
+      }
+    ]),
+    role_sequence: JSON.stringify([dynRole1Id, dynRole2Id]),
+    edges: JSON.stringify([]),
+    status: "active",
+    priority: 10
+  });
+
+  // User with insufficient balance (3 credits < 4 required)
+  const poorUserId = "usr_dyn_poor";
+  store.users.push({
+    user_id: poorUserId,
+    username: "DynPoorUser",
+    email: "dyn_poor@nanomesh.local",
+    password_hash: "hash",
+    credits: 3,
+    token_version: 1
+  });
+  const poorToken = await signJWT(
+    { userId: poorUserId, role: "user", tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
+
+  const poorChatReq = new Request("https://nanomesh.local/api/chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${poorToken}`
+    },
+    body: JSON.stringify({
+      reRouteMode: "switch_template",
+      chosenTemplateId: "tpl_multi_dyn_billing",
+      envelope: {
+        session_id: "sess_dyn_01",
+        instruction_payload: "Test multi-node dynamic billing under-allocation check"
+      }
+    })
+  });
+  const poorChatRes = await worker.fetch(poorChatReq, env, {} as any);
+  assert.equal(
+    poorChatRes.status,
+    403,
+    "Insufficient credits for multi-node dynamic pipeline must return 403"
+  );
+  const poorChatJson = (await poorChatRes.json()) as any;
+  assert.equal(poorChatJson.error, "insufficient_quota");
+  assert.ok(
+    poorChatJson.message.includes("4"),
+    "Rejection message must indicate 4 credits required"
+  );
+  const poorUserAfter = store.users.find((u) => u.user_id === poorUserId);
+  assert.equal(poorUserAfter.credits, 3, "Failed pre-deduction must preserve balance");
+
+  // User with sufficient balance (10 credits >= 4 required)
+  const richUserId = "usr_dyn_rich";
+  store.users.push({
+    user_id: richUserId,
+    username: "DynRichUser",
+    email: "dyn_rich@nanomesh.local",
+    password_hash: "hash",
+    credits: 10,
+    token_version: 1
+  });
+  const richToken = await signJWT(
+    { userId: richUserId, role: "user", tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
+
+  const richChatReq = new Request("https://nanomesh.local/api/chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${richToken}`
+    },
+    body: JSON.stringify({
+      reRouteMode: "switch_template",
+      chosenTemplateId: "tpl_multi_dyn_billing",
+      envelope: {
+        session_id: "sess_dyn_02",
+        instruction_payload: "Run full multi-node dynamic billing pipeline"
+      }
+    })
+  });
+  const richChatRes = await worker.fetch(richChatReq, env, {} as any);
+  assert.equal(
+    richChatRes.status,
+    200,
+    "Sufficient credits multi-node dynamic pipeline returns 200 SSE"
+  );
+  const richStreamText = await richChatRes.text();
+  assert.ok(
+    richStreamText.includes("dag_complete"),
+    "Multi-node dynamic execution must emit dag_complete"
+  );
+  const richUserAfter = store.users.find((u) => u.user_id === richUserId);
+  assert.equal(
+    richUserAfter.credits,
+    6,
+    "10 initial credits - 4 pre-deducted = exactly 6 remaining credits"
+  );
+  const richLedgerEntry = store.credit_ledger.find(
+    (l) => l.user_id === richUserId && l.category === "compute_cost"
+  );
+  assert.ok(richLedgerEntry, "Credit ledger must contain compute_cost entry for rich user");
+  assert.equal(richLedgerEntry.amount, -4, "Ledger entry amount must be -4");
+  console.log(
+    "  ✓ Multi-node dynamic token + invocation cost pre-deduction & settlement (NM-15): PASSED"
+  );
 
   console.log("\n==================================================");
   console.log("   🎉 ALL 19 INTEGRATION SCENARIOS PASSED (100%)! ");

@@ -2447,17 +2447,29 @@ async function runUnitTests() {
     false,
     "fe9a::5 must be blocked under fe80::/10 range"
   );
-  console.log("  ✓ IPv6 private range filter strictly blocks ULA/link-local while allowing fc/fd domains: PASSED");
+  console.log(
+    "  ✓ IPv6 private range filter strictly blocks ULA/link-local while allowing fc/fd domains: PASSED"
+  );
 
   // 20.3 Email Domain Whitelist: proton.me allowed
-  assert.equal(isValidEmailDomain("user@proton.me"), true, "proton.me must be a valid email domain");
-  assert.equal(isValidEmailDomain("user@gmail.com"), true, "gmail.com must be a valid email domain");
+  assert.equal(
+    isValidEmailDomain("user@proton.me"),
+    true,
+    "proton.me must be a valid email domain"
+  );
+  assert.equal(
+    isValidEmailDomain("user@gmail.com"),
+    true,
+    "gmail.com must be a valid email domain"
+  );
   assert.equal(
     isValidEmailDomain("attacker@malicious-disposable-123.xyz"),
     false,
     "untrusted domain must be rejected"
   );
-  console.log("  ✓ Email domain validator includes proton.me and rejects disposable domains: PASSED");
+  console.log(
+    "  ✓ Email domain validator includes proton.me and rejects disposable domains: PASSED"
+  );
 
   console.log("\n==================================================");
   console.log("   🎉 ALL 20 UNIT TEST SUITES PASSED (100%)!      ");

@@ -389,10 +389,8 @@ export async function handleAdminUpdateNode(
 
   const displayName =
     typeof body.display_name === "string" ? body.display_name.trim() : existing.display_name;
-  const provider =
-    typeof body.provider === "string" ? body.provider.trim() : existing.provider;
-  const endpoint =
-    typeof body.endpoint === "string" ? body.endpoint.trim() : existing.endpoint;
+  const provider = typeof body.provider === "string" ? body.provider.trim() : existing.provider;
+  const endpoint = typeof body.endpoint === "string" ? body.endpoint.trim() : existing.endpoint;
 
   if (body.endpoint !== undefined) {
     if (endpoint.startsWith("http://") || endpoint.startsWith("https://")) {

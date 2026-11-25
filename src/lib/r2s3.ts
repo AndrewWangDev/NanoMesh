@@ -65,7 +65,8 @@ export async function getPresignedUrls(
   env: Env,
   objectKey: string,
   uploadId: string,
-  partsCount: number
+  partsCount: number,
+  expiresInSeconds: number = 300
 ): Promise<string[]> {
   const aws = getClient(env);
   const endpoint = getEndpoint(env);
@@ -73,6 +74,7 @@ export async function getPresignedUrls(
 
   for (let i = 1; i <= partsCount; i++) {
     const url = new URL(`${endpoint}/${objectKey}?partNumber=${i}&uploadId=${uploadId}`);
+    url.searchParams.set("X-Amz-Expires", String(expiresInSeconds));
     const request = await aws.sign(url, {
       method: "PUT",
       aws: { signQuery: true }
@@ -166,8 +168,12 @@ export async function getSinglePresignedPutUrl(
   const headers: Record<string, string> = {
     "Content-Type": contentType
   };
-  if (typeof contentLength === "number" && contentLength > 0) {
-    headers["Content-Length"] = String(contentLength);
+  if (typeof contentLength === "number" && contentLength >= 1) {
+    headers["Content-Length"] = String(Math.floor(contentLength));
+  } else {
+    throw new Error(
+      "Content-Length is required and must be a positive integer >= 1 for presigned PUT"
+    );
   }
 
   const request = await aws.sign(url, {

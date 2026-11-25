@@ -48,14 +48,14 @@ export async function handleChatPresign(request: Request, env: Env): Promise<Res
     });
   }
 
-  const fileName = (
-    (body.file_name || (body as any).fileName) ||
-    "upload.bin"
-  ).replace(/[^a-zA-Z0-9._-]/g, "_");
+  const fileName = (body.file_name || (body as any).fileName || "upload.bin").replace(
+    /[^a-zA-Z0-9._-]/g,
+    "_"
+  );
   const rawFileSize = Number(
     body.file_size !== undefined ? body.file_size : (body as any).fileSize
   );
-  if (!Number.isFinite(rawFileSize) || rawFileSize <= 0 || rawFileSize > MAX_CHAT_FILE_SIZE) {
+  if (!Number.isFinite(rawFileSize) || rawFileSize < 1 || rawFileSize > MAX_CHAT_FILE_SIZE) {
     return new Response(
       JSON.stringify({
         error: "invalid_file_size",
@@ -67,9 +67,20 @@ export async function handleChatPresign(request: Request, env: Env): Promise<Res
       }
     );
   }
-  const fileSize = Math.round(rawFileSize);
-  const mimeType =
-    body.mime_type || (body as any).fileType || "application/octet-stream";
+  const fileSize = Math.floor(rawFileSize);
+  if (fileSize < 1) {
+    return new Response(
+      JSON.stringify({
+        error: "invalid_file_size",
+        message: "文件大小无效，必须大于等于 1 字节。"
+      }),
+      {
+        status: 400,
+        headers: { "Content-Type": "application/json" }
+      }
+    );
+  }
+  const mimeType = body.mime_type || (body as any).fileType || "application/octet-stream";
 
   // 3. Generate presigned URL targeting tmp/ directory
   const assetId = crypto.randomUUID();
