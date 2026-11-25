@@ -169,7 +169,11 @@ export async function handlePasskeyRegisterVerify(request: Request, env: Env): P
   }
 
   // 5. Store credential into database
-  const credentialId = id;
+  const expectedCredentialId = bufferToBase64Url(parsedAttestation.credentialId);
+  if (id && id !== expectedCredentialId) {
+    return Response.json({ error: "error.credentialIdMismatch" }, { status: 400 });
+  }
+  const credentialId = expectedCredentialId;
   const publicKeyB64 = bufferToBase64Url(parsedAttestation.publicKeySpki);
   const transportsJson = JSON.stringify(response.transports || ["internal"]);
   const friendlyName =
@@ -461,8 +465,9 @@ export async function handlePasskeyLoginVerify(request: Request, env: Env): Prom
   );
   const newCounter = view.getUint32(33);
 
-  // If counter is enabled and decreases/repeats (unless 0), reject authentication per W3C WebAuthn spec Section 7.2
-  if (newCounter > 0 && passkey.counter > 0 && newCounter <= passkey.counter) {
+  // If counter is enabled on credential (> 0), any non-increasing counter (including 0 downgrade or repeat)
+  // indicates replay or cloned authenticator per W3C WebAuthn spec Section 7.2
+  if (passkey.counter > 0 && newCounter <= passkey.counter) {
     console.error(
       `[Passkey Security Violation] Cloned authenticator or replay detected: newCounter=${newCounter}, storedCounter=${passkey.counter}`
     );

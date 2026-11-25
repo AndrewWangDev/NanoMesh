@@ -34,7 +34,7 @@ function applySecurityHeaders(res: Response): Response {
     "Content-Security-Policy",
     "default-src 'self'; " +
       "script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; " +
-      "worker-src 'self' blob:; " +
+      "worker-src 'self' blob: https://cdnjs.cloudflare.com; " +
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
       "font-src 'self' https://fonts.gstatic.com; " +
       "img-src 'self' data: blob: https:; " +
@@ -227,7 +227,7 @@ export default {
               res = await handleForgotPassword(request, env, ctx);
               break;
             case "/api/auth/reset-password":
-              res = await handleResetPassword(request, env);
+              res = await handleResetPassword(request, env, ctx);
               break;
             case "/api/auth/me":
               res = await handleMe(request, env);

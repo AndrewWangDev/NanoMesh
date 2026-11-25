@@ -388,9 +388,11 @@ export async function handleAdminUpdateNode(
   const body = (await safeJsonBody(request)) as any;
 
   const displayName =
-    body.display_name !== undefined ? body.display_name.trim() : existing.display_name;
-  const provider = body.provider !== undefined ? body.provider.trim() : existing.provider;
-  const endpoint = body.endpoint !== undefined ? body.endpoint.trim() : existing.endpoint;
+    typeof body.display_name === "string" ? body.display_name.trim() : existing.display_name;
+  const provider =
+    typeof body.provider === "string" ? body.provider.trim() : existing.provider;
+  const endpoint =
+    typeof body.endpoint === "string" ? body.endpoint.trim() : existing.endpoint;
 
   if (body.endpoint !== undefined) {
     if (endpoint.startsWith("http://") || endpoint.startsWith("https://")) {
@@ -470,10 +472,24 @@ export async function handleAdminUpdateNode(
         ? "disabled"
         : "active"
       : existing.status;
-  const authMode = body.auth_mode !== undefined ? body.auth_mode : existing.auth_mode;
-  const apiFormat = body.api_format !== undefined ? body.api_format : existing.api_format;
+  const authMode =
+    body.auth_mode !== undefined
+      ? ["none", "bearer_static", "jwt_ephemeral"].includes(body.auth_mode)
+        ? body.auth_mode
+        : existing.auth_mode
+      : existing.auth_mode;
+  const apiFormat =
+    body.api_format !== undefined
+      ? ["workers_ai", "openai_compat", "google_ai"].includes(body.api_format)
+        ? body.api_format
+        : existing.api_format
+      : existing.api_format;
   const inferenceTarget =
-    body.inference_target !== undefined ? body.inference_target : existing.inference_target;
+    body.inference_target !== undefined
+      ? ["browser", "edge", "cloud", "heavy"].includes(body.inference_target)
+        ? body.inference_target
+        : existing.inference_target
+      : existing.inference_target;
 
   // Validate compute node endpoint accessibility and SSRF safety before activation
   if (status === "active") {

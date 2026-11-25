@@ -776,6 +776,28 @@ document.addEventListener('DOMContentLoaded', async () => {
       const creditsDisplay = document.getElementById('credits-display');
       if (creditsDisplay) creditsDisplay.textContent = user.credits || 0;
 
+      window.fetchUserData = async function() {
+        try {
+          const res = await fetch('/api/auth/me');
+          if (res.ok) {
+            const data = await res.json();
+            window.currentUser = data;
+            user = data;
+            const cd = document.getElementById('credits-display');
+            if (cd) cd.textContent = data.credits || 0;
+            const dp = document.getElementById('dropdown-points');
+            if (dp) dp.textContent = data.credits || 0;
+            const sp = document.getElementById('settings-points-display');
+            if (sp) sp.textContent = data.credits || 0;
+            const fd = document.querySelector('.billing-hero-metric .billing-metric-value.text-muted');
+            if (fd) fd.textContent = (data.frozen_credits || 0) + ' ⚡';
+            return data;
+          }
+        } catch (err) {
+          console.warn('Failed to fetch user data:', err);
+        }
+      };
+
       // Fetch bindings
       await window.refreshOAuthBindings();
       if (window.refreshPasskeys) {
@@ -2055,9 +2077,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             const sizeStr = formatFileSize(f.size);
             const isImg = (f.previewUrl && !f.previewUrl.startsWith('blob:')) || (f.type && f.type.startsWith('image/')) || f.modality === 'image';
             const imgUrl = (f.previewUrl && !f.previewUrl.startsWith('blob:')) ? f.previewUrl : (f.r2Key ? `/api/asset?key=${encodeURIComponent(f.r2Key)}` : '');
-            if (isImg && imgUrl) {
+            const isSafeImgUrl = imgUrl && (/^https?:\/\//i.test(imgUrl) || imgUrl.startsWith('/api/') || imgUrl.startsWith('data:image/'));
+            if (isImg && isSafeImgUrl) {
               return `
-                <div class="user-asset-card" title="${escapeHtml(f.name)} (${sizeStr})" onclick="window.open('${escapeHtml(imgUrl)}', '_blank')" style="cursor:pointer;">
+                <div class="user-asset-card" title="${escapeHtml(f.name)} (${sizeStr})" onclick="window.open('${escapeHtml(imgUrl)}', '_blank', 'noopener,noreferrer')" style="cursor:pointer;">
                   <div class="user-asset-thumb-box">
                     <img src="${escapeHtml(imgUrl)}" class="user-asset-thumb-img" alt="${escapeHtml(f.name)}" />
                   </div>
@@ -5767,9 +5790,10 @@ document.addEventListener('DOMContentLoaded', async () => {
           saveUsernameBtn.disabled = false;
         } else {
           user.username = username;
-          document.getElementById('settings-username-display').textContent = username;
-          document.getElementById('user-menu-name').textContent = username;
-          document.getElementById('sidebar-user-name').textContent = username;
+          const sDisp = document.getElementById('settings-username-display');
+          if (sDisp) sDisp.textContent = username;
+          const dropUser = document.getElementById('dropdown-username');
+          if (dropUser) dropUser.textContent = username;
           localToast(t('success.usernameUpdated'), 'success');
           saveUsernameBtn.classList.remove('btn-primary');
           saveUsernameBtn.classList.add('btn-outline');
@@ -5959,7 +5983,10 @@ window.updateUploadButtonState = function() {};
       if (el3) el3.textContent = newBal;
 
       // Refresh ledger list if it exists
-      if (typeof window.loadLedger === 'function') {
+      if (typeof window.loadBillingLedger === 'function') {
+        window.ledgerCache = null;
+        window.loadBillingLedger('all', 1);
+      } else if (typeof window.loadLedger === 'function') {
         window.loadLedger('all', 1);
       }
 
@@ -6340,5 +6367,24 @@ document.addEventListener('DOMContentLoaded', () => {
   // Initial fetch and 60-second periodic poll
   window.fetchNotifications();
   setInterval(window.fetchNotifications, 60000);
+
+  // Handle URL error parameters (e.g. OAuth conflict redirects)
+  const appUrlParams = new URLSearchParams(window.location.search);
+  const appErrorParam = appUrlParams.get('error');
+  if (appErrorParam) {
+    const errorMsgMap = {
+      oauth_already_bound: '此第三方账号已被其他用户绑定，无法重复绑定',
+      oauth_conflict: '该第三方账号绑定的邮箱与当前账户不一致',
+      oauth_state_invalid: '第三方授权状态失效，请重试',
+      oauth_failed: '第三方授权登录失败，请重试'
+    };
+    const toastMsg = errorMsgMap[appErrorParam] || (typeof t === 'function' ? t(`error.${appErrorParam}`) : null) || appErrorParam;
+    if (typeof localToast === 'function') {
+      localToast(toastMsg, 'error');
+    }
+    if (window.location.hash === '#settings' && typeof window.openSettingsModal === 'function') {
+      window.openSettingsModal('account');
+    }
+  }
 });
 

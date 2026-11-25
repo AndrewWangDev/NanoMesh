@@ -48,15 +48,18 @@ export async function handleChatPresign(request: Request, env: Env): Promise<Res
     });
   }
 
-  const fileName = (body.file_name || "upload.bin").replace(/[^a-zA-Z0-9._-]/g, "_");
-  const fileSize = body.file_size || 0;
-  const mimeType = body.mime_type || "application/octet-stream";
-
-  if (fileSize > MAX_CHAT_FILE_SIZE) {
+  const fileName = (
+    (body.file_name || (body as any).fileName) ||
+    "upload.bin"
+  ).replace(/[^a-zA-Z0-9._-]/g, "_");
+  const rawFileSize = Number(
+    body.file_size !== undefined ? body.file_size : (body as any).fileSize
+  );
+  if (!Number.isFinite(rawFileSize) || rawFileSize <= 0 || rawFileSize > MAX_CHAT_FILE_SIZE) {
     return new Response(
       JSON.stringify({
-        error: "file_too_large",
-        message: "单文件超出 25MB 大小限制，请精简后重试。"
+        error: "invalid_file_size",
+        message: "文件大小无效或超出 25MB 大小限制，请精简后重试。"
       }),
       {
         status: 400,
@@ -64,13 +67,16 @@ export async function handleChatPresign(request: Request, env: Env): Promise<Res
       }
     );
   }
+  const fileSize = Math.round(rawFileSize);
+  const mimeType =
+    body.mime_type || (body as any).fileType || "application/octet-stream";
 
   // 3. Generate presigned URL targeting tmp/ directory
   const assetId = crypto.randomUUID();
   const r2Key = `tmp/${session.userId}/${assetId}/${fileName}`;
 
   try {
-    const uploadUrl = await getSinglePresignedPutUrl(env, r2Key, mimeType);
+    const uploadUrl = await getSinglePresignedPutUrl(env, r2Key, mimeType, fileSize, 300);
     return new Response(
       JSON.stringify({
         assetId,
@@ -87,7 +93,10 @@ export async function handleChatPresign(request: Request, env: Env): Promise<Res
     return new Response(
       JSON.stringify({
         error: "presign_failed",
-        message: err.message || "Failed to generate presigned upload URL"
+        message:
+          env.ENVIRONMENT === "production"
+            ? "Failed to generate presigned upload URL"
+            : err.message || "Failed to generate presigned upload URL"
       }),
       {
         status: 500,
@@ -199,7 +208,10 @@ export async function handleChatUpload(request: Request, env: Env): Promise<Resp
     return new Response(
       JSON.stringify({
         error: "upload_failed",
-        message: putErr.message || "Failed to store file to R2"
+        message:
+          env.ENVIRONMENT === "production"
+            ? "Failed to store file to R2"
+            : putErr.message || "Failed to store file to R2"
       }),
       {
         status: 500,

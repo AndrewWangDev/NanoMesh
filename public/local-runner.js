@@ -2,7 +2,7 @@
 // Dedicated Web Worker for In-Browser Local Model Inference via Transformers.js (WebGPU/Wasm)
 
 // Polyfill Float16Array if not natively supported or if required by WebGPU/ONNX runtime
-import { Float16Array as PolyfillFloat16Array } from 'https://cdn.jsdelivr.net/npm/@petamoriken/float16/browser/float16.mjs';
+import { Float16Array as PolyfillFloat16Array } from 'https://cdn.jsdelivr.net/npm/@petamoriken/float16@3.8.7/browser/float16.mjs';
 if (typeof globalThis.Float16Array === 'undefined') {
   globalThis.Float16Array = PolyfillFloat16Array;
 }

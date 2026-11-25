@@ -19,6 +19,7 @@ import { checkAndNotifyLowBalance } from "../api/notifications";
 export interface ExecutionOptions {
   userId: string;
   hasPreDeducted?: boolean;
+  preDeductedCredits?: number;
   startStepIndex?: number;
   injectedUpstreamText?: string;
   continuationHandshakeId?: string;
@@ -129,8 +130,10 @@ export function isSafeExternalUrl(urlStr: string): boolean {
 
     // IPv6 Private & Link-Local Ranges:
     // - fc00::/7 (Unique Local Address, covers fc00:: to fdff::)
-    // - fe80::/10 (Link-Local)
-    if (host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:")) return false;
+    // - fe80::/10 (Link-Local, covers fe80:: to febf::)
+    if (host.includes(":")) {
+      if (/^f[cd][0-9a-f]{2}:/i.test(host) || /^fe[89ab][0-9a-f]:/i.test(host)) return false;
+    }
 
     // IPv4-Mapped IPv6 (e.g. ::ffff:127.0.0.1 or WHATWG hex format ::ffff:7f00:1)
     if (host.startsWith("::ffff:")) {
@@ -696,9 +699,10 @@ export async function executeDAGStream(
       async function refundReservedCredit() {
         if (options.hasPreDeducted) {
           options.hasPreDeducted = false;
+          const reserved = options.preDeductedCredits ?? 1;
           try {
-            await env.DB.prepare("UPDATE users SET credits = credits + 1 WHERE user_id = ?")
-              .bind(options.userId)
+            await env.DB.prepare("UPDATE users SET credits = credits + ? WHERE user_id = ?")
+              .bind(reserved, options.userId)
               .run();
           } catch (refundErr) {
             console.error("[Dispatcher] Failed to refund reserved credit:", refundErr);
@@ -1741,7 +1745,7 @@ export async function executeDAGStream(
                     // Format OpenAI-compatible Images API payload (e.g. /v1/images/generations)
                     requestPayload = {
                       model: currentCandidate.model_id || "dall-e-3",
-                      prompt: promptContent,
+                      prompt: guardedPromptContent,
                       response_format: "b64_json",
                       size: "1024x1024"
                     };
@@ -1945,7 +1949,7 @@ export async function executeDAGStream(
                     () =>
                       env.AI.run(endpoint as any, {
                         task: "query",
-                        prompt: promptContent,
+                        prompt: guardedPromptContent,
                         image: imageB64
                       }),
                     35000,
@@ -1967,7 +1971,7 @@ export async function executeDAGStream(
                   const aiRes = await callWithTimeout(
                     () =>
                       env.AI.run(endpoint as any, {
-                        prompt: promptContent,
+                        prompt: guardedPromptContent,
                         image: imageBytes,
                         max_tokens: 512
                       }),
@@ -1990,7 +1994,7 @@ export async function executeDAGStream(
                   const aiRes = await callWithTimeout(
                     () =>
                       env.AI.run(endpoint as any, {
-                        prompt: promptContent,
+                        prompt: guardedPromptContent,
                         image: imageBytes,
                         max_tokens: 512
                       }),
@@ -2040,7 +2044,7 @@ export async function executeDAGStream(
                   const aiRes: any = await callWithTimeout(
                     () =>
                       env.AI.run(endpoint as any, {
-                        prompt: promptContent,
+                        prompt: guardedPromptContent,
                         steps: 4
                       }),
                     45000,
@@ -2110,7 +2114,7 @@ export async function executeDAGStream(
                         preview_url: `/api/assets/${generatedAssetId}?key=${encodeURIComponent(newAssetKey)}`
                       });
 
-                      nodeOutput = `[系统生成图像资产已存入会话账本: ${generatedAssetId}.png (体积: ${(imageBuffer.byteLength / 1024).toFixed(1)} KB)]\n提示词: ${promptContent}`;
+                      nodeOutput = `[系统生成图像资产已存入会话账本: ${generatedAssetId}.png (体积: ${(imageBuffer.byteLength / 1024).toFixed(1)} KB)]\n提示词: ${guardedPromptContent}`;
                       actualExecutingModel = currentCandidate;
                       isExecutionSuccess = true;
                       break;
@@ -2270,16 +2274,28 @@ export async function executeDAGStream(
 
         // 3. Settle billing atomically (preventing transaction tearing & race conditions)
         if (options.hasPreDeducted) {
-          if (totalCost === 0) {
-            // Full cache hit: refund the 1 reserved base credit
+          const reserved = options.preDeductedCredits ?? 1;
+          const actualCost = totalCost;
+          const refundDelta = reserved - actualCost;
+
+          if (actualCost === 0) {
+            // Full cache hit: refund all reserved base credits
             await refundReservedCredit();
           } else {
-            // totalCost >= 1: 1 credit was already pre-deducted at entry. Settle remaining delta and ledger in batch.
-            const remainingCost = totalCost - 1;
+            // Settle delta and record accurate ledger entry
             try {
               const ledgerId = crypto.randomUUID();
               const statements = [];
-              if (remainingCost > 0) {
+              if (refundDelta > 0) {
+                // Actual cost is less than reserved (e.g. some node cached or skipped), refund difference
+                statements.push(
+                  env.DB.prepare(
+                    "UPDATE users SET credits = credits + ? WHERE user_id = ?"
+                  ).bind(refundDelta, options.userId)
+                );
+              } else if (refundDelta < 0) {
+                // Actual cost exceeded reservation, deduct remaining delta
+                const remainingCost = Math.abs(refundDelta);
                 statements.push(
                   env.DB.prepare(
                     "UPDATE users SET credits = MAX(0, credits - ?) WHERE user_id = ?"
@@ -2294,7 +2310,7 @@ export async function executeDAGStream(
                 ).bind(
                   ledgerId,
                   options.userId,
-                  -totalCost,
+                  -actualCost,
                   options.userId,
                   `执行模板: ${dag.template.name_zh}`
                 )
@@ -2347,8 +2363,12 @@ export async function executeDAGStream(
         }
         // Unconditionally release pre-deducted reservation if DAG fails to deliver end-to-end (All-or-Nothing delivery)
         await refundReservedCredit();
+        const safeErrorMsg =
+          env.ENVIRONMENT === "production"
+            ? "Task execution encountered an error. Please try again later."
+            : err.message || "Execution error";
         sendEvent("dag_error", {
-          error: err.message || "Execution error"
+          error: safeErrorMsg
         });
       } finally {
         if (heartbeatTimer) clearInterval(heartbeatTimer);

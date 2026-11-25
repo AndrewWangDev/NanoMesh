@@ -17,6 +17,7 @@ export const VALID_EMAIL_DOMAINS = [
   "outlook.com",
   "yahoo.com",
   "protonmail.com",
+  "proton.me",
   "icloud.com",
   "hotmail.com"
 ];
@@ -676,20 +677,31 @@ async function handleOAuthCallback(
       // CSRF and session hijacking prevention:
       // State payload must contain a valid userId that matches the authenticated session
       if (!payload.userId || !session || !session.userId || payload.userId !== session.userId) {
-        return Response.redirect(`${env.FRONTEND_URL}/settings.html?error=bind_csrf_rejected`);
+        return Response.redirect(`${env.FRONTEND_URL}/?error=bind_csrf_rejected#settings`);
       }
 
       if (!activeUser) {
-        return Response.redirect(`${env.FRONTEND_URL}/settings.html?error=user_not_found`);
+        return Response.redirect(`${env.FRONTEND_URL}/?error=user_not_found#settings`);
       }
 
       // Track 2: User explicitly clicked "Bind" from Settings while logged in
       userId = activeUser.user_id;
-      await env.DB.prepare(
+      const bindResult = await env.DB.prepare(
         "INSERT OR IGNORE INTO user_oauth_bindings (user_id, provider, provider_id) VALUES (?, ?, ?)"
       )
         .bind(userId || "", provider, String(profile.id || ""))
         .run();
+
+      if (!bindResult.meta.changes || bindResult.meta.changes === 0) {
+        const conflict = await env.DB.prepare(
+          "SELECT user_id FROM user_oauth_bindings WHERE provider = ? AND provider_id = ?"
+        )
+          .bind(provider, String(profile.id || ""))
+          .first<{ user_id: string }>();
+        if (conflict && conflict.user_id !== userId) {
+          return Response.redirect(`${env.FRONTEND_URL}/?error=oauth_already_bound#settings`);
+        }
+      }
 
       if (avatarToSet && !activeUser.avatar_url) {
         await env.DB.prepare("UPDATE users SET avatar_url = ? WHERE user_id = ?")
@@ -918,6 +930,16 @@ export async function handleForgotPassword(
     }
   }
 
+  // Global daily email sending limit
+  const todayStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const dailyKey = `emails_sent_${todayStr}`;
+  const counter = await env.DB.prepare("SELECT value FROM system_counters WHERE key = ?")
+    .bind(dailyKey)
+    .first<{ value: number }>();
+  if (counter && counter.value >= 500) {
+    return Response.json({ error: "error.dailyEmailLimit" }, { status: 429 });
+  }
+
   // 60-second cooldown per email
   const recent = await env.DB.prepare(
     "SELECT id FROM verification_codes WHERE LOWER(email) = ? AND created_at > datetime('now', '-60 seconds')"
@@ -987,6 +1009,12 @@ export async function handleForgotPassword(
       })
     }).catch((err) => console.error("Failed to send oauth reset notice email:", err));
 
+    await env.DB.prepare(
+      "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
+    )
+      .bind(dailyKey)
+      .run();
+
     return Response.json({
       success: true,
       message: "If this email is registered, a reset code has been sent."
@@ -1040,13 +1068,19 @@ export async function handleForgotPassword(
     })
   }).catch((err) => console.error("Failed to send reset code email:", err));
 
+  await env.DB.prepare(
+    "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
+  )
+    .bind(dailyKey)
+    .run();
+
   return Response.json({
     success: true,
     message: "If this email is registered, a reset code has been sent."
   });
 }
 
-export async function handleResetPassword(req: Request, env: Env): Promise<Response> {
+export async function handleResetPassword(req: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
   const body: any = await safeJsonBody(req);
   let { email, code, newPassword } = body;
@@ -1055,6 +1089,37 @@ export async function handleResetPassword(req: Request, env: Env): Promise<Respo
   if (typeof email !== "string" || !isValidEmailDomain(email)) {
     return Response.json({ error: "error.unsupportedEmailDomain" }, { status: 400 });
   }
+
+  // Rate limiting (IP rate limit and email rate limit)
+  const clientIp = req.headers.get("cf-connecting-ip") || "unknown";
+  const currentMinuteStr = new Date().toISOString().slice(0, 16); // YYYY-MM-DDTHH:mm
+  if (clientIp !== "unknown") {
+    const ipKey = `ip_pwd_rate_${currentMinuteStr}_${clientIp}`;
+    const ipCounter = await env.DB.prepare("SELECT value FROM system_counters WHERE key = ?")
+      .bind(ipKey)
+      .first<{ value: number }>();
+    if (ipCounter && ipCounter.value >= 10) {
+      return Response.json({ error: "error.ipRateLimit" }, { status: 429 });
+    }
+    await env.DB.prepare(
+      "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
+    )
+      .bind(ipKey)
+      .run();
+  }
+
+  const emailRateKey = `email_pwd_rate_${currentMinuteStr}_${email}`;
+  const emailCounter = await env.DB.prepare("SELECT value FROM system_counters WHERE key = ?")
+    .bind(emailRateKey)
+    .first<{ value: number }>();
+  if (emailCounter && emailCounter.value >= 5) {
+    return Response.json({ error: "error.tooManyRequests" }, { status: 429 });
+  }
+  await env.DB.prepare(
+    "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
+  )
+    .bind(emailRateKey)
+    .run();
 
   if (!code || typeof code !== "string") {
     return Response.json({ error: "error.invalidCode" }, { status: 400 });
@@ -1082,15 +1147,19 @@ export async function handleResetPassword(req: Request, env: Env): Promise<Respo
     return Response.json({ error: "error.invalidCode" }, { status: 400 });
   }
 
-  if (activeCode.attempts >= 5) {
+  // Atomic lock check: only increment if attempts < 5 to prevent TOCTOU concurrency race
+  const updateRes = await env.DB.prepare(
+    "UPDATE verification_codes SET attempts = attempts + 1 WHERE id = ? AND attempts < 5"
+  )
+    .bind(activeCode.id)
+    .run();
+
+  if (!updateRes.meta.changes || updateRes.meta.changes === 0) {
     await env.DB.prepare("DELETE FROM verification_codes WHERE id = ?").bind(activeCode.id).run();
     return Response.json({ error: "error.codeLockedTooManyAttempts" }, { status: 400 });
   }
 
   if (activeCode.code !== code.trim()) {
-    await env.DB.prepare("UPDATE verification_codes SET attempts = attempts + 1 WHERE id = ?")
-      .bind(activeCode.id)
-      .run();
     return Response.json({ error: "error.invalidCode" }, { status: 400 });
   }
 
@@ -1108,19 +1177,17 @@ export async function handleResetPassword(req: Request, env: Env): Promise<Respo
   // Hash new password using bcrypt
   const hash = bcrypt.hashSync(newPassword, 10);
 
-  // Update password and increment token_version to invalidate all existing sessions
-  await env.DB.prepare(
+  // Update password and invalidate verification code atomically
+  await env.DB.batch([
+    env.DB.prepare(
+      `
+      UPDATE users 
+      SET password_hash = ?, token_version = token_version + 1 
+      WHERE user_id = ?
     `
-    UPDATE users 
-    SET password_hash = ?, token_version = token_version + 1 
-    WHERE user_id = ?
-  `
-  )
-    .bind(hash, user.user_id)
-    .run();
-
-  // Delete all verification codes for this email
-  await env.DB.prepare("DELETE FROM verification_codes WHERE LOWER(email) = ?").bind(email).run();
+    ).bind(hash, user.user_id),
+    env.DB.prepare("DELETE FROM verification_codes WHERE id = ?").bind(activeCode.id)
+  ]);
 
   return Response.json({ success: true, message: "Password reset successful" });
 }

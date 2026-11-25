@@ -9,8 +9,8 @@ import { Env } from "../types";
  */
 function getClient(env: Env) {
   return new AwsClient({
-    accessKeyId: env.R2_ACCESS_KEY_ID,
-    secretAccessKey: env.R2_SECRET_ACCESS_KEY,
+    accessKeyId: env.R2_ACCESS_KEY_ID || "mock-access-key",
+    secretAccessKey: env.R2_SECRET_ACCESS_KEY || "mock-secret-key",
     service: "s3",
     region: "auto"
   });
@@ -154,16 +154,25 @@ export async function deleteObject(env: Env, objectKey: string): Promise<void> {
 export async function getSinglePresignedPutUrl(
   env: Env,
   objectKey: string,
-  contentType: string = "application/octet-stream"
+  contentType: string = "application/octet-stream",
+  contentLength?: number,
+  expiresInSeconds: number = 300
 ): Promise<string> {
   const aws = getClient(env);
   const endpoint = getEndpoint(env);
   const url = new URL(`${endpoint}/${objectKey}`);
+  url.searchParams.set("X-Amz-Expires", String(expiresInSeconds));
+
+  const headers: Record<string, string> = {
+    "Content-Type": contentType
+  };
+  if (typeof contentLength === "number" && contentLength > 0) {
+    headers["Content-Length"] = String(contentLength);
+  }
+
   const request = await aws.sign(url, {
     method: "PUT",
-    headers: {
-      "Content-Type": contentType
-    },
+    headers,
     aws: { signQuery: true, allHeaders: true }
   });
   return request.url;

@@ -20,6 +20,7 @@ import {
 
 export interface OrchestrationOptions {
   reRouteMode?: "normal" | "switch_template" | "switch_model";
+  continuationMode?: boolean;
   chosenTemplateId?: string;
   chosenRoleModels?: Record<string, string>; // role_id -> model_id
   customRolePrompts?: Record<string, string>; // role_id -> custom_prompt
@@ -161,7 +162,8 @@ export async function runOrchestrationPipeline(
   let intentState: IntentState | null = null;
   let targetBranchId: string | undefined = undefined;
   const isReRoute =
-    options.reRouteMode === "switch_template" || options.reRouteMode === "switch_model";
+    !options.continuationMode &&
+    (options.reRouteMode === "switch_template" || options.reRouteMode === "switch_model");
 
   // Deep clone assets manifest to ensure object isolation
   envelope.assets_manifest = Array.isArray(envelope.assets_manifest)
@@ -473,8 +475,11 @@ export async function runOrchestrationPipeline(
       selectedTemplate,
       ...subsistenceTemplates.filter((t) => t.template_id !== selectedTemplate.template_id)
     ].slice(0, 3);
-  } else if (options.reRouteMode === "switch_model" && options.chosenTemplateId) {
-    // Case 2: Template fixed by user configuration
+  } else if (
+    (options.reRouteMode === "switch_model" || options.continuationMode) &&
+    options.chosenTemplateId
+  ) {
+    // Case 2: Template fixed by user configuration or continuation handshake
     // Skip Step 2 candidate ranking and bind configured template directly
     const found =
       allTemplates.find((t) => t.template_id === options.chosenTemplateId) ||

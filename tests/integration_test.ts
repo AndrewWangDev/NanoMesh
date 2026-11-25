@@ -599,10 +599,22 @@ function createMockD1(store: TableStore) {
 
           // UPDATE users credits
           if (cleanSql.includes("UPDATE users SET credits")) {
-            const userId = boundArgs[boundArgs.length - 1];
+            const userId =
+              boundArgs.find((arg) => typeof arg === "string" && store.users.some((u) => u.user_id === arg)) ||
+              boundArgs[boundArgs.length - 1];
             const user = store.users.find((u) => u.user_id === userId);
             if (user) {
-              if (cleanSql.includes("credits = credits + 50")) {
+              if (cleanSql.includes("credits = credits + ?")) {
+                user.credits += Number(boundArgs[0]) || 0;
+                return { meta: { changes: 1 } };
+              } else if (cleanSql.includes("credits = credits - ?")) {
+                const deduct = Number(boundArgs[0]) || 1;
+                if (user.credits >= deduct) {
+                  user.credits -= deduct;
+                  return { meta: { changes: 1 } };
+                }
+                return { meta: { changes: 0 } };
+              } else if (cleanSql.includes("credits = credits + 50")) {
                 user.credits += 50;
               } else if (cleanSql.includes("credits = credits + 1")) {
                 user.credits += 1;
@@ -874,8 +886,27 @@ function createMockD1(store: TableStore) {
             return { meta: { changes: 1 } };
           }
 
+          // UPDATE verification_codes SET attempts
+          if (cleanSql.includes("UPDATE verification_codes") && cleanSql.includes("SET attempts")) {
+            const codeId = boundArgs[0];
+            const vc = (store.verification_codes || []).find((c) => c.id === codeId);
+            if (vc) {
+              if (cleanSql.includes("attempts < 5") && (vc.attempts || 0) >= 5) {
+                return { meta: { changes: 0 } };
+              }
+              vc.attempts = (vc.attempts || 0) + 1;
+              return { meta: { changes: 1 } };
+            }
+            return { meta: { changes: 0 } };
+          }
+
           // DELETE FROM verification_codes
           if (cleanSql.startsWith("DELETE FROM verification_codes")) {
+            const codeId = boundArgs[0];
+            const idx = (store.verification_codes || []).findIndex((c) => c.id === codeId);
+            if (idx !== -1) {
+              store.verification_codes.splice(idx, 1);
+            }
             return { meta: { changes: 1 } };
           }
 
@@ -1125,7 +1156,10 @@ function buildMockEnv(): { env: Env; store: TableStore } {
     AI: createMockAI(),
     JWT_SECRET: "test-jwt-secret-for-integration-tests-999",
     ADMIN_PASSWORD: "IntegrationAdminPass123!",
-    FRONTEND_URL: "https://nanomesh.local"
+    FRONTEND_URL: "https://nanomesh.local",
+    R2_ACCESS_KEY_ID: "mock-r2-access-key-id",
+    R2_SECRET_ACCESS_KEY: "mock-r2-secret-access-key-very-long",
+    Cloudflare_Account_ID: "mock-cf-account-id"
   } as unknown as Env;
 
   return { env, store };
@@ -2203,7 +2237,7 @@ async function runIntegrationTests() {
         continuation_token: replayToken,
         status: "success",
         client_step_output: "Concurrent payload",
-        envelope: testEnvelope9,
+        envelope: { ...testEnvelope9, session_id: "sess_replay" },
         orchestration_options: { chosenTemplateId: webgpuArbitraryTemplateId }
       })
     });
@@ -2318,7 +2352,7 @@ async function runIntegrationTests() {
       failed_model_id: "m_browser_only",
       error_reason: "WebGPU Device creation failure",
       upstream_context: "Preserved Architectural Context from Step 0",
-      envelope: testEnvelope9,
+      envelope: { ...testEnvelope9, session_id: "sess_failover" },
       orchestration_options: { chosenTemplateId: webgpuArbitraryTemplateId }
     })
   });
@@ -5077,8 +5111,167 @@ async function runIntegrationTests() {
   );
   console.log("  ✓ Schema constraint model enforces case-insensitive email uniqueness: PASSED");
 
+  // -----------------------------------------------------------------------
+  // SCENARIO 19: Password Reset Lockout & IP Limits, Dynamic Multi-Node Pre-Deduction & Presign Bounds
+  // -----------------------------------------------------------------------
+  console.log("\n[Scenario 19] Password Reset Lockout, Multi-Node Dynamic Billing & Presign Bounds");
+
+  // 19.1 Verification Code Attempt Exhaustion & Atomic Lockout
+  const lockoutUserEmail = "lockout_victim@gmail.com";
+  store.users.push({
+    user_id: "usr_lockout_victim",
+    username: "LockoutVictim",
+    email: lockoutUserEmail,
+    password_hash: await bcrypt.hash("OldPass123456", 4),
+    credits: 10,
+    token_version: 1
+  });
+  store.verification_codes.push({
+    id: 9991,
+    email: lockoutUserEmail,
+    code: "654321",
+    attempts: 4, // 4 prior failed attempts
+    created_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 600000).toISOString()
+  });
+
+  // Attempt 5th incorrect guess (increments attempts to 5)
+  const fifthReq = new Request("https://nanomesh.local/api/auth/reset-password", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "CF-Connecting-IP": "198.51.100.42" },
+    body: JSON.stringify({
+      email: lockoutUserEmail,
+      code: "000000",
+      newPassword: "NewSecretPass123!"
+    })
+  });
+  const fifthRes = await worker.fetch(fifthReq, env, {} as any);
+  assert.equal(fifthRes.status, 400, "5th attempt with wrong code must return 400");
+
+  // Subsequent attempt with CORRECT code must be rejected with 400 because attempts >= 5
+  const lockedReq = new Request("https://nanomesh.local/api/auth/reset-password", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "CF-Connecting-IP": "198.51.100.42" },
+    body: JSON.stringify({
+      email: lockoutUserEmail,
+      code: "654321",
+      newPassword: "NewSecretPass123!"
+    })
+  });
+  const lockedRes = await worker.fetch(lockedReq, env, {} as any);
+  assert.equal(lockedRes.status, 400, "Attempt with code after 5 failures must be rejected");
+  const lockedJson = (await lockedRes.json()) as any;
+  assert.equal(
+    lockedJson.error,
+    "error.codeLockedTooManyAttempts",
+    "Must state code is locked due to too many attempts"
+  );
+  console.log("  ✓ Password reset atomic attempt exhaustion (attempts >= 5) locks out brute force: PASSED");
+
+  // Rapid requests exceeding email rate limit (max 5/min) trigger 429
+  let hitRateLimit = false;
+  for (let i = 0; i < 5; i++) {
+    const rateReq = new Request("https://nanomesh.local/api/auth/reset-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "CF-Connecting-IP": "198.51.100.42" },
+      body: JSON.stringify({
+        email: lockoutUserEmail,
+        code: "999999",
+        newPassword: "NewSecretPass123!"
+      })
+    });
+    const rateRes = await worker.fetch(rateReq, env, {} as any);
+    if (rateRes.status === 429) {
+      hitRateLimit = true;
+      break;
+    }
+  }
+  assert.ok(hitRateLimit, "Exceeding 5 requests/min per email must trigger 429 rate limit");
+  console.log("  ✓ Password reset email sliding window rate limiting triggers HTTP 429: PASSED");
+
+  // 19.2 Presigned Upload URL Bound Enforcement
+  const presignUserToken = await signJWT(
+    { userId: "usr_lockout_victim", role: "user", tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
+
+  // Negative or 0 fileSize must return 400
+  const invalidPresignReq = new Request("https://nanomesh.local/api/upload/presign", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${presignUserToken}`
+    },
+    body: JSON.stringify({
+      fileName: "test.png",
+      fileType: "image/png",
+      fileSize: 0,
+      sessionId: "sess_upload_01"
+    })
+  });
+  const invalidPresignRes = await worker.fetch(invalidPresignReq, env, {} as any);
+  assert.equal(invalidPresignRes.status, 400, "Zero or negative fileSize must return 400");
+
+  const validPresignReq = new Request("https://nanomesh.local/api/upload/presign", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${presignUserToken}`
+    },
+    body: JSON.stringify({
+      file_name: "test.png",
+      mime_type: "image/png",
+      file_size: 4096,
+      sessionId: "sess_upload_01"
+    })
+  });
+  const validPresignRes = await worker.fetch(validPresignReq, env, {} as any);
+  assert.equal(validPresignRes.status, 200, "Valid fileSize returns 200 presigned URL");
+  const validPresignJson = (await validPresignRes.json()) as any;
+  assert.ok(validPresignJson.uploadUrl, "Presigned payload must include uploadUrl");
+  console.log("  ✓ Presigned upload URL enforces positive integer fileSize bounds: PASSED");
+
+  // 19.3 Admin Node Update Enum Whitelist & Type Safety
+  const adminTestToken = await signJWT({ role: "admin" }, env.JWT_SECRET, 3600);
+  const testNodeId = "m_enum_test_node";
+  store.models.push({
+    model_id: testNodeId,
+    display_name: "Enum Test Model",
+    provider: "Testing",
+    endpoint: "https://api.example.com/v1",
+    modalities: '["text"]',
+    tags: '["#chat"]',
+    context_window: 4096,
+    max_concurrency: 10,
+    active_connections: 0,
+    precision: 0.8,
+    status: "active",
+    cost_per_1k_tokens: 0.0,
+    cost_per_invocation: 2.0,
+    auth_mode: "none",
+    api_format: "openai_compat",
+    inference_target: "cloud"
+  });
+
+  const updateEnumReq = new Request(`https://nanomesh.local/api/admin/models/${testNodeId}`, {
+    method: "PUT",
+    headers: adminReqHeaders,
+    body: JSON.stringify({
+      display_name: 12345, // Non-string to test type safety
+      auth_mode: "invalid_exploit_mode", // Invalid enum
+      api_format: "hacked_format" // Invalid enum
+    })
+  });
+  const updateEnumRes = await handleAdminUpdateNode(updateEnumReq, env, testNodeId);
+  assert.equal(updateEnumRes.status, 200, "Admin node update with non-string and invalid enums handled safely");
+  const nodeAfterUpdate = store.models.find((m) => m.model_id === testNodeId);
+  assert.equal(nodeAfterUpdate.auth_mode, "none", "Invalid auth_mode must be rejected and preserve existing value");
+  assert.equal(nodeAfterUpdate.api_format, "openai_compat", "Invalid api_format must be rejected and preserve existing value");
+  console.log("  ✓ Admin node update strictly validates enums and type guards strings: PASSED");
+
   console.log("\n==================================================");
-  console.log("   🎉 ALL 18 INTEGRATION SCENARIOS PASSED (100%)! ");
+  console.log("   🎉 ALL 19 INTEGRATION SCENARIOS PASSED (100%)! ");
   console.log("==================================================");
 }
 

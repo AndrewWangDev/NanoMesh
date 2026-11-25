@@ -2404,8 +2404,63 @@ async function runUnitTests() {
     "  ✓ Safety classifier differential fallback blocks hazards and permits degraded pass: PASSED"
   );
 
+  // -----------------------------------------------------------------------
+  // SUITE 20: SSRF IPv6 Colon Guard, Admin Enum Validation & Domain Extensions
+  // -----------------------------------------------------------------------
+  console.log("\n[Suite 20] SSRF IPv6 Colon Guard, Admin Enum Validation & Domain Extensions");
+
+  // 20.1 SSRF Filter: Public domains starting with 'fc' or 'fd' must NOT be false-flagged
+  assert.equal(
+    isSafeExternalUrl("https://fcm.googleapis.com/v1/projects"),
+    true,
+    "fcm.googleapis.com must be allowed as a valid external URL"
+  );
+  assert.equal(
+    isSafeExternalUrl("https://fdic.gov/about"),
+    true,
+    "fdic.gov must be allowed as a valid external URL"
+  );
+  assert.equal(
+    isSafeExternalUrl("https://fc-news.com/feed"),
+    true,
+    "fc-news.com must be allowed as a valid external URL"
+  );
+
+  // 20.2 SSRF Filter: Private IPv6 Unique Local (fc00::/7) and Link-Local (fe80::/10) must be blocked
+  assert.equal(
+    isSafeExternalUrl("http://[fc00::1]:8080/api"),
+    false,
+    "fc00::1 must be blocked as a private IPv6 unique local address"
+  );
+  assert.equal(
+    isSafeExternalUrl("http://[fd12:3456::1]/test"),
+    false,
+    "fd12::1 must be blocked as a private IPv6 unique local address"
+  );
+  assert.equal(
+    isSafeExternalUrl("http://[fe80::1]:8080/admin"),
+    false,
+    "fe80::1 must be blocked as a link-local IPv6 address"
+  );
+  assert.equal(
+    isSafeExternalUrl("http://[fe9a::5]/api"),
+    false,
+    "fe9a::5 must be blocked under fe80::/10 range"
+  );
+  console.log("  ✓ IPv6 private range filter strictly blocks ULA/link-local while allowing fc/fd domains: PASSED");
+
+  // 20.3 Email Domain Whitelist: proton.me allowed
+  assert.equal(isValidEmailDomain("user@proton.me"), true, "proton.me must be a valid email domain");
+  assert.equal(isValidEmailDomain("user@gmail.com"), true, "gmail.com must be a valid email domain");
+  assert.equal(
+    isValidEmailDomain("attacker@malicious-disposable-123.xyz"),
+    false,
+    "untrusted domain must be rejected"
+  );
+  console.log("  ✓ Email domain validator includes proton.me and rejects disposable domains: PASSED");
+
   console.log("\n==================================================");
-  console.log("   🎉 ALL 19 UNIT TEST SUITES PASSED (100%)!      ");
+  console.log("   🎉 ALL 20 UNIT TEST SUITES PASSED (100%)!      ");
   console.log("==================================================");
 }
 

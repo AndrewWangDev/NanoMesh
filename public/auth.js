@@ -809,7 +809,7 @@ document.addEventListener('DOMContentLoaded', () => {
         
         <div style="margin-bottom:1rem;">
           <label style="font-size:0.85rem; color:var(--text-secondary); display:block; margin-bottom:0.25rem;">${t('auth.email')}</label>
-          <input type="email" id="reset-email" class="input-field" style="width:100%; box-sizing:border-box;" placeholder="${t('auth.email')}" value="${document.getElementById('email')?.value || ''}">
+          <input type="email" id="reset-email" class="input-field" style="width:100%; box-sizing:border-box;" placeholder="${t('auth.email')}">
         </div>
 
         <div style="display:flex; gap:0.5rem; margin-bottom:1rem;">
@@ -829,6 +829,12 @@ document.addEventListener('DOMContentLoaded', () => {
       </div>
     `;
     document.body.appendChild(overlay);
+
+    const initialEmail = document.getElementById('email')?.value;
+    const resetEmailEl = overlay.querySelector('#reset-email');
+    if (resetEmailEl && initialEmail) {
+      resetEmailEl.value = initialEmail;
+    }
 
     overlay.querySelector('#btn-cancel-reset').onclick = () => overlay.remove();
 

@@ -231,7 +231,10 @@ export async function handleChat(
     return new Response(
       JSON.stringify({
         error: "orchestration_failed",
-        message: err.message || "Failed to orchestrate task"
+        message:
+          env.ENVIRONMENT === "production"
+            ? "Failed to orchestrate task"
+            : err.message || "Failed to orchestrate task"
       }),
       {
         status: 500,
@@ -240,36 +243,47 @@ export async function handleChat(
     );
   }
 
-  // 4. Dynamic billing alignment: pre-deduct 1 credit for cloud models, zero pre-deduction for WebGPU
+  // 4. Dynamic billing alignment: pre-deduct credits for cloud models, zero pre-deduction for WebGPU
   let hasReservedCredit = false;
+  let expectedCloudCost = 0;
   if (!dag.is_security_violation && !dag.is_unreachable) {
-    const hasAnyCloudNode = dag.nodes.some((n) => n.selected_model?.inference_target !== "browser");
+    const isFirstNodeWebGPU = dag.nodes[0]?.selected_model?.inference_target === "browser";
     const firstNodeHasCloudStandby = (dag.nodes[0]?.standby_models || []).some(
       (m) => m.inference_target !== "browser"
     );
     const clientSupportsWebGPU =
       body.capabilities?.webgpu_handover_v3 ?? !body.disableBrowserInference;
 
-    // We must reserve 1 credit if:
-    // 1) The first node is cloud/heavy, OR
-    // 2) Any downstream intermediate or tail node is cloud/heavy, OR
-    // 3) First node is browser but client cannot execute WebGPU handover (will fallback to cloud standby)
-    const requiresPreDeduction =
-      hasAnyCloudNode || (!clientSupportsWebGPU && firstNodeHasCloudStandby);
+    // Zero Pre-Deduction Law:
+    // If the first node is executed client-side via WebGPU, Phase 1 MUST NOT pre-deduct any credits!
+    if (!isFirstNodeWebGPU || !clientSupportsWebGPU) {
+      for (const n of dag.nodes) {
+        if (n.selected_model && n.selected_model.inference_target !== "browser") {
+          const nCost = Number(n.selected_model.cost_per_invocation) || 1;
+          expectedCloudCost += Math.max(1, Math.round(nCost));
+        } else if (clientSupportsWebGPU) {
+          // Reached a client WebGPU node, execution will handover here
+          break;
+        }
+      }
+      if (expectedCloudCost === 0 && firstNodeHasCloudStandby) {
+        expectedCloudCost = 1;
+      }
+    }
 
-    if (requiresPreDeduction) {
-      // Cloud / Multi-Node / Fallback execution: atomic reservation of 1 credit
+    if (expectedCloudCost > 0) {
+      // Cloud / Multi-Node / Fallback execution: atomic reservation of expected credits
       const reserveResult = await env.DB.prepare(
-        "UPDATE users SET credits = credits - 1 WHERE user_id = ? AND credits >= 1"
+        "UPDATE users SET credits = credits - ? WHERE user_id = ? AND credits >= ?"
       )
-        .bind(session.userId)
+        .bind(expectedCloudCost, session.userId, expectedCloudCost)
         .run();
 
       if (!reserveResult.meta.changes || reserveResult.meta.changes === 0) {
         return new Response(
           JSON.stringify({
             error: "insufficient_quota",
-            message: "可用积分不足或并发请求额度受限，请先充值额度。"
+            message: `可用积分不足，执行该工作流需预扣 ${expectedCloudCost} 积分，请先充值额度。`
           }),
           {
             status: 403,
@@ -286,6 +300,7 @@ export async function handleChat(
     const stream = await executeDAGStream(env, dag, envelope, {
       userId: session.userId,
       hasPreDeducted: hasReservedCredit,
+      preDeductedCredits: hasReservedCredit ? expectedCloudCost : 0,
       ctx,
       clientCapabilities: {
         webgpu_handover_v3: body.capabilities?.webgpu_handover_v3 ?? !body.disableBrowserInference
@@ -306,8 +321,8 @@ export async function handleChat(
     // Refund reserved credit if execution setup failed
     if (hasReservedCredit) {
       try {
-        await env.DB.prepare("UPDATE users SET credits = credits + 1 WHERE user_id = ?")
-          .bind(session.userId)
+        await env.DB.prepare("UPDATE users SET credits = credits + ? WHERE user_id = ?")
+          .bind(expectedCloudCost, session.userId)
           .run();
       } catch (refundErr) {
         console.error("[Chat] Failed to refund reserved credit on execution error:", refundErr);
@@ -316,7 +331,10 @@ export async function handleChat(
     return new Response(
       JSON.stringify({
         error: "execution_failed",
-        message: err.message || "Failed to execute task stream"
+        message:
+          env.ENVIRONMENT === "production"
+            ? "Failed to execute task stream"
+            : err.message || "Failed to execute task stream"
       }),
       {
         status: 500,
@@ -463,6 +481,19 @@ export async function handleChatContinue(
     );
   }
 
+  if (!body.envelope || claims.sid !== body.envelope.session_id) {
+    return new Response(
+      JSON.stringify({
+        error: "session_mismatch",
+        message: "接力令牌与当前会话不匹配，严禁跨会话接力。"
+      }),
+      {
+        status: 403,
+        headers: { "Content-Type": "application/json" }
+      }
+    );
+  }
+
   // Trigger lazy sweep for expired orphan records in background
   triggerLazyHandshakeSweep(env, ctx);
 
@@ -471,7 +502,7 @@ export async function handleChatContinue(
     ...(body.orchestration_options || {}),
     chosenTemplateId: claims.tid,
     chosenRoleModels: claims.mids || body.orchestration_options?.chosenRoleModels,
-    reRouteMode: "switch_model"
+    continuationMode: true
   };
 
   let dag;
@@ -482,7 +513,10 @@ export async function handleChatContinue(
     return new Response(
       JSON.stringify({
         error: "orchestration_failed",
-        message: err.message || "Failed to re-instantiate continuation pipeline"
+        message:
+          env.ENVIRONMENT === "production"
+            ? "Failed to re-instantiate continuation pipeline"
+            : err.message || "Failed to re-instantiate continuation pipeline"
       }),
       {
         status: 500,
@@ -543,12 +577,20 @@ export async function handleChatContinue(
 
   // 4. Two-Phase Commit (2PC) for Phase 2: credit reservation followed by atomic handshake transition
   let hasReservedCredit = false;
-  const nextExecutingNode = dag.nodes[startStepIndex];
-  if (nextExecutingNode.selected_model.inference_target !== "browser") {
+  const remainingNodes = dag.nodes.slice(startStepIndex);
+  let expectedContinueCost = 0;
+  for (const n of remainingNodes) {
+    if (n.selected_model && n.selected_model.inference_target !== "browser") {
+      const nCost = Number(n.selected_model.cost_per_invocation) || 1;
+      expectedContinueCost += Math.max(1, Math.round(nCost));
+    }
+  }
+
+  if (expectedContinueCost > 0) {
     const reserveResult = await env.DB.prepare(
-      "UPDATE users SET credits = credits - 1 WHERE user_id = ? AND credits >= 1"
+      "UPDATE users SET credits = credits - ? WHERE user_id = ? AND credits >= ?"
     )
-      .bind(session.userId)
+      .bind(expectedContinueCost, session.userId, expectedContinueCost)
       .run();
 
     if (!reserveResult.meta.changes || reserveResult.meta.changes === 0) {
@@ -556,7 +598,7 @@ export async function handleChatContinue(
       return new Response(
         JSON.stringify({
           error: "insufficient_quota",
-          message: "当前可用积分不足，无法执行后续云端任务，请先充值额度。"
+          message: `当前可用积分不足，执行后续云端任务需 ${expectedContinueCost} 积分，请先充值额度。`
         }),
         {
           status: 403,
@@ -581,8 +623,8 @@ export async function handleChatContinue(
   if (!casResult.meta.changes || casResult.meta.changes === 0) {
     // If CAS failed (concurrent replay attempt), roll back the reserved credit compensation
     if (hasReservedCredit) {
-      await env.DB.prepare("UPDATE users SET credits = credits + 1 WHERE user_id = ?")
-        .bind(session.userId)
+      await env.DB.prepare("UPDATE users SET credits = credits + ? WHERE user_id = ?")
+        .bind(expectedContinueCost, session.userId)
         .run();
       hasReservedCredit = false;
     }
@@ -603,6 +645,7 @@ export async function handleChatContinue(
     const stream = await executeDAGStream(env, dag, body.envelope, {
       userId: session.userId,
       hasPreDeducted: hasReservedCredit,
+      preDeductedCredits: hasReservedCredit ? expectedContinueCost : 0,
       startStepIndex,
       injectedUpstreamText,
       continuationHandshakeId: claims.jti,
@@ -621,8 +664,8 @@ export async function handleChatContinue(
     console.error("[ChatContinue] Stream execution error:", err);
     if (hasReservedCredit) {
       try {
-        await env.DB.prepare("UPDATE users SET credits = credits + 1 WHERE user_id = ?")
-          .bind(session.userId)
+        await env.DB.prepare("UPDATE users SET credits = credits + ? WHERE user_id = ?")
+          .bind(expectedContinueCost, session.userId)
           .run();
       } catch (refundErr) {
         console.error("[ChatContinue] Failed to refund reserved credit:", refundErr);
@@ -631,7 +674,10 @@ export async function handleChatContinue(
     return new Response(
       JSON.stringify({
         error: "execution_failed",
-        message: err.message || "Failed to execute continuation stream"
+        message:
+          env.ENVIRONMENT === "production"
+            ? "Failed to execute continuation stream"
+            : err.message || "Failed to execute continuation stream"
       }),
       {
         status: 500,
