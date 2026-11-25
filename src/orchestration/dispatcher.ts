@@ -1393,6 +1393,15 @@ export async function executeDAGStream(
               }
             }
 
+            // 2c. Worker heap safety guard: Combined multimodal payload limit
+            const combinedAssetsBytes =
+              (imageBytes ? imageBytes.byteLength : 0) + (audioBytes ? audioBytes.byteLength : 0);
+            if (combinedAssetsBytes > 25 * 1024 * 1024) {
+              throw new Error(
+                "当前节点认领的多模态资产合并体积超过 25MB 内存安全上限，已拒绝加载以防止 Worker 内存溢出。"
+              );
+            }
+
             // 3. Fail-fast check: if node requires image modality, valid image asset descriptor must be present
             const isImageNode =
               node.role.in_modalities.includes("image") ||

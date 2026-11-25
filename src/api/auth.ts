@@ -153,15 +153,19 @@ export async function handleRegister(req: Request, env: Env) {
     return Response.json({ error: "error.invalidCode" }, { status: 400 });
   }
 
-  if (activeCode.attempts >= 5) {
+  // Atomically increment attempts to prevent concurrency race conditions (anti-brute force CAS)
+  const updateRes = await env.DB.prepare(
+    "UPDATE verification_codes SET attempts = attempts + 1 WHERE id = ? AND attempts < 5"
+  )
+    .bind(activeCode.id)
+    .run();
+
+  if (!updateRes.meta.changes || updateRes.meta.changes === 0) {
     await env.DB.prepare("DELETE FROM verification_codes WHERE id = ?").bind(activeCode.id).run();
     return Response.json({ error: "error.codeLockedTooManyAttempts" }, { status: 400 });
   }
 
-  if (activeCode.code !== code) {
-    await env.DB.prepare("UPDATE verification_codes SET attempts = attempts + 1 WHERE id = ?")
-      .bind(activeCode.id)
-      .run();
+  if (activeCode.code !== code.trim()) {
     return Response.json({ error: "error.invalidCode" }, { status: 400 });
   }
 
@@ -686,21 +690,28 @@ async function handleOAuthCallback(
 
       // Track 2: User explicitly clicked "Bind" from Settings while logged in
       userId = activeUser.user_id;
+
+      // 1. Guard against duplicate provider binding on current user
+      const existingUserBinding = await env.DB.prepare(
+        "SELECT provider_id FROM user_oauth_bindings WHERE user_id = ? AND provider = ?"
+      )
+        .bind(userId, provider)
+        .first<{ provider_id: string }>();
+
+      if (existingUserBinding) {
+        return Response.redirect(`${env.FRONTEND_URL}/?error=oauth_already_bound#settings`);
+      }
+
+      // 2. Insert new binding record
       const bindResult = await env.DB.prepare(
         "INSERT OR IGNORE INTO user_oauth_bindings (user_id, provider, provider_id) VALUES (?, ?, ?)"
       )
         .bind(userId || "", provider, String(profile.id || ""))
         .run();
 
+      // 3. Guard against provider_id already bound by another user
       if (!bindResult.meta.changes || bindResult.meta.changes === 0) {
-        const conflict = await env.DB.prepare(
-          "SELECT user_id FROM user_oauth_bindings WHERE provider = ? AND provider_id = ?"
-        )
-          .bind(provider, String(profile.id || ""))
-          .first<{ user_id: string }>();
-        if (conflict && conflict.user_id !== userId) {
-          return Response.redirect(`${env.FRONTEND_URL}/?error=oauth_already_bound#settings`);
-        }
+        return Response.redirect(`${env.FRONTEND_URL}/?error=oauth_already_bound#settings`);
       }
 
       if (avatarToSet && !activeUser.avatar_url) {

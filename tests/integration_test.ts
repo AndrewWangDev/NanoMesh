@@ -64,7 +64,13 @@ const SCHEMA_CONSTRAINTS: Record<string, TableConstraint> = {
     uniqueKeys: [["email"], ["referral_code"], ["username"]],
     nocaseKeys: ["username", "email"]
   },
-  user_oauth_bindings: { primaryKey: "id", uniqueKeys: [["provider", "provider_id"]] },
+  user_oauth_bindings: {
+    primaryKey: "id",
+    uniqueKeys: [
+      ["provider", "provider_id"],
+      ["user_id", "provider"]
+    ]
+  },
   dag_handshakes: { primaryKey: "handshake_id" },
   dag_roles: { primaryKey: "role_id" },
   dag_templates: { primaryKey: "template_id" },
@@ -254,7 +260,13 @@ function createMockD1(store: TableStore) {
           // 8. SELECT * FROM user_oauth_bindings
           if (cleanSql.includes("FROM user_oauth_bindings")) {
             let res = [...store.user_oauth_bindings];
-            if (cleanSql.includes("WHERE user_id = ?")) {
+            if (cleanSql.includes("WHERE user_id = ? AND provider = ?")) {
+              res = res.filter((b) => b.user_id === boundArgs[0] && b.provider === boundArgs[1]);
+            } else if (cleanSql.includes("WHERE provider = ? AND provider_id = ?")) {
+              res = res.filter(
+                (b) => b.provider === boundArgs[0] && String(b.provider_id) === String(boundArgs[1])
+              );
+            } else if (cleanSql.includes("WHERE user_id = ?")) {
               res = res.filter((b) => b.user_id === boundArgs[0]);
             }
             return { results: res as any };
@@ -5842,6 +5854,198 @@ async function runIntegrationTests() {
   console.log(
     "  ✓ NM-21: Continuation multi-WebGPU handover break correctly isolates billing: PASSED"
   );
+
+  // 19.7 NM-01 handleRegister verification code atomic CAS brute force lockout & deletion
+  const regEmail = "cas_reg_brute_test@gmail.com";
+  store.verification_codes.push({
+    id: 99101,
+    email: regEmail,
+    code: "654321",
+    attempts: 0,
+    expires_at: new Date(Date.now() + 600000).toISOString()
+  });
+
+  const origFetchReg = globalThis.fetch;
+  try {
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const urlStr =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : (input as any).url;
+      if (urlStr.includes("turnstile")) {
+        return new Response(JSON.stringify({ success: true }), { status: 200 });
+      }
+      return origFetchReg(input, init);
+    };
+
+    // Send 5 incorrect attempts
+    for (let i = 1; i <= 5; i++) {
+      const failRegReq = new Request("https://nanomesh.local/api/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: `CasUser${i}`,
+          email: regEmail,
+          password: "Password123!",
+          code: "000000",
+          turnstile_token: "mock_token"
+        })
+      });
+      const failRes = await worker.fetch(failRegReq, env, {} as any);
+      assert.equal(failRes.status, 400, `Attempt ${i} must return 400`);
+      const body = (await failRes.json()) as any;
+      assert.equal(body.error, "error.invalidCode", `Attempt ${i} must report invalidCode`);
+    }
+
+    // 6th attempt: CAS attempts < 5 condition fails, must trigger lockout and delete code
+    const sixthRegReq = new Request("https://nanomesh.local/api/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: "CasUserLock",
+        email: regEmail,
+        password: "Password123!",
+        code: "654321",
+        turnstile_token: "mock_token"
+      })
+    });
+    const sixthRes = await worker.fetch(sixthRegReq, env, {} as any);
+    assert.equal(sixthRes.status, 400, "Exhausted code must return 400");
+    const sixthBody = (await sixthRes.json()) as any;
+    assert.equal(
+      sixthBody.error,
+      "error.codeLockedTooManyAttempts",
+      "Must return error.codeLockedTooManyAttempts"
+    );
+    const codeLeft = store.verification_codes.find((c) => c.email === regEmail);
+    assert.equal(codeLeft, undefined, "Verification code must be purged upon reaching 5 attempts");
+    console.log("  ✓ NM-01: handleRegister atomic CAS anti-brute force lockout & deletion: PASSED");
+  } finally {
+    globalThis.fetch = origFetchReg;
+  }
+
+  // 19.8 NM-02 handleOAuthCallback duplicate provider & foreign conflict intercept
+  const oauthTestUserId = "user_oauth_bind_tester";
+  store.users.push({
+    user_id: oauthTestUserId,
+    username: "oauth_binder",
+    email: "oauth_binder@gmail.com",
+    avatar_url: null,
+    credits: 100
+  });
+  store.user_oauth_bindings.push({
+    id: "bind_orig_gh",
+    user_id: oauthTestUserId,
+    provider: "github",
+    provider_id: "gh_1001"
+  });
+
+  const origFetchOauthBind = globalThis.fetch;
+  try {
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const urlStr =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : (input as any).url;
+      if (urlStr.includes("token")) {
+        return new Response(JSON.stringify({ access_token: "mock_token" }), { status: 200 });
+      }
+      if (urlStr.includes("userinfo")) {
+        return new Response(
+          JSON.stringify({ id: "go_9999", email: "oauth_other@gmail.com", verified_email: true }),
+          {
+            status: 200
+          }
+        );
+      }
+      if (urlStr.includes("api.github.com/user/emails")) {
+        return new Response(
+          JSON.stringify([{ email: "oauth_binder@gmail.com", primary: true, verified: true }]),
+          { status: 200 }
+        );
+      }
+      if (urlStr.includes("api.github.com/user")) {
+        return new Response(JSON.stringify({ id: 2002, login: "new_gh_acc" }), { status: 200 });
+      }
+      return origFetchOauthBind(input, init);
+    };
+
+    // User attempts to bind a second GitHub account (different ID: 2002) while already having github bound
+    const bindStateToken = await signJWT(
+      { nonce: "nonce_gh_bind_1", userId: oauthTestUserId, action: "bind" },
+      env.JWT_SECRET,
+      600
+    );
+    const sessionToken = await signJWT(
+      { userId: oauthTestUserId, role: "user", tokenVersion: 1 },
+      env.JWT_SECRET,
+      3600
+    );
+
+    const dupProviderReq = new Request(
+      `https://nanomesh.local/api/auth/callback/github?code=mock_code&state=${bindStateToken}`,
+      {
+        headers: {
+          Cookie: `session=${sessionToken}`
+        }
+      }
+    );
+    const dupRes = await worker.fetch(dupProviderReq, env, {} as any);
+    assert.equal(dupRes.status, 302, "Duplicate provider bind must return 302 redirect");
+    assert.ok(
+      (dupRes.headers.get("Location") || "").includes("error=oauth_already_bound#settings"),
+      "Must redirect with error=oauth_already_bound#settings"
+    );
+
+    // Another user tries to bind google account when they already have google bound
+    const otherUserId = "user_oauth_other";
+    store.users.push({
+      user_id: otherUserId,
+      username: "oauth_other",
+      email: "oauth_other@gmail.com",
+      avatar_url: null,
+      credits: 100
+    });
+    store.user_oauth_bindings.push({
+      id: "bind_foreign_gh",
+      user_id: otherUserId,
+      provider: "google",
+      provider_id: "go_9999"
+    });
+    const bindStateGoogle = await signJWT(
+      { nonce: "nonce_go_bind_2", userId: otherUserId, action: "bind" },
+      env.JWT_SECRET,
+      600
+    );
+    const sessionTokenOther = await signJWT(
+      { userId: otherUserId, role: "user", tokenVersion: 1 },
+      env.JWT_SECRET,
+      3600
+    );
+    const dupGoogleReq = new Request(
+      `https://nanomesh.local/api/auth/callback/google?code=mock_code&state=${bindStateGoogle}`,
+      {
+        headers: {
+          Cookie: `session=${sessionTokenOther}`
+        }
+      }
+    );
+    const dupGoogleRes = await worker.fetch(dupGoogleReq, env, {} as any);
+    assert.equal(dupGoogleRes.status, 302, "Must return 302 redirect");
+    assert.ok(
+      (dupGoogleRes.headers.get("Location") || "").includes("error=oauth_already_bound#settings"),
+      "Must redirect with error=oauth_already_bound#settings"
+    );
+    console.log(
+      "  ✓ NM-02: OAuth callback bind duplicate provider & foreign conflict intercepted: PASSED"
+    );
+  } finally {
+    globalThis.fetch = origFetchOauthBind;
+  }
 
   console.log("\n==================================================");
   console.log("   🎉 ALL 19 INTEGRATION SCENARIOS PASSED (100%)! ");
