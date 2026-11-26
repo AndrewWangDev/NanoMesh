@@ -8,21 +8,65 @@ import {
 } from "./signature";
 import {
   ArtifactBundle,
+  AssetDescriptor,
   InstantiatedDAG,
+  InstantiatedDAGNode,
   MediaArtifact,
   ModelMetadata,
+  PerceptualCacheEntry,
+  PerceptualTaskScope,
   UnifiedProtocolEnvelope
 } from "./types";
 import { signHeavyNodeToken, signJWT } from "../auth/jwt";
 import { checkAndNotifyLowBalance } from "../api/notifications";
+import { buildPublicSessionSnapshot, VerifyAssetAccessResult } from "../api/session";
 
 export interface ExecutionOptions {
   userId: string;
+  sessionId?: string;
   hasPreDeducted?: boolean;
   preDeductedCredits?: number;
   startStepIndex?: number;
   injectedUpstreamText?: string;
   continuationHandshakeId?: string;
+  billingPhaseLabel?: string;
+  runId?: string;
+  planHash?: string;
+  stepOutputs?: Record<string, string>;
+  verifyAssetAccess?: (asset: AssetDescriptor) => Promise<boolean | VerifyAssetAccessResult>;
+  onStepOutputsPersist?: (outputs: Record<string, string>) => Promise<void>;
+  onIssueBrowserTailToken?: () => Promise<string>;
+  onRegisterStagingAsset?: (info: {
+    assetId: string;
+    modality: "image" | "audio";
+    mimeType: string;
+    r2Key: string;
+    fileSize?: number;
+  }) => Promise<void>;
+  onSettlePhaseBilling?: (params: {
+    phase: string;
+    actualCost: number;
+    reservedCredits: number;
+    detailLabel?: string;
+  }) => Promise<boolean>;
+  onSaveCloudTailResult?: (payload: {
+    finalOutput: string;
+    generatedMedia: MediaArtifact[];
+    perceptualCacheUpdates: PerceptualCacheEntry[];
+  }) => Promise<{ ok: boolean; tailResultHash?: string }>;
+  onCompleteStateCommit?: (payload: {
+    finalOutput: string;
+    perceptualCacheUpdates: PerceptualCacheEntry[];
+    generatedMedia: MediaArtifact[];
+    dag: InstantiatedDAG;
+  }) => Promise<any>;
+  onMarkAwaitingCommit?: () => Promise<void>;
+  onFinishWithoutCommit?: (params: {
+    outcome: "FAILED" | "ABORTED";
+    failureStatus?: number | null;
+    failureCode?: string | null;
+    failureMessage?: string | null;
+  }) => Promise<void>;
   ctx?: ExecutionContext;
   clientCapabilities?: {
     webgpu_handover_v3?: boolean;
@@ -66,6 +110,36 @@ async function computeSha256Hex(data: string): Promise<string> {
   return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+async function computeSha256BytesHex(buffer: ArrayBuffer): Promise<string> {
+  const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Bounded async worker pool to keep parallel R2 fetches and vision/audio invocations capped per session.
+ */
+async function runWithConcurrencyLimit<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const cap = Math.max(1, Math.min(limit, items.length || 1));
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+
+  async function runWorker() {
+    while (true) {
+      const myIdx = cursor++;
+      if (myIdx >= items.length) break;
+      results[myIdx] = await worker(items[myIdx], myIdx);
+    }
+  }
+
+  await Promise.all(Array.from({ length: cap }, () => runWorker()));
+  return results;
+}
+
 function isPrivateIPv4Octets(o1: number, o2: number): boolean {
   if (o1 === 10 || o1 === 127 || (o1 === 169 && o2 === 254)) return true;
   if (o1 === 172 && o2 >= 16 && o2 <= 31) return true;
@@ -75,10 +149,14 @@ function isPrivateIPv4Octets(o1: number, o2: number): boolean {
   return false;
 }
 
-export function isSafeExternalUrl(urlStr: string): boolean {
+export function isSafeExternalUrl(urlStr: string, requireHttps: boolean = false): boolean {
   try {
     const parsed = new URL(urlStr);
-    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+    if (requireHttps) {
+      if (parsed.protocol !== "https:") return false;
+    } else if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      return false;
+    }
 
     // Disallow embedded user credentials (e.g. http://user:pass@evil.com)
     if (parsed.username || parsed.password) return false;
@@ -164,6 +242,61 @@ export function isSafeExternalUrl(urlStr: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Safely decodes a base64 image string with size capping, exception handling,
+ * and magic bytes verification (PNG/JPEG/GIF/WebP) to prevent OOM and corrupt R2 writes (NM-AUD-08).
+ */
+export function decodeBase64ImageWithGuard(
+  b64Str: string,
+  maxDecodedBytes: number = 15 * 1024 * 1024
+): ArrayBuffer {
+  if (typeof b64Str !== "string" || !b64Str.trim()) {
+    throw new Error("空或非法的图像 Base64 数据");
+  }
+  const cleanB64 = b64Str.includes("base64,") ? b64Str.split("base64,")[1].trim() : b64Str.trim();
+  const maxB64Len = Math.ceil((maxDecodedBytes * 4) / 3) + 64;
+  if (cleanB64.length > maxB64Len) {
+    throw new Error(`图像 Base64 数据体积超出 ${Math.round(maxDecodedBytes / 1048576)}MB 安全上限`);
+  }
+
+  let binStr: string;
+  try {
+    binStr = atob(cleanB64);
+  } catch {
+    throw new Error("图像 Base64 解码失败：格式损坏");
+  }
+
+  const len = binStr.length;
+  if (len === 0 || len > maxDecodedBytes) {
+    throw new Error(`解码后图像大小异常 (${len} bytes)`);
+  }
+
+  const u8 = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    u8[i] = binStr.charCodeAt(i);
+  }
+
+  const isPng = len >= 4 && u8[0] === 0x89 && u8[1] === 0x50 && u8[2] === 0x4e && u8[3] === 0x47;
+  const isJpeg = len >= 3 && u8[0] === 0xff && u8[1] === 0xd8 && u8[2] === 0xff;
+  const isGif = len >= 4 && u8[0] === 0x47 && u8[1] === 0x49 && u8[2] === 0x46 && u8[3] === 0x38;
+  const isWebp =
+    len >= 12 &&
+    u8[0] === 0x52 &&
+    u8[1] === 0x49 &&
+    u8[2] === 0x46 &&
+    u8[3] === 0x46 &&
+    u8[8] === 0x57 &&
+    u8[9] === 0x45 &&
+    u8[10] === 0x42 &&
+    u8[11] === 0x50;
+
+  if (!isPng && !isJpeg && !isGif && !isWebp) {
+    throw new Error("安全拦截：解码后的图像二进制魔数不属于受支持的图片格式 (PNG/JPEG/GIF/WebP)");
+  }
+
+  return u8.buffer as ArrayBuffer;
 }
 
 export function sanitizeLLMOutput(text: string): string {
@@ -694,6 +827,7 @@ export async function executeDAGStream(
   const abortController = new AbortController();
   let heartbeatTimer: any = null;
   let isStreamCancelled = false;
+  let isStreamSettledOrHandedOver = false;
   let hasEmittedTokens = false;
   let isLedgerSettled = false;
   let totalCost = 0;
@@ -744,6 +878,8 @@ export async function executeDAGStream(
         if (startIdx === 0) {
           // 1. Send DAG Plan & Reasoning Trace to frontend
           sendEvent("dag_plan", {
+            run_id: options.runId,
+            topology_mode: dag.topology_mode || "standard",
             template: {
               template_id: dag.template.template_id,
               name_zh: dag.template.name_zh,
@@ -756,9 +892,21 @@ export async function executeDAGStream(
               name_en: t.name_en
             })),
             nodes: dag.nodes.map((n) => ({
+              node_id: n.node_id || n.role.role_id,
               role_id: n.role.role_id,
               name_zh: n.role.name_zh,
               name_en: n.role.name_en,
+              stage_group: n.stage_group,
+              depends_on: n.depends_on,
+              parallel_group: n.parallel_group,
+              is_reducer: !!n.is_reducer,
+              perceptual_cache_hit: !!n.perceptual_cache_hit,
+              bound_assets: (n.claimed_assets || []).map((a) => ({
+                asset_id: a.asset_id,
+                filename: a.filename || a.asset_id,
+                modality: a.modality,
+                bind_mode: a.bind_mode || "RAW_MEDIA"
+              })),
               in_degree: n.role.in_degree,
               out_degree: n.role.out_degree,
               in_modalities: n.role.in_modalities,
@@ -785,7 +933,9 @@ export async function executeDAGStream(
             })),
             reasoning_trace: dag.reasoning_trace,
             is_security_violation: dag.is_security_violation,
-            is_unreachable: dag.is_unreachable
+            is_unreachable: dag.is_unreachable,
+            is_clarification_required: dag.is_clarification_required,
+            clarification: dag.clarification
           });
         } else {
           // Resumed DAG from client-side WebGPU handover
@@ -793,6 +943,7 @@ export async function executeDAGStream(
             resumed_step: startIdx,
             handshake_id: options.continuationHandshakeId,
             nodes: dag.nodes.map((n) => ({
+              node_id: n.node_id || n.role.role_id,
               role_id: n.role.role_id,
               name_zh: n.role.name_zh,
               name_en: n.role.name_en,
@@ -808,6 +959,15 @@ export async function executeDAGStream(
         // Fail-fast gateways for security policy violations or out-of-bounds capabilities
         if (dag.is_security_violation) {
           await refundReservedCredit();
+          if (options.onFinishWithoutCommit) {
+            await options.onFinishWithoutCommit({
+              outcome: "ABORTED",
+              failureStatus: 403,
+              failureCode: "security_blocked",
+              failureMessage: "安全网关审计拦截，未消耗算力点数。"
+            });
+          }
+          isStreamSettledOrHandedOver = true;
           sendEvent("security_blocked", {
             is_blocked: true,
             duration_ms: Date.now() - startTime,
@@ -828,6 +988,15 @@ export async function executeDAGStream(
 
         if (dag.is_unreachable) {
           await refundReservedCredit();
+          if (options.onFinishWithoutCommit) {
+            await options.onFinishWithoutCommit({
+              outcome: "ABORTED",
+              failureStatus: 400,
+              failureCode: "capability_unreachable",
+              failureMessage: "未检索到胜任该业务意图的编排链路，未消耗算力点数。"
+            });
+          }
+          isStreamSettledOrHandedOver = true;
           sendEvent("capability_unreachable", {
             is_unreachable: true,
             duration_ms: Date.now() - startTime,
@@ -846,6 +1015,30 @@ export async function executeDAGStream(
           return;
         }
 
+        if (dag.is_clarification_required && dag.clarification) {
+          await refundReservedCredit();
+          if (options.onFinishWithoutCommit) {
+            await options.onFinishWithoutCommit({
+              outcome: "ABORTED",
+              failureStatus: 409,
+              failureCode: "clarification_required",
+              failureMessage: "需要用户澄清目标分支。"
+            });
+          }
+          isStreamSettledOrHandedOver = true;
+          sendEvent("clarification_required", {
+            ...dag.clarification,
+            reasoning_trace: dag.reasoning_trace
+          });
+          sendEvent("dag_complete", {
+            final_output: "",
+            total_cost: 0,
+            total_duration_ms: Date.now() - startTime,
+            is_clarification_required: true
+          });
+          return;
+        }
+
         // Deep clone assets manifest for this DAG run so that node-level consumption is isolated
         const runEnvelope: UnifiedProtocolEnvelope = {
           ...envelope,
@@ -858,31 +1051,315 @@ export async function executeDAGStream(
           inherited_assets: [...runEnvelope.assets_manifest]
         };
 
-        // 2. Loop through each node sequentially
-        for (let idx = startIdx; idx < dag.nodes.length; idx++) {
-          const node = dag.nodes[idx];
-          const parentNode = idx > 0 ? dag.nodes[idx - 1] : undefined;
+        const nodeOutputs = new Map<
+          string,
+          { text: string; node: InstantiatedDAGNode; model: ModelMetadata }
+        >();
+        if (options.stepOutputs) {
+          for (const [storedNodeId, storedText] of Object.entries(options.stepOutputs)) {
+            const matchedNode = dag.nodes.find(
+              (n) => (n.node_id || n.role.role_id) === storedNodeId
+            );
+            if (matchedNode && typeof storedText === "string" && storedText.trim()) {
+              nodeOutputs.set(storedNodeId, {
+                text: storedText,
+                node: matchedNode,
+                model: matchedNode.selected_model
+              });
+            }
+          }
+        }
+        const perceptualCacheUpdates: PerceptualCacheEntry[] = [];
+
+        let tailDispatchedToBrowser = false;
+        const billingPhaseKey =
+          options.billingPhaseLabel ||
+          (options.continuationHandshakeId
+            ? `resume_${options.continuationHandshakeId}`
+            : "initial_stream");
+
+        async function settlePhaseCreditsBeforeHandover(stepIdx: number) {
+          const reservedCredits = options.hasPreDeducted ? (options.preDeductedCredits ?? 1) : 0;
+          if (!options.hasPreDeducted && totalCost === 0) return;
+
+          if (options.onSettlePhaseBilling) {
+            const settled = await options.onSettlePhaseBilling({
+              phase: billingPhaseKey,
+              actualCost: totalCost,
+              reservedCredits,
+              detailLabel: `阶段结算: ${dag.template.name_zh} (步骤 ${stepIdx})`
+            });
+            if (settled) {
+              isLedgerSettled = true;
+              options.hasPreDeducted = false;
+              triggerLowBalanceCheckAsync(env, options.userId, options.ctx);
+            }
+            return;
+          }
+
+          if (!options.hasPreDeducted) return;
+          if (totalCost === 0) {
+            await refundReservedCredit();
+            return;
+          }
+          const refundDelta = reservedCredits - totalCost;
+          const ledgerId = crypto.randomUUID();
+          const statements = [];
+          if (refundDelta > 0) {
+            statements.push(
+              env.DB.prepare("UPDATE users SET credits = credits + ? WHERE user_id = ?").bind(
+                refundDelta,
+                options.userId
+              )
+            );
+          } else if (refundDelta < 0) {
+            const remainingCost = Math.abs(refundDelta);
+            statements.push(
+              env.DB.prepare(
+                "UPDATE users SET credits = MAX(0, credits - ?) WHERE user_id = ?"
+              ).bind(remainingCost, options.userId)
+            );
+          }
+          statements.push(
+            env.DB.prepare(
+              `INSERT INTO credit_ledger 
+               (ledger_id, user_id, category, amount, balance, title, detail, created_at)
+               VALUES (?, ?, 'compute_cost', ?, (SELECT credits FROM users WHERE user_id = ?), 'DAG智能编排调用', ?, datetime('now'))`
+            ).bind(
+              ledgerId,
+              options.userId,
+              -totalCost,
+              options.userId,
+              `阶段结算: ${dag.template.name_zh} (步骤 ${stepIdx})`
+            )
+          );
+          await env.DB.batch(statements);
+          isLedgerSettled = true;
+          options.hasPreDeducted = false;
+          triggerLowBalanceCheckAsync(env, options.userId, options.ctx);
+        }
+
+        async function issueHandoverCredentials(nextStepIdx: number): Promise<{
+          handshakeId: string;
+          continuationToken: string;
+        }> {
+          if (options.onStepOutputsPersist) {
+            const serialized: Record<string, string> = {};
+            for (const [k, v] of nodeOutputs.entries()) {
+              serialized[k] = v.text;
+            }
+            await options.onStepOutputsPersist(serialized);
+          }
+
+          const handshakeId = crypto.randomUUID();
+          const expiresAt = new Date(Date.now() + 300 * 1000).toISOString();
+          await env.DB.prepare(
+            `INSERT INTO dag_handshakes 
+             (handshake_id, user_id, session_id, template_id, next_step, status, expires_at)
+             VALUES (?, ?, ?, ?, ?, 'ISSUED', ?)`
+          )
+            .bind(
+              handshakeId,
+              options.userId,
+              envelope.session_id,
+              dag.template.template_id,
+              nextStepIdx,
+              expiresAt
+            )
+            .run();
+
+          const arbitratedRoleModels: Record<string, string> = {};
+          dag.nodes.forEach((n) => {
+            if (n.role?.role_id && n.selected_model?.model_id) {
+              arbitratedRoleModels[n.role.role_id] = n.selected_model.model_id;
+            }
+          });
+
+          const continuationToken = await signJWT(
+            {
+              jti: handshakeId,
+              sub: options.userId,
+              sid: envelope.session_id,
+              tid: dag.template.template_id,
+              nxt: nextStepIdx,
+              mids: arbitratedRoleModels,
+              ...(options.runId ? { rid: options.runId } : {}),
+              ...(options.planHash ? { ph: options.planHash } : {})
+            },
+            env.JWT_SECRET,
+            300
+          );
+          return { handshakeId, continuationToken };
+        }
+
+        async function assertAssetAuthorized(asset: AssetDescriptor): Promise<void> {
+          if (!asset.r2_key && !options.verifyAssetAccess) return;
+          if (asset.r2_key) {
+            const userSafePrefix = `tmp/${options.userId || envelope.user_id || "anonymous"}/`;
+            if (!asset.r2_key.startsWith(userSafePrefix)) {
+              console.error(
+                `[Security IDOR] User ${options.userId} attempted to access unauthorized R2 key: ${asset.r2_key}`
+              );
+              throw new Error(`安全违规：拒绝访问未经授权的资产对象`);
+            }
+          }
+          if (options.verifyAssetAccess) {
+            const res = await options.verifyAssetAccess(asset);
+            const status =
+              typeof res === "boolean" ? (res ? "allowed" : "denied_unowned") : res.status;
+            if (status === "storage_unavailable") {
+              throw new Error("资产权属校验存储服务不可用，请稍后重试。");
+            }
+            if (status !== "allowed") {
+              console.error(
+                `[Security BOLA] Cross-session R2 access blocked for user=${options.userId} session=${envelope.session_id} key=${asset.r2_key}`
+              );
+              throw new Error(`安全违规：禁止跨会话读取未提交资产对象`);
+            }
+          }
+        }
+
+        async function fetchAuthorizedR2MediaBytes(
+          asset: AssetDescriptor | undefined,
+          label: string,
+          maxBytes: number
+        ): Promise<Uint8Array | null> {
+          if (!asset?.r2_key || !env.R2) return null;
+          await assertAssetAuthorized(asset);
+          try {
+            const r2Obj = await env.R2.get(asset.r2_key);
+            if (!r2Obj) {
+              console.error(
+                `[Dispatcher] ${label} object not found in R2 for key: ${asset.r2_key}`
+              );
+              return null;
+            }
+            const buf = await r2Obj.arrayBuffer();
+            if (buf.byteLength > maxBytes) {
+              const limitMb = Math.round(maxBytes / (1024 * 1024));
+              throw new Error(
+                `${label}资产体积超过 ${limitMb}MB 内存安全上限，已拒绝加载以防止 Worker 内存溢出。`
+              );
+            }
+            return new Uint8Array(buf);
+          } catch (r2Err: any) {
+            if (String(r2Err?.message || "").includes("安全")) throw r2Err;
+            console.error(`[Dispatcher] R2 ${label} retrieval error:`, r2Err);
+            return null;
+          }
+        }
+
+        async function executeSingleDagNode(
+          node: InstantiatedDAGNode,
+          idx: number,
+          isParallelMember: boolean,
+          stepUpstreamOutput: string
+        ): Promise<{ output: string; handedOver?: boolean }> {
+          const nodeId = node.node_id || node.role.role_id;
+          const parentNode =
+            node.stage_group === "evidence_prep"
+              ? undefined
+              : idx > 0
+                ? dag.nodes[idx - 1]
+                : undefined;
           const parentRoleName = parentNode ? parentNode.role.name_zh : undefined;
           const nodeStartTime = Date.now();
+
+          // Fast path A: L1 Perceptual Cache Hit / Deterministic Document Reader in Evidence Prep
+          if (node.perceptual_cache_hit && !node.is_reducer) {
+            const cachedStr = node.cached_output || "";
+            sendEvent("node_start", {
+              node_id: nodeId,
+              role_id: node.role.role_id,
+              role_name: node.role.name_zh,
+              role_name_en: node.role.name_en,
+              node_index: idx,
+              model_name: node.selected_model.display_name,
+              model_id: node.selected_model.model_id,
+              inference_target: node.selected_model.inference_target || "cloud",
+              exec_mode: "cached",
+              claimed_assets_count: (node.claimed_assets || []).length
+            });
+            sendEvent("node_complete", {
+              node_id: nodeId,
+              role_id: node.role.role_id,
+              role_name: node.role.name_zh,
+              role_name_en: node.role.name_en,
+              model_id: node.selected_model.model_id,
+              node_index: idx,
+              duration_ms: 0,
+              cache_hit: true,
+              cost: 0
+            });
+            nodeOutputs.set(nodeId, { text: cachedStr, node, model: node.selected_model });
+            return { output: cachedStr, handedOver: false };
+          }
+
+          // Fast path B: Deterministic Evidence Reducer / Doc Reader node
+          if (node.is_reducer) {
+            sendEvent("node_start", {
+              node_id: nodeId,
+              role_id: node.role.role_id,
+              role_name: node.role.name_zh,
+              role_name_en: node.role.name_en,
+              node_index: idx,
+              model_name: node.selected_model.display_name,
+              model_id: node.selected_model.model_id,
+              inference_target: "cloud",
+              exec_mode: node.stage_group === "evidence_prep" ? "cached" : "reducer",
+              claimed_assets_count: (node.claimed_assets || []).length
+            });
+            let reducedText = node.cached_output || "";
+            if (node.stage_group === "reducer_merge") {
+              const depIds = node.depends_on || [];
+              const evidenceBlocks: string[] = [];
+              let evIdx = 1;
+              for (const depId of depIds) {
+                const depOut = nodeOutputs.get(depId);
+                if (!depOut || !depOut.text || !depOut.text.trim()) {
+                  throw new Error(
+                    `多源证据归约失败：必需前置节点 [${depId}] 缺失有效输出，已中止后续执行以防止缺漏输入交付。`
+                  );
+                }
+                const bound = depOut.node.claimed_assets?.[0];
+                const label = bound
+                  ? `[证据 #${evIdx} | 文件: ${bound.filename || bound.asset_id} | 模态: ${bound.modality} | 来源: ${bound.origin === "generated" ? "AI生成产物" : "用户上传"} (分支: ${bound.branch_id || "当前"})]`
+                  : `[证据 #${evIdx} | 来源节点: ${depOut.node.role.name_zh}]`;
+                evidenceBlocks.push(`${label}\n${depOut.text.trim()}`);
+                evIdx++;
+              }
+              reducedText = evidenceBlocks.join("\n\n");
+            }
+            sendEvent("node_complete", {
+              node_id: nodeId,
+              role_id: node.role.role_id,
+              role_name: node.role.name_zh,
+              role_name_en: node.role.name_en,
+              model_id: node.selected_model.model_id,
+              node_index: idx,
+              duration_ms: Date.now() - nodeStartTime,
+              cache_hit: !!node.perceptual_cache_hit,
+              cost: 0
+            });
+            nodeOutputs.set(nodeId, { text: reducedText, node, model: node.selected_model });
+            return { output: reducedText, handedOver: false };
+          }
 
           // Envelope slicing with instruction masking and downstream metadata
           const nodeCtx = sliceEnvelopeForNode(
             node,
             runEnvelope,
-            upstreamOutput,
+            stepUpstreamOutput,
             parentRoleName,
             currentBundle
           );
 
-          // 1. Prompt Assembly based on Role Responsibility
+          // 1. Prompt Assembly based on Role Responsibility & Structured Context Channel
           let systemPrompt = "";
           let promptContent = "";
           let initialUserDirective = envelope.instruction_payload;
           let currentStepDirective = "";
 
-          // Extract attached text/document content from claimed assets if present
-          // Generative media guard: if this node is a generative media node (e.g. image/audio generation tail),
-          // strictly isolate attached raw documents to prevent prompt dilution and context length overflow.
           const isGenerativeMediaNode =
             node.role.out_modalities?.some((m) => m === "image" || m === "audio") ||
             node.selected_model.out_modalities?.some((m) => m === "image" || m === "audio");
@@ -906,29 +1383,45 @@ export async function executeDAGStream(
             }
           }
 
-          // Check if this run is an incremental refinement on previous round output (ANCHOR_TAIL)
+          // Consume structured inherited_context_slices uniformly across all 5 states;
+          // fall back safely if a caller sent legacy "[上轮产物背景: ...]" prefix.
+          const inheritedSlices = dag.reasoning_trace?.inherited_context_slices || [];
           let isIncrementalRefinement = false;
           let refinementBackground = "";
           let refinementUserQuery = envelope.instruction_payload;
 
-          const bgMatch = envelope.instruction_payload.match(
-            /^\[上轮产物背景:\s*([\s\S]*?)\]\n(?:用户追问|用户指令):\s*([\s\S]*)$/
-          );
-          if (bgMatch) {
+          if (inheritedSlices.length > 0) {
             isIncrementalRefinement = true;
-            refinementBackground = bgMatch[1].trim();
-            refinementUserQuery = bgMatch[2].trim();
+            refinementBackground = inheritedSlices
+              .map(
+                (s) =>
+                  `[${s.relation === "evidence" ? "参考分支" : s.relation === "recalled" ? "召回分支" : "当前分支"}: ${s.topic} (${s.branch_id})]\n${s.summary}`
+              )
+              .join("\n\n");
+          } else {
+            const bgMatch = envelope.instruction_payload.match(
+              /^\[上轮产物背景:\s*([\s\S]*?)\]\n(?:用户追问|用户指令):\s*([\s\S]*)$/
+            );
+            if (bgMatch) {
+              isIncrementalRefinement = true;
+              refinementBackground = bgMatch[1].trim();
+              refinementUserQuery = bgMatch[2].trim();
+            }
           }
 
           if (nodeCtx.is_head_masked) {
             // Case A: Head Node (in_degree === 0 && out_degree > 0)
             // Strictly MASK user prompt! Pure physical/perceptual feature extraction!
+            const assetModality = nodeCtx.claimed_assets[0]?.modality || "image";
             systemPrompt =
               `You are NanoMesh Worker Role: ${node.role.name_zh}.\n` +
               (nodeCtx.compensation_prompt ||
-                `请对输入的图像或多模态数据进行全要素解析与无损特征提取：逐字逐行提取所有可见文字内容（包括标题、正文、微小注释、Logo文字），客观分析画面排版布局、构图与设计风格。保持客观客观，严禁进行翻译、二次创作或格式删减。`);
+                `请对输入的图像或多模态数据进行全要素解析与无损特征提取：逐字逐行提取所有可见文字内容（包括标题、正文、微小注释、Logo文字），客观分析画面排版布局、构图与设计风格。保持客观，严禁进行翻译、二次创作或格式删减。`);
 
-            promptContent = `请对输入的图像进行全要素解析与无损特征提取：逐字逐行提取所有文字内容与排版风格细节。\nDescribe all text, visual elements, layout, and details in this image in detail.`;
+            promptContent =
+              assetModality === "audio"
+                ? `请对输入的音频进行精准无损语音转写，保留全部关键信息、说话人偏好与细节事实。`
+                : `请对输入的图像进行全要素解析与无损特征提取：逐字逐行提取所有文字内容与排版风格细节。\nDescribe all text, visual elements, layout, and details in this image in detail.`;
             if (nodeCtx.custom_prompt) {
               promptContent += `\n\n[User Custom Directive]:\n${nodeCtx.custom_prompt}`;
             }
@@ -972,14 +1465,14 @@ export async function executeDAGStream(
               refinementBackground &&
               !upstreamSections.includes(refinementBackground)
             ) {
-              promptContent += `\n\n【历史背景补充】\n${refinementBackground}`;
+              promptContent += `\n\n【跨轮/跨分支历史背景补充】\n${refinementBackground}`;
             }
           } else {
             // Case C: Single-Node DAG (in_degree === 0 && out_degree === 0)
             if (isIncrementalRefinement) {
               systemPrompt =
                 `You are NanoMesh Worker Role: ${node.role.name_zh}.\n` +
-                `你当前承担对前置任务成果的【增量修改、翻译与多语言重构 (Incremental Refinement)】职责。\n\n` +
+                `你当前承担对前置任务成果的【增量修改、翻译与跨分支融合 (Incremental Refinement)】职责。\n\n` +
                 `【核心执行守则】：\n` +
                 `1. 增量重构与修改：你必须以【前序产物基础素材】为内容基准，严格贯彻【用户当轮最高优先级指令】进行精准处理（如多语言重构、风格润色、补充扩写、要点提炼等）。\n` +
                 `2. 语言严格遵从：若【用户当轮最高优先级指令】明确指定了输出语言（例如“使用英文回复我”、“用英文描述”、“Translate to English”等），你必须无条件将基础素材全部重构并以该指定语言输出！严禁依然输出原语言（如中文）！\n` +
@@ -1027,29 +1520,39 @@ export async function executeDAGStream(
             }
           }
 
-          // Compute input digest
+          // Compute input digest including mounted asset provenance & inherited context slices
           const assetDigests = nodeCtx.claimed_assets.map((a) => a.source_digest).join("|");
-          const inputDigest = `${nodeCtx.upstream_text}::${assetDigests}`;
-          const fullPrompt = [
-            nodeCtx.compensation_prompt,
-            nodeCtx.injected_prompt,
-            nodeCtx.custom_prompt ? `[User Injected Prompt]:\n${nodeCtx.custom_prompt}` : "",
-            promptContent
-          ]
+          const contextDigest = inheritedSlices
+            .map((s) => `${s.branch_id}:${s.commit_id || s.summary.slice(0, 64)}`)
+            .join("|");
+          const inputDigest = `${nodeCtx.upstream_text}::${assetDigests}::${contextDigest}`;
+          const fullPrompt = [nodeCtx.compensation_prompt, nodeCtx.injected_prompt, promptContent]
             .filter(Boolean)
             .join("\n");
 
-          // Deterministic Signature Check
+          // Deterministic Signature Check (scoped strictly to user_id + session_id)
+          const scopedUserId = options.userId || envelope.user_id || "anonymous";
+          const scopedSessionId = options.sessionId || envelope.session_id || "default-session";
           let cacheKey = await computeDeterministicSignature(
             node.role.role_id,
             node.selected_model.model_id,
             inputDigest,
-            fullPrompt
+            fullPrompt,
+            scopedUserId,
+            scopedSessionId
           );
 
-          const isTailNode = node.role.out_degree === 0 || idx === dag.nodes.length - 1;
+          // Verify claimed asset ownership BEFORE any cache lookup or R2 read (PLAN-03)
+          for (const claimedAsset of nodeCtx.claimed_assets) {
+            await assertAssetAuthorized(claimedAsset);
+          }
+
+          const isTailNode =
+            (node.stage_group !== "evidence_prep" && node.role.out_degree === 0) ||
+            idx === dag.nodes.length - 1;
 
           sendEvent("node_start", {
+            node_id: nodeId,
             role_id: node.role.role_id,
             role_name: node.role.name_zh,
             role_name_en: node.role.name_en,
@@ -1057,11 +1560,14 @@ export async function executeDAGStream(
             model_name: node.selected_model.display_name,
             model_id: node.selected_model.model_id,
             inference_target: node.selected_model.inference_target || "cloud",
+            exec_mode: isParallelMember ? "parallel" : "sequential",
+            parallel_group: node.parallel_group,
             claimed_assets_count: nodeCtx.claimed_assets.length
           });
 
           if (node.selected_model.inference_target === "browser") {
             if (isTailNode) {
+              await settlePhaseCreditsBeforeHandover(idx);
               let continuationToken: string | undefined = undefined;
               let handshakeId: string | undefined = undefined;
 
@@ -1072,45 +1578,17 @@ export async function executeDAGStream(
                 (m) => m.inference_target !== "browser"
               );
               if (hasCloudStandby) {
-                handshakeId = crypto.randomUUID();
-                const expiresAt = new Date(Date.now() + 300 * 1000).toISOString();
-                await env.DB.prepare(
-                  `INSERT INTO dag_handshakes 
-                   (handshake_id, user_id, session_id, template_id, next_step, status, expires_at)
-                   VALUES (?, ?, ?, ?, ?, 'ISSUED', ?)`
-                )
-                  .bind(
-                    handshakeId,
-                    options.userId,
-                    envelope.session_id,
-                    dag.template.template_id,
-                    idx + 1,
-                    expiresAt
-                  )
-                  .run();
-
-                const arbitratedRoleModels: Record<string, string> = {};
-                dag.nodes.forEach((n) => {
-                  if (n.role?.role_id && n.selected_model?.model_id) {
-                    arbitratedRoleModels[n.role.role_id] = n.selected_model.model_id;
-                  }
-                });
-
-                continuationToken = await signJWT(
-                  {
-                    jti: handshakeId,
-                    sub: options.userId,
-                    sid: envelope.session_id,
-                    tid: dag.template.template_id,
-                    nxt: idx + 1,
-                    mids: arbitratedRoleModels
-                  },
-                  env.JWT_SECRET,
-                  300
-                );
+                const creds = await issueHandoverCredentials(idx + 1);
+                handshakeId = creds.handshakeId;
+                continuationToken = creds.continuationToken;
               }
+              const clientCommitToken = options.onIssueBrowserTailToken
+                ? await options.onIssueBrowserTailToken()
+                : undefined;
+              tailDispatchedToBrowser = true;
 
               sendEvent("client_exec_request", {
+                node_id: nodeId,
                 role_id: node.role.role_id,
                 role_name: node.role.name_zh,
                 role_name_en: node.role.name_en,
@@ -1120,6 +1598,8 @@ export async function executeDAGStream(
                 system_prompt: systemPrompt,
                 user_prompt: promptContent,
                 is_tail_node: true,
+                run_id: options.runId,
+                client_commit_token: clientCommitToken,
                 handshake_id: handshakeId,
                 continuation_token: continuationToken,
                 claimed_assets: nodeCtx.claimed_assets.map((a) => ({
@@ -1131,8 +1611,7 @@ export async function executeDAGStream(
                   source_digest: a.source_digest
                 }))
               });
-              upstreamOutput = "";
-              continue;
+              return { output: "", handedOver: false };
             } else {
               // Intermediate Browser Node!
               const supportsHandover = options.clientCapabilities?.webgpu_handover_v3 ?? true;
@@ -1142,24 +1621,26 @@ export async function executeDAGStream(
                   (m) => m.inference_target !== "browser"
                 );
                 if (cloudStandby) {
-                  // Ensure 1 credit is pre-deducted atomically prior to dispatch:
-                  if (!options.hasPreDeducted) {
+                  // Reserve exact standby cloud model cost atomically prior to dispatch (whether or not earlier nodes reserved)
+                  const standbyCost = calculateExpectedNodeCost(cloudStandby);
+                  if (standbyCost > 0) {
                     const reserveResult = await env.DB.prepare(
-                      "UPDATE users SET credits = credits - 1 WHERE user_id = ? AND credits >= 1"
+                      "UPDATE users SET credits = credits - ? WHERE user_id = ? AND credits >= ?"
                     )
-                      .bind(options.userId)
+                      .bind(standbyCost, options.userId, standbyCost)
                       .run();
 
                     if (!reserveResult.meta.changes || reserveResult.meta.changes === 0) {
                       sendEvent("error", {
-                        message: `当前可用积分不足，无法降级调用云端备用模型【${cloudStandby.display_name}】，请先充值。`
+                        message: `当前可用积分不足，无法降级调用云端备用模型【${cloudStandby.display_name}】（需 ${standbyCost} 积分），请先充值。`
                       });
                       if (options.hasPreDeducted) {
                         await refundReservedCredit();
                       }
-                      return;
+                      return { output: "", handedOver: true };
                     }
                     options.hasPreDeducted = true;
+                    options.preDeductedCredits = (options.preDeductedCredits ?? 0) + standbyCost;
                   }
 
                   node.selected_model = cloudStandby;
@@ -1168,7 +1649,9 @@ export async function executeDAGStream(
                     node.role.role_id,
                     node.selected_model.model_id,
                     inputDigest,
-                    fullPrompt
+                    fullPrompt,
+                    scopedUserId,
+                    scopedSessionId
                   );
                   // fall through to cloud execution logic!
                 } else {
@@ -1178,97 +1661,19 @@ export async function executeDAGStream(
                   if (options.hasPreDeducted) {
                     await refundReservedCredit();
                   }
-                  return;
+                  return { output: "", handedOver: true };
                 }
               } else {
                 // Settle Phase 1 cloud cost if any cloud models executed prior to this step
-                if (options.hasPreDeducted) {
-                  const reservedCredits = options.preDeductedCredits ?? 1;
-                  if (totalCost === 0) {
-                    await refundReservedCredit();
-                  } else {
-                    const refundDelta = reservedCredits - totalCost;
-                    const ledgerId = crypto.randomUUID();
-                    const statements = [];
-                    if (refundDelta > 0) {
-                      statements.push(
-                        env.DB.prepare(
-                          "UPDATE users SET credits = credits + ? WHERE user_id = ?"
-                        ).bind(refundDelta, options.userId)
-                      );
-                    } else if (refundDelta < 0) {
-                      const remainingCost = Math.abs(refundDelta);
-                      statements.push(
-                        env.DB.prepare(
-                          "UPDATE users SET credits = MAX(0, credits - ?) WHERE user_id = ?"
-                        ).bind(remainingCost, options.userId)
-                      );
-                    }
-                    statements.push(
-                      env.DB.prepare(
-                        `INSERT INTO credit_ledger 
-                         (ledger_id, user_id, category, amount, balance, title, detail, created_at)
-                         VALUES (?, ?, 'compute_cost', ?, (SELECT credits FROM users WHERE user_id = ?), 'DAG智能编排调用', ?, datetime('now'))`
-                      ).bind(
-                        ledgerId,
-                        options.userId,
-                        -totalCost,
-                        options.userId,
-                        `阶段结算: ${dag.template.name_zh} (步骤 ${idx})`
-                      )
-                    );
-                    await env.DB.batch(statements);
-                    isLedgerSettled = true;
-                    options.hasPreDeducted = false;
-                    triggerLowBalanceCheckAsync(env, options.userId, options.ctx);
-                  }
-                }
-
-                // D1 Handshake record insertion
-                const handshakeId = crypto.randomUUID();
-                const expiresAt = new Date(Date.now() + 300 * 1000).toISOString();
-                await env.DB.prepare(
-                  `INSERT INTO dag_handshakes 
-                   (handshake_id, user_id, session_id, template_id, next_step, status, expires_at)
-                   VALUES (?, ?, ?, ?, ?, 'ISSUED', ?)`
-                )
-                  .bind(
-                    handshakeId,
-                    options.userId,
-                    envelope.session_id,
-                    dag.template.template_id,
-                    idx + 1,
-                    expiresAt
-                  )
-                  .run();
-
-                // Snapshot arbitrated model IDs across all roles to freeze selections into continuation token
-                const arbitratedRoleModels: Record<string, string> = {};
-                dag.nodes.forEach((n) => {
-                  if (n.role?.role_id && n.selected_model?.model_id) {
-                    arbitratedRoleModels[n.role.role_id] = n.selected_model.model_id;
-                  }
-                });
-
-                // Sign continuation token (300s TTL)
-                const continuationToken = await signJWT(
-                  {
-                    jti: handshakeId,
-                    sub: options.userId,
-                    sid: envelope.session_id,
-                    tid: dag.template.template_id,
-                    nxt: idx + 1,
-                    mids: arbitratedRoleModels
-                  },
-                  env.JWT_SECRET,
-                  300
-                );
+                await settlePhaseCreditsBeforeHandover(idx);
+                const { handshakeId, continuationToken } = await issueHandoverCredentials(idx + 1);
 
                 sendEvent("dag_handover", {
                   handshake_id: handshakeId,
                   continuation_token: continuationToken,
                   current_step: idx,
                   next_step: idx + 1,
+                  node_id: nodeId,
                   role_id: node.role.role_id,
                   role_name: node.role.name_zh,
                   role_name_en: node.role.name_en,
@@ -1290,7 +1695,7 @@ export async function executeDAGStream(
                 });
 
                 // End stream gracefully immediately to release Edge Worker connection & compute
-                return;
+                return { output: "", handedOver: true };
               }
             }
           }
@@ -1298,19 +1703,26 @@ export async function executeDAGStream(
           let nodeOutput = "";
           let actualExecutingModel: ModelMetadata = node.selected_model;
           let nodeCost = 0;
-          const cachedOutput = await lookupDeterministicCache(env, cacheKey);
+          const cachedOutput = await lookupDeterministicCache(
+            env,
+            cacheKey,
+            scopedUserId,
+            scopedSessionId
+          );
 
           if (cachedOutput) {
             // Cache Hit: 0 cost, instant return!
             nodeOutput = cachedOutput;
             if (isTailNode) {
               sendEvent("text_chunk", {
+                node_id: nodeId,
                 role_id: node.role.role_id,
                 chunk: nodeOutput,
                 cache_hit: true
               });
             }
             sendEvent("node_complete", {
+              node_id: nodeId,
               role_id: node.role.role_id,
               role_name: node.role.name_zh,
               role_name_en: node.role.name_en,
@@ -1322,76 +1734,28 @@ export async function executeDAGStream(
             });
           } else {
             // Cache Miss: Perform Execution
-            // 2. Fetch image from R2 bucket if required
+            // 2. Fetch authorized image / audio assets from R2 bucket if required
             let imageB64: string | null = null;
             let imageBytes: Uint8Array | number[] | null = null;
             const imageAsset = nodeCtx.claimed_assets.find((a) => a.modality === "image");
 
             if (imageAsset) {
-              if (imageAsset.r2_key && env.R2) {
-                // Security check (IDOR/BOLA prevention): Only allow access to current session's assets
-                const userSafePrefix = `tmp/${options.userId || envelope.user_id || "anonymous"}/`;
-                if (!imageAsset.r2_key.startsWith(userSafePrefix)) {
-                  console.error(
-                    `[Security IDOR] User ${options.userId} attempted to access unauthorized R2 key: ${imageAsset.r2_key}`
-                  );
-                  throw new Error(`安全违规：拒绝访问未经授权的资产对象`);
-                }
-                try {
-                  const r2Obj = await env.R2.get(imageAsset.r2_key);
-                  if (r2Obj) {
-                    const buf = await r2Obj.arrayBuffer();
-                    if (buf.byteLength > 15 * 1024 * 1024) {
-                      throw new Error(
-                        "图像资产体积超过 15MB 内存安全上限，已拒绝加载以防止 Worker 内存溢出。"
-                      );
-                    }
-                    imageBytes = new Uint8Array(buf);
-                    imageB64 = `data:${imageAsset.mime_type || "image/jpeg"};base64,${arrayBufferToBase64(buf)}`;
-                  } else {
-                    console.error(
-                      `[Dispatcher] Image object not found in R2 for key: ${imageAsset.r2_key}`
-                    );
-                  }
-                } catch (r2Err) {
-                  console.error("[Dispatcher] R2 asset retrieval error:", r2Err);
-                }
+              const fetchedImg = await fetchAuthorizedR2MediaBytes(
+                imageAsset,
+                "图像",
+                15 * 1024 * 1024
+              );
+              if (fetchedImg) {
+                imageBytes = fetchedImg;
+                imageB64 = `data:${imageAsset.mime_type || "image/jpeg"};base64,${arrayBufferToBase64(fetchedImg.buffer as ArrayBuffer)}`;
               }
             }
 
             // 2b. Fetch audio from R2 bucket if required
-            let audioBytes: Uint8Array | null = null;
             const audioAsset = nodeCtx.claimed_assets.find((a) => a.modality === "audio");
-
-            if (audioAsset) {
-              if (audioAsset.r2_key && env.R2) {
-                const userSafePrefix = `tmp/${options.userId || envelope.user_id || "anonymous"}/`;
-                if (!audioAsset.r2_key.startsWith(userSafePrefix)) {
-                  console.error(
-                    `[Security IDOR] User ${options.userId} attempted to access unauthorized R2 key: ${audioAsset.r2_key}`
-                  );
-                  throw new Error(`安全违规：拒绝访问未经授权的资产对象`);
-                }
-                try {
-                  const r2Obj = await env.R2.get(audioAsset.r2_key);
-                  if (r2Obj) {
-                    const buf = await r2Obj.arrayBuffer();
-                    if (buf.byteLength > 25 * 1024 * 1024) {
-                      throw new Error(
-                        "音频资产体积超过 25MB 内存安全上限，已拒绝加载以防止 Worker 内存溢出。"
-                      );
-                    }
-                    audioBytes = new Uint8Array(buf);
-                  } else {
-                    console.error(
-                      `[Dispatcher] Audio object not found in R2 for key: ${audioAsset.r2_key}`
-                    );
-                  }
-                } catch (r2Err) {
-                  console.error("[Dispatcher] R2 audio asset retrieval error:", r2Err);
-                }
-              }
-            }
+            const audioBytes = audioAsset
+              ? await fetchAuthorizedR2MediaBytes(audioAsset, "音频", 25 * 1024 * 1024)
+              : null;
 
             // 2c. Worker heap safety guard: Combined multimodal payload limit
             const combinedAssetsBytes =
@@ -1439,10 +1803,36 @@ export async function executeDAGStream(
             let didStreamChunks = false;
             actualExecutingModel = node.selected_model;
             const candidateErrors: string[] = [];
+            let reservedForCurrentNode =
+              options.hasPreDeducted && node.selected_model.inference_target !== "browser"
+                ? calculateExpectedNodeCost(node.selected_model)
+                : 0;
 
             for (let attemptIdx = 0; attemptIdx < candidateModels.length; attemptIdx++) {
               const currentCandidate = candidateModels[attemptIdx];
               const endpoint = currentCandidate.endpoint;
+
+              // Incremental pre-deduction guard for pricier standby cloud models (prevents 1-credit failover abuse)
+              if (attemptIdx > 0 && currentCandidate.inference_target !== "browser") {
+                const candidateCost = calculateExpectedNodeCost(currentCandidate);
+                if (candidateCost > reservedForCurrentNode) {
+                  const extraCostNeeded = candidateCost - reservedForCurrentNode;
+                  const extraReserve = await env.DB.prepare(
+                    "UPDATE users SET credits = credits - ? WHERE user_id = ? AND credits >= ?"
+                  )
+                    .bind(extraCostNeeded, options.userId, extraCostNeeded)
+                    .run();
+                  if (!extraReserve.meta.changes || extraReserve.meta.changes === 0) {
+                    candidateErrors.push(
+                      `[${currentCandidate.display_name}]: 可用积分不足（容灾升级需补足 ${extraCostNeeded} 积分）`
+                    );
+                    continue;
+                  }
+                  options.hasPreDeducted = true;
+                  options.preDeductedCredits = (options.preDeductedCredits ?? 0) + extraCostNeeded;
+                  reservedForCurrentNode += extraCostNeeded;
+                }
+              }
 
               // Dynamic client-side delegation protocol:
               // If candidate is a client-side WebGPU model, dispatch via client delegation protocol
@@ -1459,6 +1849,7 @@ export async function executeDAGStream(
                 const previousCandidate =
                   attemptIdx > 0 ? candidateModels[attemptIdx - 1] : node.selected_model;
                 sendEvent("node_failover", {
+                  node_id: nodeId,
                   role_id: node.role.role_id,
                   role_name: node.role.name_zh,
                   failed_model: previousCandidate.display_name,
@@ -1474,91 +1865,23 @@ export async function executeDAGStream(
                 if (isTailNode) {
                   // Tail Node WebGPU Handover
                   // Conservation of Credits: Refund or settle Phase 1 cloud pre-deduction
-                  if (options.hasPreDeducted) {
-                    const reservedCredits = options.preDeductedCredits ?? 1;
-                    if (totalCost === 0) {
-                      await refundReservedCredit();
-                    } else {
-                      const refundDelta = reservedCredits - totalCost;
-                      const ledgerId = crypto.randomUUID();
-                      const statements = [];
-                      if (refundDelta > 0) {
-                        statements.push(
-                          env.DB.prepare(
-                            "UPDATE users SET credits = credits + ? WHERE user_id = ?"
-                          ).bind(refundDelta, options.userId)
-                        );
-                      } else if (refundDelta < 0) {
-                        const remainingCost = Math.abs(refundDelta);
-                        statements.push(
-                          env.DB.prepare(
-                            "UPDATE users SET credits = MAX(0, credits - ?) WHERE user_id = ?"
-                          ).bind(remainingCost, options.userId)
-                        );
-                      }
-                      statements.push(
-                        env.DB.prepare(
-                          `INSERT INTO credit_ledger 
-                           (ledger_id, user_id, category, amount, balance, title, detail, created_at)
-                           VALUES (?, ?, 'compute_cost', ?, (SELECT credits FROM users WHERE user_id = ?), 'DAG智能编排调用', ?, datetime('now'))`
-                        ).bind(
-                          ledgerId,
-                          options.userId,
-                          -totalCost,
-                          options.userId,
-                          `阶段结算: ${dag.template.name_zh} (步骤 ${idx})`
-                        )
-                      );
-                      await env.DB.batch(statements);
-                      isLedgerSettled = true;
-                      options.hasPreDeducted = false;
-                      triggerLowBalanceCheckAsync(env, options.userId, options.ctx);
-                    }
-                  }
+                  await settlePhaseCreditsBeforeHandover(idx);
 
                   let continuationToken: string | undefined = undefined;
                   let handshakeId: string | undefined = undefined;
                   const remainingStandbys = candidateModels.slice(attemptIdx + 1);
                   if (remainingStandbys.length > 0) {
-                    handshakeId = crypto.randomUUID();
-                    const expiresAt = new Date(Date.now() + 300 * 1000).toISOString();
-                    await env.DB.prepare(
-                      `INSERT INTO dag_handshakes 
-                       (handshake_id, user_id, session_id, template_id, next_step, status, expires_at)
-                       VALUES (?, ?, ?, ?, ?, 'ISSUED', ?)`
-                    )
-                      .bind(
-                        handshakeId,
-                        options.userId,
-                        envelope.session_id,
-                        dag.template.template_id,
-                        idx + 1,
-                        expiresAt
-                      )
-                      .run();
-
-                    const arbitratedRoleModels: Record<string, string> = {};
-                    dag.nodes.forEach((n) => {
-                      if (n.role?.role_id && n.selected_model?.model_id) {
-                        arbitratedRoleModels[n.role.role_id] = n.selected_model.model_id;
-                      }
-                    });
-
-                    continuationToken = await signJWT(
-                      {
-                        jti: handshakeId,
-                        sub: options.userId,
-                        sid: envelope.session_id,
-                        tid: dag.template.template_id,
-                        nxt: idx + 1,
-                        mids: arbitratedRoleModels
-                      },
-                      env.JWT_SECRET,
-                      300
-                    );
+                    const creds = await issueHandoverCredentials(idx + 1);
+                    handshakeId = creds.handshakeId;
+                    continuationToken = creds.continuationToken;
                   }
+                  const clientCommitToken = options.onIssueBrowserTailToken
+                    ? await options.onIssueBrowserTailToken()
+                    : undefined;
+                  tailDispatchedToBrowser = true;
 
                   sendEvent("client_exec_request", {
+                    node_id: nodeId,
                     role_id: node.role.role_id,
                     role_name: node.role.name_zh,
                     role_name_en: node.role.name_en,
@@ -1569,6 +1892,8 @@ export async function executeDAGStream(
                     user_prompt: promptContent,
                     is_tail_node: true,
                     was_failover: true,
+                    run_id: options.runId,
+                    client_commit_token: clientCommitToken,
                     handshake_id: handshakeId,
                     continuation_token: continuationToken,
                     claimed_assets: nodeCtx.claimed_assets.map((a) => ({
@@ -1581,90 +1906,15 @@ export async function executeDAGStream(
                     }))
                   });
 
-                  upstreamOutput = "";
                   actualExecutingModel = currentCandidate;
                   node.selected_model = currentCandidate;
                   isExecutionSuccess = true;
                   break;
                 } else {
                   // Intermediate Node WebGPU Handover
-                  if (options.hasPreDeducted) {
-                    const reservedCredits = options.preDeductedCredits ?? 1;
-                    if (totalCost === 0) {
-                      await refundReservedCredit();
-                    } else {
-                      const refundDelta = reservedCredits - totalCost;
-                      const ledgerId = crypto.randomUUID();
-                      const statements = [];
-                      if (refundDelta > 0) {
-                        statements.push(
-                          env.DB.prepare(
-                            "UPDATE users SET credits = credits + ? WHERE user_id = ?"
-                          ).bind(refundDelta, options.userId)
-                        );
-                      } else if (refundDelta < 0) {
-                        const remainingCost = Math.abs(refundDelta);
-                        statements.push(
-                          env.DB.prepare(
-                            "UPDATE users SET credits = MAX(0, credits - ?) WHERE user_id = ?"
-                          ).bind(remainingCost, options.userId)
-                        );
-                      }
-                      statements.push(
-                        env.DB.prepare(
-                          `INSERT INTO credit_ledger 
-                           (ledger_id, user_id, category, amount, balance, title, detail, created_at)
-                           VALUES (?, ?, 'compute_cost', ?, (SELECT credits FROM users WHERE user_id = ?), 'DAG智能编排调用', ?, datetime('now'))`
-                        ).bind(
-                          ledgerId,
-                          options.userId,
-                          -totalCost,
-                          options.userId,
-                          `阶段结算: ${dag.template.name_zh} (步骤 ${idx})`
-                        )
-                      );
-                      await env.DB.batch(statements);
-                      isLedgerSettled = true;
-                      options.hasPreDeducted = false;
-                      triggerLowBalanceCheckAsync(env, options.userId, options.ctx);
-                    }
-                  }
-
-                  const handshakeId = crypto.randomUUID();
-                  const expiresAt = new Date(Date.now() + 300 * 1000).toISOString();
-                  await env.DB.prepare(
-                    `INSERT INTO dag_handshakes 
-                     (handshake_id, user_id, session_id, template_id, next_step, status, expires_at)
-                     VALUES (?, ?, ?, ?, ?, 'ISSUED', ?)`
-                  )
-                    .bind(
-                      handshakeId,
-                      options.userId,
-                      envelope.session_id,
-                      dag.template.template_id,
-                      idx + 1,
-                      expiresAt
-                    )
-                    .run();
-
-                  const arbitratedRoleModels: Record<string, string> = {};
-                  dag.nodes.forEach((n) => {
-                    if (n.role?.role_id && n.selected_model?.model_id) {
-                      arbitratedRoleModels[n.role.role_id] = n.selected_model.model_id;
-                    }
-                  });
-
-                  const continuationToken = await signJWT(
-                    {
-                      jti: handshakeId,
-                      sub: options.userId,
-                      sid: envelope.session_id,
-                      tid: dag.template.template_id,
-                      nxt: idx + 1,
-                      mids: arbitratedRoleModels
-                    },
-                    env.JWT_SECRET,
-                    300
+                  await settlePhaseCreditsBeforeHandover(idx);
+                  const { handshakeId, continuationToken } = await issueHandoverCredentials(
+                    idx + 1
                   );
 
                   sendEvent("dag_handover", {
@@ -1672,6 +1922,7 @@ export async function executeDAGStream(
                     continuation_token: continuationToken,
                     current_step: idx,
                     next_step: idx + 1,
+                    node_id: nodeId,
                     role_id: node.role.role_id,
                     role_name: node.role.name_zh,
                     role_name_en: node.role.name_en,
@@ -1693,7 +1944,7 @@ export async function executeDAGStream(
                     }))
                   });
 
-                  return; // Gracefully yield worker execution immediately!
+                  return { output: "", handedOver: true }; // Gracefully yield worker execution immediately!
                 }
               }
 
@@ -1703,6 +1954,7 @@ export async function executeDAGStream(
               if (attemptIdx > 0) {
                 const previousCandidate = candidateModels[attemptIdx - 1];
                 sendEvent("node_failover", {
+                  node_id: nodeId,
                   role_id: node.role.role_id,
                   role_name: node.role.name_zh,
                   failed_model: previousCandidate.display_name,
@@ -1863,19 +2115,23 @@ export async function executeDAGStream(
                           let b64Str = jsonRes.data?.[0]?.b64_json;
                           let imgBuffer: ArrayBuffer | null = null;
                           if (b64Str) {
-                            const binStr = atob(b64Str);
-                            const len = binStr.length;
-                            const u8 = new Uint8Array(len);
-                            for (let i = 0; i < len; i++) u8[i] = binStr.charCodeAt(i);
-                            imgBuffer = u8.buffer as ArrayBuffer;
+                            imgBuffer = decodeBase64ImageWithGuard(b64Str);
                           } else if (jsonRes.data?.[0]?.url) {
                             const imageUrl = jsonRes.data[0].url;
-                            if (typeof imageUrl !== "string" || !isSafeExternalUrl(imageUrl)) {
+                            const requireHttps = env.ENVIRONMENT === "production";
+                            if (
+                              typeof imageUrl !== "string" ||
+                              !isSafeExternalUrl(imageUrl, requireHttps)
+                            ) {
                               throw new Error(
                                 `安全违规：拒绝访问未经授权或存在安全隐患的外部图片回源地址 (${imageUrl})`
                               );
                             }
-                            const fetched = await fetch(imageUrl, { redirect: "manual" });
+                            const fetched = await callWithTimeout(
+                              (sig) => fetch(imageUrl, { redirect: "manual", signal: sig }),
+                              30000,
+                              abortController.signal
+                            );
                             if (fetched.status >= 300 && fetched.status < 400) {
                               throw new Error(
                                 `安全违规：外部图片回源地址禁止 HTTP 重定向 (Status ${fetched.status})`
@@ -1935,6 +2191,15 @@ export async function executeDAGStream(
                               .replace(/[^a-zA-Z0-9_-]/g, "_")
                               .slice(0, 64);
                             const newAssetKey = `tmp/${safeUserId}/${cleanSessionId}/${generatedAssetId}.png`;
+                            if (options.onRegisterStagingAsset) {
+                              await options.onRegisterStagingAsset({
+                                assetId: generatedAssetId,
+                                modality: "image",
+                                mimeType: "image/png",
+                                r2Key: newAssetKey,
+                                fileSize: imgBuffer.byteLength
+                              });
+                            }
                             if (env.R2) {
                               await env.R2.put(newAssetKey, imgBuffer, {
                                 httpMetadata: { contentType: "image/png" },
@@ -1947,13 +2212,14 @@ export async function executeDAGStream(
                               });
                             }
 
+                            const imgDigestHex = await computeSha256BytesHex(imgBuffer);
                             const mediaArtifact: MediaArtifact = {
                               asset_id: generatedAssetId,
                               modality: "image",
                               mime_type: "image/png",
                               file_size: imgBuffer.byteLength,
                               r2_key: newAssetKey,
-                              source_digest: `${generatedAssetId}-${imgBuffer.byteLength}`
+                              source_digest: imgDigestHex
                             };
                             currentBundle.generated_media.push(mediaArtifact);
 
@@ -2114,17 +2380,23 @@ export async function executeDAGStream(
                         aiRes.byteOffset + aiRes.byteLength
                       ) as ArrayBuffer;
                     } else if (aiRes.image) {
-                      const binStr = atob(aiRes.image);
-                      const len = binStr.length;
-                      const u8 = new Uint8Array(len);
-                      for (let i = 0; i < len; i++) u8[i] = binStr.charCodeAt(i);
-                      imageBuffer = u8.buffer as ArrayBuffer;
+                      imageBuffer = decodeBase64ImageWithGuard(aiRes.image);
                     } else {
-                      const resp = new Response(aiRes);
-                      imageBuffer = await resp.arrayBuffer();
+                      throw new Error(
+                        "Workers AI 图像节点返回了不可识别的异常数据结构（拒绝写入损坏占位数据）"
+                      );
                     }
 
                     if (imageBuffer && imageBuffer.byteLength > 0) {
+                      if (options.onRegisterStagingAsset) {
+                        await options.onRegisterStagingAsset({
+                          assetId: generatedAssetId,
+                          modality: "image",
+                          mimeType: "image/png",
+                          r2Key: newAssetKey,
+                          fileSize: imageBuffer.byteLength
+                        });
+                      }
                       if (env.R2) {
                         await env.R2.put(newAssetKey, imageBuffer, {
                           httpMetadata: { contentType: "image/png" },
@@ -2137,13 +2409,14 @@ export async function executeDAGStream(
                         });
                       }
 
+                      const imgDigestHex = await computeSha256BytesHex(imageBuffer);
                       const mediaArtifact: MediaArtifact = {
                         asset_id: generatedAssetId,
                         modality: "image",
                         mime_type: "image/png",
                         file_size: imageBuffer.byteLength,
                         r2_key: newAssetKey,
-                        source_digest: `${generatedAssetId}-${imageBuffer.byteLength}`
+                        source_digest: imgDigestHex
                       };
 
                       currentBundle.generated_media.push(mediaArtifact);
@@ -2229,7 +2502,7 @@ export async function executeDAGStream(
 
             if (actualExecutingModel.inference_target === "browser") {
               // Tail node browser execution was handed over to client; advance node loop
-              continue;
+              return { output: "", handedOver: false };
             }
 
             // 6. Fail-fast: if all top candidate models in role pool failed, terminate without arbitrary fallback
@@ -2267,7 +2540,9 @@ export async function executeDAGStream(
                       node.role.role_id,
                       actualExecutingModel.model_id,
                       inputDigest,
-                      fullPrompt
+                      fullPrompt,
+                      scopedUserId,
+                      scopedSessionId
                     );
               await storeDeterministicCache(
                 env,
@@ -2276,7 +2551,10 @@ export async function executeDAGStream(
                 actualExecutingModel.model_id,
                 inputDigest,
                 fullPrompt,
-                nodeOutput
+                nodeOutput,
+                scopedUserId,
+                scopedSessionId,
+                options.ctx
               );
             }
 
@@ -2285,6 +2563,7 @@ export async function executeDAGStream(
             totalCost += nodeCost;
 
             sendEvent("node_complete", {
+              node_id: nodeId,
               role_id: node.role.role_id,
               role_name: node.role.name_zh,
               role_name_en: node.role.name_en,
@@ -2298,22 +2577,120 @@ export async function executeDAGStream(
             });
           }
 
-          upstreamOutput = nodeOutput;
-          currentBundle.text_context = nodeOutput;
+          nodeOutputs.set(nodeId, { text: nodeOutput, node, model: actualExecutingModel });
+
+          // Record L1 Perceptual Cache update whenever a perception node extracts text from image/audio
+          if (
+            nodeOutput.trim().length > 20 &&
+            (node.role.out_modalities?.includes("text") || !isTailNode)
+          ) {
+            const sensoryAsset = nodeCtx.claimed_assets.find(
+              (a) => (a.modality === "image" || a.modality === "audio") && a.source_digest
+            );
+            if (sensoryAsset) {
+              const hasFocusedPrompt = !!(
+                (node.custom_prompt && node.custom_prompt.trim()) ||
+                (node.focus_hint && node.focus_hint.trim())
+              );
+              const taskScope: PerceptualTaskScope =
+                node.task_scope || (hasFocusedPrompt ? "focused_or_custom" : "objective_full");
+              const promptDigest =
+                taskScope === "focused_or_custom"
+                  ? (
+                      await computeSha256Hex(
+                        `${node.custom_prompt || ""}::${node.focus_hint || ""}`
+                      )
+                    ).slice(0, 16)
+                  : "default";
+              const perceptKey = `${sensoryAsset.source_digest}::${node.role.role_id}::${actualExecutingModel.model_id}::${taskScope}::${promptDigest}`;
+              perceptualCacheUpdates.push({
+                source_digest: sensoryAsset.source_digest,
+                modality: sensoryAsset.modality as "image" | "audio",
+                role_id: node.role.role_id,
+                model_id: actualExecutingModel.model_id,
+                task_scope: taskScope,
+                prompt_digest: promptDigest,
+                percept_key: perceptKey,
+                extracted_text: nodeOutput.slice(0, 6000),
+                summary_snippet: nodeOutput.slice(0, 120).replace(/\s+/g, " "),
+                updated_at: Date.now()
+              });
+            }
+          }
+
           currentBundle.execution_trace = {
             role_id: node.role.role_id,
             model_id: actualExecutingModel.model_id,
             cost: nodeCost,
             duration_ms: Date.now() - nodeStartTime
           };
+          return { output: nodeOutput, handedOver: false };
+        }
+
+        // 2. Topological Loop: execute parallel_group batches with bounded concurrency (limit=2),
+        // and sequential nodes cleanly in order.
+        const PARALLEL_BATCH_LIMIT = 2;
+        for (let idx = startIdx; idx < dag.nodes.length; idx++) {
+          const node = dag.nodes[idx];
+          if (node.parallel_group) {
+            const batch: Array<{ node: InstantiatedDAGNode; index: number }> = [];
+            while (
+              idx + batch.length < dag.nodes.length &&
+              dag.nodes[idx + batch.length].parallel_group === node.parallel_group
+            ) {
+              batch.push({ node: dag.nodes[idx + batch.length], index: idx + batch.length });
+            }
+            if (batch.length > 1) {
+              if (batch.length > PARALLEL_BATCH_LIMIT) {
+                for (let w = PARALLEL_BATCH_LIMIT; w < batch.length; w++) {
+                  const waitingNode = batch[w].node;
+                  sendEvent("node_status", {
+                    node_id: waitingNode.node_id || waitingNode.role.role_id,
+                    role_id: waitingNode.role.role_id,
+                    status: "waiting_resource",
+                    parallel_group: node.parallel_group
+                  });
+                }
+              }
+              const results = await runWithConcurrencyLimit(batch, PARALLEL_BATCH_LIMIT, (item) =>
+                executeSingleDagNode(item.node, item.index, true, "")
+              );
+              if (results.some((r) => r.handedOver)) {
+                isStreamSettledOrHandedOver = true;
+                return;
+              }
+              idx += batch.length - 1;
+              continue;
+            }
+          }
+
+          const stepRes = await executeSingleDagNode(node, idx, false, upstreamOutput);
+          if (stepRes.handedOver) {
+            isStreamSettledOrHandedOver = true;
+            return;
+          }
+          upstreamOutput = stepRes.output;
+          currentBundle.text_context = stepRes.output;
         }
 
         if (isStreamCancelled) {
           return;
         }
 
-        // 3. Settle billing atomically (preventing transaction tearing & race conditions)
-        if (options.hasPreDeducted) {
+        // 3. Settle billing atomically (idempotent per-phase via onSettlePhaseBilling when configured)
+        if (options.onSettlePhaseBilling && (options.hasPreDeducted || totalCost > 0)) {
+          const settled = await options.onSettlePhaseBilling({
+            phase: billingPhaseKey,
+            actualCost: totalCost,
+            reservedCredits: options.hasPreDeducted ? (options.preDeductedCredits ?? 1) : 0,
+            detailLabel: `执行模板: ${dag.template.name_zh}`
+          });
+          if (settled) {
+            isLedgerSettled = true;
+            options.hasPreDeducted = false;
+            triggerLowBalanceCheckAsync(env, options.userId, options.ctx);
+          }
+        } else if (options.hasPreDeducted) {
           const reserved = options.preDeductedCredits ?? 1;
           const actualCost = totalCost;
           const refundDelta = reserved - actualCost;
@@ -2335,7 +2712,7 @@ export async function executeDAGStream(
                   )
                 );
               } else if (refundDelta < 0) {
-                // Actual cost exceeded reservation, deduct remaining delta
+                // Actual cost exceeded reservation; clamp floor at 0 so users.credits never becomes negative
                 const remainingCost = Math.abs(refundDelta);
                 statements.push(
                   env.DB.prepare(
@@ -2391,11 +2768,99 @@ export async function executeDAGStream(
         }
 
         // 4. DAG Complete
+        const tailRequiresClientCommit = tailDispatchedToBrowser;
+        const cleanFinalOutput = sanitizeLLMOutput(upstreamOutput);
+        let authoritativeGitState: any = null;
+        let stateCommitted = !tailRequiresClientCommit && !options.onCompleteStateCommit;
+        let canRetryCommit = false;
+        let commitErrorCode: string | undefined = undefined;
+        let commitErrorMessage: string | undefined = undefined;
+
+        if (!tailRequiresClientCommit && options.onSaveCloudTailResult) {
+          const staged = await options.onSaveCloudTailResult({
+            finalOutput: cleanFinalOutput,
+            generatedMedia: currentBundle.generated_media,
+            perceptualCacheUpdates
+          });
+          if (!staged.ok) {
+            if (options.onFinishWithoutCommit) {
+              await options.onFinishWithoutCommit({
+                outcome: "FAILED",
+                failureStatus: 503,
+                failureCode: "result_staging_failed",
+                failureMessage: "服务端计算已完成，但暂存提交产出失败，无法安全重放提交。"
+              });
+            }
+            isStreamSettledOrHandedOver = true;
+            sendEvent("dag_complete", {
+              final_output: cleanFinalOutput,
+              total_cost: totalCost,
+              total_duration_ms: Date.now() - startTime,
+              has_client_exec: false,
+              tail_requires_client_commit: false,
+              run_id: options.runId,
+              perceptual_entries: perceptualCacheUpdates,
+              state_committed: false,
+              can_retry_commit: false,
+              commit_error_code: "result_staging_failed",
+              commit_error: "服务端计算已完成，但暂存提交产出失败，无法安全重放提交。"
+            });
+            return;
+          }
+        }
+
+        if (options.onCompleteStateCommit && !tailRequiresClientCommit) {
+          const commitRes = await options.onCompleteStateCommit({
+            finalOutput: cleanFinalOutput,
+            perceptualCacheUpdates,
+            generatedMedia: currentBundle.generated_media,
+            dag
+          });
+          if (commitRes && typeof commitRes === "object" && "ok" in commitRes) {
+            if (commitRes.ok) {
+              stateCommitted = true;
+              authoritativeGitState = buildPublicSessionSnapshot(commitRes.snapshot);
+            } else {
+              stateCommitted = false;
+              canRetryCommit = !!commitRes.retryable;
+              commitErrorCode = commitRes.code || "commit_conflict";
+              commitErrorMessage = commitRes.message || "状态提交失败";
+              if (canRetryCommit && options.onMarkAwaitingCommit) {
+                await options.onMarkAwaitingCommit();
+              } else if (
+                !canRetryCommit &&
+                options.onFinishWithoutCommit &&
+                commitRes.code !== "already_taken_over"
+              ) {
+                await options.onFinishWithoutCommit({
+                  outcome: "FAILED",
+                  failureStatus: commitRes.code === "session_deleted" ? 410 : 409,
+                  failureCode: commitRes.code,
+                  failureMessage: commitErrorMessage
+                });
+              }
+            }
+          } else {
+            stateCommitted = !!commitRes;
+            authoritativeGitState = commitRes || null;
+          }
+        }
+
+        isStreamSettledOrHandedOver = true;
         sendEvent("dag_complete", {
-          final_output: sanitizeLLMOutput(upstreamOutput),
+          final_output: cleanFinalOutput,
           total_cost: totalCost,
           total_duration_ms: Date.now() - startTime,
-          has_client_exec: dag.nodes.some((n) => n.selected_model.inference_target === "browser")
+          has_client_exec: tailRequiresClientCommit,
+          tail_requires_client_commit: tailRequiresClientCommit,
+          run_id: options.runId,
+          perceptual_entries: perceptualCacheUpdates,
+          state_committed: stateCommitted,
+          can_retry_commit: canRetryCommit,
+          awaiting_commit: !stateCommitted && canRetryCommit,
+          ...(commitErrorCode ? { commit_error_code: commitErrorCode } : {}),
+          ...(commitErrorMessage ? { commit_error: commitErrorMessage } : {}),
+          ...(authoritativeGitState ? { authoritative_git_state: authoritativeGitState } : {})
         });
       } catch (err: any) {
         if (isStreamCancelled || err.name === "AbortError") {
@@ -2408,6 +2873,15 @@ export async function executeDAGStream(
           env.ENVIRONMENT === "production"
             ? "Task execution encountered an error. Please try again later."
             : err.message || "Execution error";
+        if (options.onFinishWithoutCommit) {
+          await options.onFinishWithoutCommit({
+            outcome: "FAILED",
+            failureStatus: 500,
+            failureCode: "execution_error",
+            failureMessage: safeErrorMsg
+          });
+        }
+        isStreamSettledOrHandedOver = true;
         sendEvent("dag_error", {
           error: safeErrorMsg
         });
@@ -2424,6 +2898,14 @@ export async function executeDAGStream(
       try {
         abortController.abort();
       } catch (e) {}
+      if (!isStreamSettledOrHandedOver && options.onFinishWithoutCommit) {
+        await options.onFinishWithoutCommit({
+          outcome: "ABORTED",
+          failureStatus: 499,
+          failureCode: "client_aborted",
+          failureMessage: "客户端中断了执行流。"
+        });
+      }
       const reservedCredits = options.preDeductedCredits ?? 1;
       // If user aborted before any real tokens were generated, release pre-deducted reservation
       if (options.hasPreDeducted && !hasEmittedTokens) {

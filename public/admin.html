@@ -2151,7 +2151,7 @@
               return `<span class="pipeline-step-pill">${idx + 1}. ${escapeHtml(rName)}</span>`;
             }).join(' <span class="pipeline-arrow">➔</span> ');
 
-            const inOutDisplay = `<span class="badge-pill" style="background:rgba(255,255,255,0.06);">${(t.in_modalities || []).join(',')}</span> <span class="pipeline-arrow">➔</span> <span class="badge-pill" style="background:rgba(255,255,255,0.06);">${(t.out_modalities || []).join(',')}</span>`;
+            const inOutDisplay = `<span class="badge-pill" style="background:rgba(255,255,255,0.06);">${escapeHtml((t.in_modalities || []).join(','))}</span> <span class="pipeline-arrow">➔</span> <span class="badge-pill" style="background:rgba(255,255,255,0.06);">${escapeHtml((t.out_modalities || []).join(','))}</span>`;
 
             const statusClass = t.is_active ? 'badge-active' : 'badge-revoked';
             const statusText = t.is_active ? '已启用' : '已停用';

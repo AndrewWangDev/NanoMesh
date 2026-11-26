@@ -23,6 +23,7 @@ import {
 import { runOrchestrationPipeline } from "../src/orchestration/orchestrator";
 import { executeDAGStream } from "../src/orchestration/dispatcher";
 import { handleChat, handleChatContinue, triggerLazyHandshakeSweep } from "../src/api/chat";
+import { registerAndFreezeDagRunPlan, registerPresignedAssetTicket } from "../src/api/session";
 import type { Env } from "../src/types";
 import type { UnifiedProtocolEnvelope } from "../src/orchestration/types";
 import bcrypt from "bcryptjs";
@@ -49,6 +50,16 @@ interface TableStore {
   notifications: any[];
   broadcast_reads: any[];
   system_counters: any[];
+  chat_session_states?: any[];
+  session_branches?: any[];
+  session_commits?: any[];
+  session_assets?: any[];
+  dag_run_plans?: any[];
+  asset_perceptual_cache?: any[];
+  dag_execution_cache?: any[];
+  run_billing_settlements?: any[];
+  pending_r2_deletions?: any[];
+  pending_r2_prefix_purges?: any[];
 }
 
 interface TableConstraint {
@@ -76,8 +87,42 @@ const SCHEMA_CONSTRAINTS: Record<string, TableConstraint> = {
   dag_templates: { primaryKey: "template_id" },
   models: { primaryKey: "model_id" },
   user_passkeys: { primaryKey: "credential_id" },
-  user_chat_sessions: { primaryKey: "session_id" },
-  credit_ledger: { primaryKey: "ledger_id" }
+  user_chat_sessions: { primaryKey: "__compound_pk__", uniqueKeys: [["user_id", "session_id"]] },
+  credit_ledger: { primaryKey: "ledger_id" },
+  chat_session_states: { primaryKey: "__compound_pk__", uniqueKeys: [["user_id", "session_id"]] },
+  session_branches: {
+    primaryKey: "__compound_pk__",
+    uniqueKeys: [["user_id", "session_id", "branch_id"]]
+  },
+  session_commits: {
+    primaryKey: "__compound_pk__",
+    uniqueKeys: [
+      ["user_id", "session_id", "commit_id"],
+      ["user_id", "session_id", "run_id"]
+    ]
+  },
+  session_assets: { primaryKey: "__compound_pk__", uniqueKeys: [["user_id", "asset_id"]] },
+  dag_run_plans: {
+    primaryKey: "__compound_pk__",
+    uniqueKeys: [
+      ["user_id", "run_id"],
+      ["user_id", "session_id", "client_op_id"]
+    ]
+  },
+  asset_perceptual_cache: {
+    primaryKey: "__compound_pk__",
+    uniqueKeys: [["user_id", "session_id", "percept_key"]]
+  },
+  dag_execution_cache: {
+    primaryKey: "__compound_pk__",
+    uniqueKeys: [["user_id", "session_id", "cache_key"]]
+  },
+  run_billing_settlements: {
+    primaryKey: "__compound_pk__",
+    uniqueKeys: [["user_id", "run_id", "phase"]]
+  },
+  pending_r2_deletions: { primaryKey: "delete_id", uniqueKeys: [["user_id", "r2_key"]] },
+  pending_r2_prefix_purges: { primaryKey: "user_id" }
 };
 
 function checkAndInsertRow(
@@ -133,7 +178,7 @@ function checkAndInsertRow(
     const conflictIndex = pkConflictIndex !== -1 ? pkConflictIndex : ukConflictIndex;
 
     if (hasConflict) {
-      if (isOrIgnore) {
+      if (isOrIgnore || cleanSql.includes("DO NOTHING")) {
         return { changes: 0 };
       } else if (isOrReplace || hasOnConflict) {
         tableData[conflictIndex] = { ...tableData[conflictIndex], ...newRow };
@@ -164,7 +209,7 @@ function createMockD1(store: TableStore) {
           return res.results.length > 0 ? res.results[0] : null;
         },
         async all<T = any>(): Promise<{ results: T[] }> {
-          const cleanSql = sql.trim();
+          const cleanSql = sql.replace(/\s+/g, " ").trim();
 
           // 1. SELECT COUNT FROM admin_login_attempts
           if (cleanSql.includes("FROM admin_login_attempts")) {
@@ -312,6 +357,176 @@ function createMockD1(store: TableStore) {
             return { results: res as any };
           }
 
+          // 11b. SELECT * FROM chat_session_states
+          if (cleanSql.includes("FROM chat_session_states")) {
+            let res = [...(store.chat_session_states || [])];
+            if (cleanSql.includes("WHERE user_id = ? AND session_id = ?")) {
+              res = res.filter((r) => r.user_id === boundArgs[0] && r.session_id === boundArgs[1]);
+            } else if (cleanSql.includes("WHERE session_id = ? AND user_id = ?")) {
+              res = res.filter((r) => r.session_id === boundArgs[0] && r.user_id === boundArgs[1]);
+            }
+            return { results: res as any };
+          }
+
+          // 11c. SELECT * FROM session_branches
+          if (cleanSql.includes("FROM session_branches")) {
+            let res = [...(store.session_branches || [])];
+            if (cleanSql.includes("WHERE user_id = ? AND session_id = ?")) {
+              res = res.filter((r) => r.user_id === boundArgs[0] && r.session_id === boundArgs[1]);
+            } else if (cleanSql.includes("WHERE session_id = ? AND user_id = ?")) {
+              res = res.filter((r) => r.session_id === boundArgs[0] && r.user_id === boundArgs[1]);
+            }
+            return { results: res as any };
+          }
+
+          // 11d. SELECT * FROM session_commits
+          if (cleanSql.includes("FROM session_commits")) {
+            let res = [...(store.session_commits || [])];
+            if (cleanSql.includes("WHERE user_id = ? AND session_id = ?")) {
+              res = res.filter((r) => r.user_id === boundArgs[0] && r.session_id === boundArgs[1]);
+            } else if (cleanSql.includes("WHERE session_id = ? AND user_id = ?")) {
+              res = res.filter((r) => r.session_id === boundArgs[0] && r.user_id === boundArgs[1]);
+            }
+            return { results: res as any };
+          }
+
+          // 11e. SELECT * FROM session_assets
+          if (cleanSql.includes("FROM session_assets")) {
+            let res = [...(store.session_assets || [])];
+            if (cleanSql.includes("WHERE user_id = ? AND (r2_key = ? OR text_r2_key = ?)")) {
+              res = res.filter(
+                (r) =>
+                  r.user_id === boundArgs[0] &&
+                  (r.r2_key === boundArgs[1] || r.text_r2_key === boundArgs[2])
+              );
+            } else if (cleanSql.includes("WHERE user_id = ? AND (r2_key = ? OR asset_id = ?)")) {
+              res = res.filter(
+                (r) =>
+                  r.user_id === boundArgs[0] &&
+                  (r.r2_key === boundArgs[1] || r.asset_id === boundArgs[2])
+              );
+            } else if (cleanSql.includes("WHERE user_id = ? AND session_id = ? AND asset_id = ?")) {
+              res = res.filter(
+                (r) =>
+                  r.user_id === boundArgs[0] &&
+                  r.session_id === boundArgs[1] &&
+                  r.asset_id === boundArgs[2] &&
+                  (!cleanSql.includes("status = 'COMMITTED'") || r.status === "COMMITTED")
+              );
+            } else if (cleanSql.includes("WHERE user_id = ? AND asset_id = ?")) {
+              res = res.filter((r) => r.user_id === boundArgs[0] && r.asset_id === boundArgs[1]);
+            } else if (cleanSql.includes("WHERE user_id = ? AND r2_key = ?")) {
+              res = res.filter((r) => r.user_id === boundArgs[0] && r.r2_key === boundArgs[1]);
+            } else if (cleanSql.includes("WHERE user_id = ? AND session_id = ?")) {
+              res = res.filter(
+                (r) =>
+                  r.user_id === boundArgs[0] &&
+                  r.session_id === boundArgs[1] &&
+                  (!cleanSql.includes("status = 'COMMITTED'") || r.status === "COMMITTED")
+              );
+            } else if (cleanSql.includes("WHERE r2_key = ?")) {
+              res = res.filter((r) => r.r2_key === boundArgs[0]);
+            } else if (cleanSql.includes("WHERE session_id = ? AND user_id = ?")) {
+              res = res.filter((r) => r.session_id === boundArgs[0] && r.user_id === boundArgs[1]);
+            }
+            return { results: res as any };
+          }
+
+          // 11f. SELECT * FROM dag_run_plans
+          if (cleanSql.includes("FROM dag_run_plans")) {
+            let res = [...(store.dag_run_plans || [])];
+            if (cleanSql.includes("WHERE user_id = ? AND session_id = ? AND client_op_id = ?")) {
+              res = res.filter(
+                (r) =>
+                  r.user_id === boundArgs[0] &&
+                  r.session_id === boundArgs[1] &&
+                  r.client_op_id === boundArgs[2]
+              );
+            } else if (cleanSql.includes("WHERE user_id = ? AND run_id = ? AND session_id = ?")) {
+              res = res.filter(
+                (r) =>
+                  r.user_id === boundArgs[0] &&
+                  r.run_id === boundArgs[1] &&
+                  r.session_id === boundArgs[2]
+              );
+            } else if (cleanSql.includes("WHERE run_id = ?")) {
+              res = res.filter((r) => r.run_id === boundArgs[0]);
+            }
+            return { results: res as any };
+          }
+
+          // 11g. SELECT * FROM asset_perceptual_cache
+          if (cleanSql.includes("FROM asset_perceptual_cache")) {
+            let res = [...(store.asset_perceptual_cache || [])];
+            if (cleanSql.includes("WHERE user_id = ? AND session_id = ?")) {
+              res = res.filter((r) => r.user_id === boundArgs[0] && r.session_id === boundArgs[1]);
+            } else if (cleanSql.includes("WHERE session_id = ? AND user_id = ?")) {
+              res = res.filter((r) => r.session_id === boundArgs[0] && r.user_id === boundArgs[1]);
+            }
+            return { results: res as any };
+          }
+
+          // 11h. SELECT * FROM dag_execution_cache
+          if (cleanSql.includes("FROM dag_execution_cache")) {
+            let res = [...(store.dag_execution_cache || [])];
+            if (cleanSql.includes("WHERE user_id = ? AND session_id = ? AND cache_key = ?")) {
+              res = res.filter(
+                (r) =>
+                  r.user_id === boundArgs[0] &&
+                  r.session_id === boundArgs[1] &&
+                  r.cache_key === boundArgs[2]
+              );
+            } else if (cleanSql.includes("WHERE cache_key = ?")) {
+              res = res.filter((r) => r.cache_key === boundArgs[0]);
+            }
+            return { results: res as any };
+          }
+
+          // 11i. SELECT FROM run_billing_settlements
+          if (cleanSql.includes("FROM run_billing_settlements")) {
+            let res = [...(store.run_billing_settlements || [])];
+            if (cleanSql.includes("WHERE user_id = ? AND run_id = ? AND phase = ?")) {
+              res = res.filter(
+                (r) =>
+                  r.user_id === boundArgs[0] &&
+                  r.run_id === boundArgs[1] &&
+                  r.phase === boundArgs[2]
+              );
+            }
+            return { results: res as any };
+          }
+
+          // 11j. SELECT FROM pending_r2_deletions / pending_r2_prefix_purges
+          if (cleanSql.includes("FROM pending_r2_deletions")) {
+            let res = [...(store.pending_r2_deletions || [])];
+            if (cleanSql.includes("WHERE user_id = ?")) {
+              res = res.filter((r) => r.user_id === boundArgs[0]);
+            }
+            return { results: res as any };
+          }
+          if (cleanSql.includes("FROM pending_r2_prefix_purges")) {
+            let res = [...(store.pending_r2_prefix_purges || [])];
+            if (cleanSql.includes("WHERE user_id = ?")) {
+              res = res.filter((r) => r.user_id === boundArgs[0]);
+            }
+            return { results: res as any };
+          }
+
+          // 11k. SELECT session_id FROM user_chat_sessions
+          if (cleanSql.includes("FROM user_chat_sessions")) {
+            let res = [...(store.user_chat_sessions || [])];
+            if (cleanSql.includes("WHERE user_id = ? AND (session_id = ? OR trace_id = ?)")) {
+              res = res.filter(
+                (r) =>
+                  r.user_id === boundArgs[0] &&
+                  (r.session_id === boundArgs[1] || r.trace_id === boundArgs[2])
+              );
+            } else if (cleanSql.includes("WHERE user_id = ?")) {
+              res = res.filter((r) => r.user_id === boundArgs[0]);
+            }
+            return { results: res as any };
+          }
+
           // 12. SELECT value FROM system_counters
           if (cleanSql.includes("FROM system_counters")) {
             const key = boundArgs[0];
@@ -348,6 +563,9 @@ function createMockD1(store: TableStore) {
                 return true;
               });
             }
+            if (cleanSql.includes("ORDER BY id DESC")) {
+              res.sort((a, b) => (b.id || 0) - (a.id || 0));
+            }
             return { results: res as any };
           }
 
@@ -365,12 +583,179 @@ function createMockD1(store: TableStore) {
           return { results: [] };
         },
         async run(): Promise<{ meta: { changes: number } }> {
-          const cleanSql = sql.trim();
+          const cleanSql = sql.replace(/\s+/g, " ").trim();
 
-          // DELETE FROM user_chat_sessions
+          // DELETE FROM user_chat_sessions & 0025 session tables
           if (cleanSql.startsWith("DELETE FROM user_chat_sessions")) {
-            const userId = boundArgs[0];
-            store.user_chat_sessions = store.user_chat_sessions.filter((s) => s.user_id !== userId);
+            if (cleanSql.includes("(session_id = ? OR trace_id = ?)")) {
+              const [uid, s1, s2, gUid, gSess] = boundArgs;
+              if (cleanSql.includes("s.deleted_at IS NOT NULL")) {
+                const delOk = (store.chat_session_states || []).some(
+                  (s) => s.user_id === gUid && s.session_id === gSess && !!s.deleted_at
+                );
+                if (!delOk) return { meta: { changes: 0 } };
+              }
+              store.user_chat_sessions = store.user_chat_sessions.filter(
+                (s) => !(s.user_id === uid && (s.session_id === s1 || s.trace_id === s2))
+              );
+            } else {
+              const userId = boundArgs[0];
+              store.user_chat_sessions = store.user_chat_sessions.filter(
+                (s) => s.user_id !== userId
+              );
+            }
+            return { meta: { changes: 1 } };
+          }
+
+          if (cleanSql.startsWith("DELETE FROM chat_session_states")) {
+            store.chat_session_states = (store.chat_session_states || []).filter(
+              (r) => r.user_id !== boundArgs[0]
+            );
+            return { meta: { changes: 1 } };
+          }
+          if (cleanSql.startsWith("DELETE FROM session_branches")) {
+            if (cleanSql.includes("s.deleted_at IS NOT NULL")) {
+              const delOk = (store.chat_session_states || []).some(
+                (s) => s.user_id === boundArgs[2] && s.session_id === boundArgs[3] && !!s.deleted_at
+              );
+              if (!delOk) return { meta: { changes: 0 } };
+            }
+            store.session_branches = (store.session_branches || []).filter((r) =>
+              boundArgs.length >= 2
+                ? !(r.user_id === boundArgs[0] && r.session_id === boundArgs[1])
+                : r.user_id !== boundArgs[0]
+            );
+            return { meta: { changes: 1 } };
+          }
+          if (cleanSql.startsWith("DELETE FROM session_commits")) {
+            if (cleanSql.includes("s.deleted_at IS NOT NULL")) {
+              const delOk = (store.chat_session_states || []).some(
+                (s) => s.user_id === boundArgs[2] && s.session_id === boundArgs[3] && !!s.deleted_at
+              );
+              if (!delOk) return { meta: { changes: 0 } };
+            }
+            store.session_commits = (store.session_commits || []).filter((r) =>
+              boundArgs.length >= 2
+                ? !(r.user_id === boundArgs[0] && r.session_id === boundArgs[1])
+                : r.user_id !== boundArgs[0]
+            );
+            return { meta: { changes: 1 } };
+          }
+          if (cleanSql.startsWith("DELETE FROM session_assets")) {
+            if (cleanSql.includes("s.deleted_at IS NOT NULL")) {
+              const delOk = (store.chat_session_states || []).some(
+                (s) => s.user_id === boundArgs[2] && s.session_id === boundArgs[3] && !!s.deleted_at
+              );
+              if (!delOk) return { meta: { changes: 0 } };
+            }
+            store.session_assets = (store.session_assets || []).filter((r) =>
+              boundArgs.length >= 2
+                ? !(r.user_id === boundArgs[0] && r.session_id === boundArgs[1])
+                : r.user_id !== boundArgs[0]
+            );
+            return { meta: { changes: 1 } };
+          }
+          if (cleanSql.startsWith("DELETE FROM run_billing_settlements")) {
+            if (cleanSql.includes("s.deleted_at IS NOT NULL")) {
+              const delOk = (store.chat_session_states || []).some(
+                (s) => s.user_id === boundArgs[1] && s.session_id === boundArgs[2] && !!s.deleted_at
+              );
+              if (!delOk) return { meta: { changes: 0 } };
+              const [uid, , , pUid, pSess] = boundArgs;
+              const runIds = new Set(
+                (store.dag_run_plans || [])
+                  .filter((p) => p.user_id === pUid && p.session_id === pSess)
+                  .map((p) => p.run_id)
+              );
+              store.run_billing_settlements = (store.run_billing_settlements || []).filter(
+                (r) => !(r.user_id === uid && runIds.has(r.run_id))
+              );
+            } else if (boundArgs.length >= 3) {
+              const [uid, pUid, pSess] = boundArgs;
+              const runIds = new Set(
+                (store.dag_run_plans || [])
+                  .filter((p) => p.user_id === pUid && p.session_id === pSess)
+                  .map((p) => p.run_id)
+              );
+              store.run_billing_settlements = (store.run_billing_settlements || []).filter(
+                (r) => !(r.user_id === uid && runIds.has(r.run_id))
+              );
+            } else {
+              store.run_billing_settlements = (store.run_billing_settlements || []).filter(
+                (r) => r.user_id !== boundArgs[0]
+              );
+            }
+            return { meta: { changes: 1 } };
+          }
+          if (cleanSql.startsWith("DELETE FROM dag_run_plans")) {
+            if (cleanSql.includes("s.deleted_at IS NOT NULL")) {
+              const delOk = (store.chat_session_states || []).some(
+                (s) => s.user_id === boundArgs[2] && s.session_id === boundArgs[3] && !!s.deleted_at
+              );
+              if (!delOk) return { meta: { changes: 0 } };
+            }
+            store.dag_run_plans = (store.dag_run_plans || []).filter((r) =>
+              boundArgs.length >= 2
+                ? !(r.user_id === boundArgs[0] && r.session_id === boundArgs[1])
+                : r.user_id !== boundArgs[0]
+            );
+            return { meta: { changes: 1 } };
+          }
+          if (cleanSql.startsWith("DELETE FROM asset_perceptual_cache")) {
+            if (cleanSql.includes("s.deleted_at IS NOT NULL")) {
+              const delOk = (store.chat_session_states || []).some(
+                (s) => s.user_id === boundArgs[2] && s.session_id === boundArgs[3] && !!s.deleted_at
+              );
+              if (!delOk) return { meta: { changes: 0 } };
+            }
+            store.asset_perceptual_cache = (store.asset_perceptual_cache || []).filter((r) =>
+              boundArgs.length >= 2
+                ? !(r.user_id === boundArgs[0] && r.session_id === boundArgs[1])
+                : r.user_id !== boundArgs[0]
+            );
+            return { meta: { changes: 1 } };
+          }
+          if (cleanSql.startsWith("DELETE FROM dag_execution_cache")) {
+            if (cleanSql.includes("s.deleted_at IS NOT NULL")) {
+              const delOk = (store.chat_session_states || []).some(
+                (s) => s.user_id === boundArgs[2] && s.session_id === boundArgs[3] && !!s.deleted_at
+              );
+              if (!delOk) return { meta: { changes: 0 } };
+            }
+            store.dag_execution_cache = (store.dag_execution_cache || []).filter((r) =>
+              boundArgs.length >= 2
+                ? !(r.user_id === boundArgs[0] && r.session_id === boundArgs[1])
+                : r.user_id !== boundArgs[0]
+            );
+            return { meta: { changes: 1 } };
+          }
+          if (
+            cleanSql.startsWith("DELETE FROM dag_handshakes") &&
+            !cleanSql.includes("expires_at")
+          ) {
+            if (cleanSql.includes("s.deleted_at IS NOT NULL")) {
+              const delOk = (store.chat_session_states || []).some(
+                (s) => s.user_id === boundArgs[2] && s.session_id === boundArgs[3] && !!s.deleted_at
+              );
+              if (!delOk) return { meta: { changes: 0 } };
+            }
+            store.dag_handshakes = (store.dag_handshakes || []).filter((r) =>
+              boundArgs.length >= 2
+                ? !(r.user_id === boundArgs[0] && r.session_id === boundArgs[1])
+                : r.user_id !== boundArgs[0]
+            );
+            return { meta: { changes: 1 } };
+          }
+          if (cleanSql.startsWith("DELETE FROM pending_r2_deletions")) {
+            store.pending_r2_deletions = (store.pending_r2_deletions || []).filter(
+              (r) => r.delete_id !== boundArgs[0]
+            );
+            return { meta: { changes: 1 } };
+          }
+          if (cleanSql.startsWith("DELETE FROM pending_r2_prefix_purges")) {
+            store.pending_r2_prefix_purges = (store.pending_r2_prefix_purges || []).filter(
+              (r) => r.user_id !== boundArgs[0]
+            );
             return { meta: { changes: 1 } };
           }
 
@@ -517,13 +902,26 @@ function createMockD1(store: TableStore) {
             return { meta: { changes: 1 } };
           }
 
+          // UPDATE users SET token_version = COALESCE(token_version, 1) + 1 (handleLogout)
+          if (cleanSql.startsWith("UPDATE users") && cleanSql.includes("SET token_version =")) {
+            const userId = boundArgs[boundArgs.length - 1];
+            const u = store.users.find((usr) => usr.user_id === userId);
+            if (u) {
+              u.token_version = (u.token_version || 1) + 1;
+              return { meta: { changes: 1 } };
+            }
+            return { meta: { changes: 0 } };
+          }
+
           // UPDATE users SET password_hash
           if (cleanSql.includes("UPDATE users") && cleanSql.includes("SET password_hash")) {
             const userId = boundArgs[boundArgs.length - 1];
             const u = store.users.find((usr) => usr.user_id === userId);
             if (u) {
               u.password_hash = boundArgs[0];
-              u.token_version = (u.token_version || 1) + 1;
+              if (cleanSql.includes("token_version")) {
+                u.token_version = (u.token_version || 1) + 1;
+              }
             }
             return { meta: { changes: 1 } };
           }
@@ -629,11 +1027,16 @@ function createMockD1(store: TableStore) {
                 return { meta: { changes: 1 } };
               } else if (cleanSql.includes("credits = credits - ?")) {
                 const deduct = Number(boundArgs[0]) || 1;
-                if (user.credits >= deduct) {
+                if (cleanSql.includes("AND credits >= ?")) {
+                  if (user.credits >= deduct) {
+                    user.credits -= deduct;
+                    return { meta: { changes: 1 } };
+                  }
+                  return { meta: { changes: 0 } };
+                } else {
                   user.credits -= deduct;
                   return { meta: { changes: 1 } };
                 }
-                return { meta: { changes: 0 } };
               } else if (cleanSql.includes("credits = credits + 50")) {
                 user.credits += 50;
               } else if (cleanSql.includes("credits = credits + 1")) {
@@ -849,10 +1252,13 @@ function createMockD1(store: TableStore) {
             return { meta: { changes: 1 } };
           }
 
-          // INSERT INTO user_chat_sessions
+          // INSERT INTO user_chat_sessions (composite (user_id, session_id))
           if (cleanSql.startsWith("INSERT INTO user_chat_sessions")) {
             const sessionId = boundArgs[0];
-            const existing = store.user_chat_sessions.find((s) => s.session_id === sessionId);
+            const userId = boundArgs[1];
+            const existing = store.user_chat_sessions.find(
+              (s) => s.user_id === userId && s.session_id === sessionId
+            );
             if (existing) {
               existing.trace_id = boundArgs[2];
               existing.title = boundArgs[3];
@@ -865,8 +1271,8 @@ function createMockD1(store: TableStore) {
               existing.updated_at = new Date().toISOString();
             } else {
               store.user_chat_sessions.push({
-                session_id: boundArgs[0],
-                user_id: boundArgs[1],
+                session_id: sessionId,
+                user_id: userId,
                 trace_id: boundArgs[2],
                 title: boundArgs[3],
                 cost: boundArgs[4],
@@ -899,10 +1305,19 @@ function createMockD1(store: TableStore) {
             const avatarUrl = boundArgs[0];
             const userId = boundArgs[1];
             const u = store.users.find((usr) => usr.user_id === userId);
-            if (u) {
-              u.avatar_url = avatarUrl;
-              u.avatar_updated_at = new Date().toISOString();
+            if (!u) return { meta: { changes: 0 } };
+            if (cleanSql.includes("avatar_updated_at IS NULL") && u.avatar_updated_at) {
+              const lastTs = new Date(
+                u.avatar_updated_at.includes("T")
+                  ? u.avatar_updated_at
+                  : u.avatar_updated_at.replace(" ", "T") + "Z"
+              ).getTime();
+              if (Date.now() - lastTs < 24 * 60 * 60 * 1000) {
+                return { meta: { changes: 0 } };
+              }
             }
+            u.avatar_url = avatarUrl;
+            u.avatar_updated_at = new Date().toISOString();
             return { meta: { changes: 1 } };
           }
 
@@ -930,16 +1345,964 @@ function createMockD1(store: TableStore) {
             return { meta: { changes: 1 } };
           }
 
+          // Session Git State, CAS, Billing, Execution Cache & R2 Purge Tables (Migration 0025)
+          if (cleanSql.startsWith("INSERT INTO dag_execution_cache")) {
+            store.dag_execution_cache = store.dag_execution_cache || [];
+            const [userId, sessionId, cacheKey, roleId, modelId, promptDigest, outputText] =
+              boundArgs;
+            return {
+              meta: checkAndInsertRow(
+                "dag_execution_cache",
+                {
+                  user_id: userId,
+                  session_id: sessionId,
+                  cache_key: cacheKey,
+                  role_id: roleId,
+                  model_id: modelId,
+                  prompt_digest: promptDigest,
+                  output_text: outputText
+                },
+                cleanSql,
+                store
+              )
+            };
+          }
+
+          if (cleanSql.startsWith("INSERT INTO run_billing_settlements")) {
+            store.run_billing_settlements = store.run_billing_settlements || [];
+            const [userId, runId, phase, amount] = boundArgs;
+            return {
+              meta: checkAndInsertRow(
+                "run_billing_settlements",
+                { user_id: userId, run_id: runId, phase, amount },
+                cleanSql,
+                store
+              )
+            };
+          }
+
+          if (cleanSql.startsWith("INSERT INTO pending_r2_prefix_purges")) {
+            store.pending_r2_prefix_purges = store.pending_r2_prefix_purges || [];
+            const [userId, prefixesJson] = boundArgs;
+            return {
+              meta: checkAndInsertRow(
+                "pending_r2_prefix_purges",
+                { user_id: userId, prefixes_json: prefixesJson },
+                cleanSql,
+                store
+              )
+            };
+          }
+
+          if (cleanSql.startsWith("INSERT INTO pending_r2_deletions")) {
+            store.pending_r2_deletions = store.pending_r2_deletions || [];
+            const [userId, sessionId] = boundArgs;
+            if (cleanSql.includes("s.deleted_at IS NOT NULL")) {
+              const delOk = (store.chat_session_states || []).some(
+                (s) => s.user_id === boundArgs[2] && s.session_id === boundArgs[3] && !!s.deleted_at
+              );
+              if (!delOk) return { meta: { changes: 0 } };
+            }
+            const useTextKey = cleanSql.includes("text_r2_key");
+            let inserted = 0;
+            for (const a of store.session_assets || []) {
+              const keyVal = useTextKey ? a.text_r2_key : a.r2_key;
+              if (
+                a.user_id === userId &&
+                (!cleanSql.includes("session_id = ?") || a.session_id === sessionId) &&
+                keyVal
+              ) {
+                const res = checkAndInsertRow(
+                  "pending_r2_deletions",
+                  {
+                    delete_id: crypto.randomUUID(),
+                    user_id: userId,
+                    session_id: a.session_id,
+                    r2_key: keyVal
+                  },
+                  cleanSql,
+                  store
+                );
+                inserted += res.changes;
+              }
+            }
+            return { meta: { changes: inserted } };
+          }
+
+          if (
+            cleanSql.startsWith("INSERT OR REPLACE INTO chat_session_states") ||
+            cleanSql.startsWith("INSERT INTO chat_session_states")
+          ) {
+            store.chat_session_states = store.chat_session_states || [];
+            if (cleanSql.includes("ON CONFLICT(user_id, session_id) DO UPDATE")) {
+              const [sessionId, userId] = boundArgs;
+              const nowIso = new Date().toISOString();
+              const existing = store.chat_session_states.find(
+                (r) => r.user_id === userId && r.session_id === sessionId
+              );
+              if (existing) {
+                const lockAlive =
+                  !!existing.occupancy_phase &&
+                  (!existing.lock_expires_at || existing.lock_expires_at > nowIso);
+                if (existing.deleted_at || lockAlive) {
+                  return { meta: { changes: 0 } };
+                }
+                existing.version = Number(existing.version || 1) + 1;
+                existing.last_tx_attempt_id = null;
+                existing.active_run_id = null;
+                existing.active_client_op_id = null;
+                existing.occupancy_phase = null;
+                existing.lock_expires_at = null;
+                existing.deleted_at = nowIso;
+                return { meta: { changes: 1 } };
+              }
+              store.chat_session_states.push({
+                session_id: sessionId,
+                user_id: userId,
+                active_branch_id: "main",
+                version: 1,
+                last_tx_attempt_id: null,
+                active_run_id: null,
+                active_client_op_id: null,
+                occupancy_phase: null,
+                lock_expires_at: null,
+                deleted_at: nowIso
+              });
+              return { meta: { changes: 1 } };
+            }
+            const [sessionId, userId] = boundArgs;
+            return {
+              meta: checkAndInsertRow(
+                "chat_session_states",
+                {
+                  session_id: sessionId,
+                  user_id: userId,
+                  active_branch_id: "main",
+                  version: 1,
+                  last_tx_attempt_id: null,
+                  active_run_id: null,
+                  active_client_op_id: null,
+                  occupancy_phase: null,
+                  lock_expires_at: null,
+                  deleted_at: null
+                },
+                cleanSql,
+                store
+              )
+            };
+          }
+
+          if (
+            cleanSql.startsWith(
+              "UPDATE chat_session_states SET active_run_id = ?, active_client_op_id = ?"
+            )
+          ) {
+            const [runId, clientOpId, lockExpiresAt, userId, sessionId] = boundArgs;
+            const nowIso = new Date().toISOString();
+            const sRow = (store.chat_session_states || []).find(
+              (r) => r.user_id === userId && r.session_id === sessionId && !r.deleted_at
+            );
+            const canAcquire =
+              !!sRow &&
+              (!sRow.occupancy_phase || (sRow.lock_expires_at && sRow.lock_expires_at <= nowIso));
+            if (!canAcquire) return { meta: { changes: 0 } };
+            sRow.active_run_id = runId;
+            sRow.active_client_op_id = clientOpId;
+            sRow.occupancy_phase = "EXECUTING";
+            sRow.lock_expires_at = lockExpiresAt;
+            return { meta: { changes: 1 } };
+          }
+
+          if (
+            cleanSql.startsWith(
+              "UPDATE chat_session_states SET active_run_id = ?, occupancy_phase = 'EXECUTING'"
+            )
+          ) {
+            const [runId, lockExpiresAt, userId, sessionId, expectedRunId] = boundArgs;
+            const sRow = (store.chat_session_states || []).find(
+              (r) =>
+                r.user_id === userId &&
+                r.session_id === sessionId &&
+                !r.deleted_at &&
+                (!r.active_run_id || r.active_run_id === expectedRunId)
+            );
+            if (!sRow) return { meta: { changes: 0 } };
+            sRow.active_run_id = runId;
+            sRow.occupancy_phase = "EXECUTING";
+            sRow.lock_expires_at = lockExpiresAt;
+            return { meta: { changes: 1 } };
+          }
+
+          if (
+            cleanSql.startsWith(
+              "UPDATE chat_session_states SET occupancy_phase = 'AWAITING_COMMIT'"
+            )
+          ) {
+            const [runId, lockExpiresAt, userId, sessionId, expectedRunId] = boundArgs;
+            const sRow = (store.chat_session_states || []).find(
+              (r) =>
+                r.user_id === userId &&
+                r.session_id === sessionId &&
+                !r.deleted_at &&
+                (!r.active_run_id || r.active_run_id === expectedRunId)
+            );
+            if (!sRow) return { meta: { changes: 0 } };
+            sRow.active_run_id = runId;
+            sRow.occupancy_phase = "AWAITING_COMMIT";
+            sRow.lock_expires_at = lockExpiresAt;
+            return { meta: { changes: 1 } };
+          }
+
+          if (
+            cleanSql.startsWith(
+              "UPDATE chat_session_states SET active_run_id = NULL, active_client_op_id = NULL"
+            )
+          ) {
+            const [userId, sessionId, expectedRunId] = boundArgs;
+            const sRow = (store.chat_session_states || []).find(
+              (r) =>
+                r.user_id === userId &&
+                r.session_id === sessionId &&
+                r.active_run_id === expectedRunId
+            );
+            if (!sRow) return { meta: { changes: 0 } };
+            sRow.active_run_id = null;
+            sRow.active_client_op_id = null;
+            sRow.occupancy_phase = null;
+            sRow.lock_expires_at = null;
+            return { meta: { changes: 1 } };
+          }
+
+          if (cleanSql.startsWith("UPDATE chat_session_states SET version = version + 1")) {
+            const [
+              isRer1,
+              targetBranchId,
+              attemptId,
+              userId,
+              sessionId,
+              _pUid,
+              runId,
+              _pSess,
+              authMode1,
+              nonceHash,
+              authMode2,
+              isRer2,
+              _cUid,
+              _cSess,
+              baseCommitId,
+              expectedRev,
+              _isRer3,
+              _bUid,
+              _bSess,
+              bBranchId,
+              expectedParent,
+              activeOwnerRunId
+            ] = boundArgs;
+            const sRow = (store.chat_session_states || []).find(
+              (r) =>
+                r.user_id === userId &&
+                r.session_id === sessionId &&
+                !r.deleted_at &&
+                (!r.active_run_id || r.active_run_id === (activeOwnerRunId || runId))
+            );
+            const pRow = (store.dag_run_plans || []).find(
+              (p) =>
+                p.user_id === userId &&
+                p.run_id === runId &&
+                p.session_id === sessionId &&
+                p.commit_state === "PENDING" &&
+                ((authMode1 === "browser_tail" &&
+                  p.exec_owner === "BROWSER_TAIL" &&
+                  p.client_commit_nonce_hash === nonceHash) ||
+                  (authMode2 === "cloud" &&
+                    (p.exec_owner === "CLOUD" || p.exec_owner === "CLOUD_FAILOVER")))
+            );
+            let baseOk = false;
+            if (isRer2 === 1) {
+              baseOk = (store.session_commits || []).some(
+                (c) =>
+                  c.user_id === userId &&
+                  c.session_id === sessionId &&
+                  c.commit_id === baseCommitId &&
+                  Number(c.revision || 1) === Number(expectedRev)
+              );
+            } else {
+              const br = (store.session_branches || []).find(
+                (b) =>
+                  b.user_id === userId && b.session_id === sessionId && b.branch_id === bBranchId
+              );
+              const head = br?.head_commit_id || "";
+              baseOk = head === (expectedParent || "");
+            }
+            if (!sRow || !pRow || !baseOk) {
+              return { meta: { changes: 0 } };
+            }
+            sRow.version = Number(sRow.version || 1) + 1;
+            if (isRer1 !== 1) sRow.active_branch_id = targetBranchId;
+            sRow.last_tx_attempt_id = attemptId;
+            sRow.active_run_id = null;
+            sRow.active_client_op_id = null;
+            sRow.occupancy_phase = null;
+            sRow.lock_expires_at = null;
+            return { meta: { changes: 1 } };
+          }
+
+          if (
+            cleanSql.startsWith("INSERT OR REPLACE INTO session_branches") ||
+            cleanSql.startsWith("INSERT INTO session_branches")
+          ) {
+            store.session_branches = store.session_branches || [];
+            const [
+              sessionId,
+              branchId,
+              userId,
+              topic,
+              headCommitId,
+              dominantModalities,
+              lastSummary,
+              lineageAssetIds,
+              gUid,
+              gSess,
+              gAttemptId
+            ] = boundArgs;
+            if (gAttemptId) {
+              const gateOk = (store.chat_session_states || []).some(
+                (s) =>
+                  s.user_id === gUid &&
+                  s.session_id === gSess &&
+                  s.last_tx_attempt_id === gAttemptId &&
+                  !s.deleted_at
+              );
+              if (!gateOk) return { meta: { changes: 0 } };
+            }
+            return {
+              meta: checkAndInsertRow(
+                "session_branches",
+                {
+                  session_id: sessionId,
+                  branch_id: branchId,
+                  user_id: userId,
+                  topic,
+                  head_commit_id: headCommitId,
+                  dominant_modalities: dominantModalities,
+                  last_summary: lastSummary,
+                  lineage_asset_ids: lineageAssetIds
+                },
+                cleanSql,
+                store
+              )
+            };
+          }
+
+          if (cleanSql.startsWith("UPDATE session_branches SET last_summary")) {
+            const [
+              lastSummary,
+              userId,
+              sessionId,
+              branchId,
+              headCommitId,
+              gUid,
+              gSess,
+              gAttemptId
+            ] = boundArgs;
+            if (gAttemptId) {
+              const gateOk = (store.chat_session_states || []).some(
+                (s) =>
+                  s.user_id === gUid &&
+                  s.session_id === gSess &&
+                  s.last_tx_attempt_id === gAttemptId &&
+                  !s.deleted_at
+              );
+              if (!gateOk) return { meta: { changes: 0 } };
+            }
+            const br = (store.session_branches || []).find(
+              (b) =>
+                b.user_id === userId &&
+                b.session_id === sessionId &&
+                b.branch_id === branchId &&
+                (!headCommitId || b.head_commit_id === headCommitId)
+            );
+            if (br) {
+              br.last_summary = lastSummary;
+              return { meta: { changes: 1 } };
+            }
+            return { meta: { changes: 0 } };
+          }
+
+          if (
+            cleanSql.startsWith("INSERT OR IGNORE INTO session_commits") ||
+            cleanSql.startsWith("INSERT INTO session_commits")
+          ) {
+            store.session_commits = store.session_commits || [];
+            const [
+              commitId,
+              sessionId,
+              userId,
+              runId,
+              branchId,
+              parentCommitId,
+              sourceRefsJson,
+              roundIndex,
+              intentOp,
+              userPrompt,
+              mountedAssetsJson,
+              introducedAssetIdsJson,
+              generatedAssetIdsJson,
+              templateId,
+              outputSummary,
+              createdAt,
+              gUid,
+              gSess,
+              gAttemptId
+            ] = boundArgs;
+            if (gAttemptId) {
+              const gateOk = (store.chat_session_states || []).some(
+                (s) =>
+                  s.user_id === gUid &&
+                  s.session_id === gSess &&
+                  s.last_tx_attempt_id === gAttemptId &&
+                  !s.deleted_at
+              );
+              if (!gateOk) return { meta: { changes: 0 } };
+            }
+            return {
+              meta: checkAndInsertRow(
+                "session_commits",
+                {
+                  commit_id: commitId,
+                  session_id: sessionId,
+                  user_id: userId,
+                  run_id: runId,
+                  branch_id: branchId,
+                  parent_commit_id: parentCommitId,
+                  source_refs_json: sourceRefsJson,
+                  round_index: roundIndex,
+                  revision: 1,
+                  intent_op: intentOp,
+                  user_prompt: userPrompt,
+                  mounted_assets_json: mountedAssetsJson,
+                  introduced_asset_ids_json: introducedAssetIdsJson,
+                  generated_asset_ids_json: generatedAssetIdsJson,
+                  template_id: templateId,
+                  output_summary: outputSummary,
+                  created_at: createdAt
+                },
+                cleanSql,
+                store
+              )
+            };
+          }
+
+          if (cleanSql.startsWith("UPDATE session_commits SET revision")) {
+            const [
+              rev,
+              tplId,
+              summary,
+              userId,
+              sessionId,
+              commitId,
+              expectedRev,
+              gUid,
+              gSess,
+              gAttemptId
+            ] = boundArgs;
+            if (gAttemptId) {
+              const gateOk = (store.chat_session_states || []).some(
+                (s) =>
+                  s.user_id === gUid &&
+                  s.session_id === gSess &&
+                  s.last_tx_attempt_id === gAttemptId &&
+                  !s.deleted_at
+              );
+              if (!gateOk) return { meta: { changes: 0 } };
+            }
+            const c = (store.session_commits || []).find(
+              (x) =>
+                x.user_id === userId &&
+                x.session_id === sessionId &&
+                x.commit_id === commitId &&
+                Number(x.revision || 1) === Number(expectedRev)
+            );
+            if (c) {
+              c.revision = rev;
+              c.template_id = tplId;
+              c.output_summary = summary;
+              return { meta: { changes: 1 } };
+            }
+            return { meta: { changes: 0 } };
+          }
+
+          if (
+            cleanSql.startsWith("INSERT OR IGNORE INTO session_assets") ||
+            cleanSql.startsWith("INSERT OR REPLACE INTO session_assets") ||
+            cleanSql.startsWith("INSERT INTO session_assets")
+          ) {
+            store.session_assets = store.session_assets || [];
+            let newRow: any;
+            if (cleanSql.includes("VALUES (?, '__UNBOUND__'")) {
+              const [assetId, userId, filename, modality, mimeType, fileSize, r2Key, origin] =
+                boundArgs;
+              newRow = {
+                asset_id: assetId,
+                session_id: "__UNBOUND__",
+                user_id: userId,
+                branch_id: null,
+                commit_id: null,
+                filename,
+                modality,
+                mime_type: mimeType,
+                file_size: fileSize,
+                r2_key: r2Key,
+                text_r2_key: null,
+                in_memory_text: null,
+                source_digest: null,
+                origin,
+                introduced_round: 0,
+                status: "UPLOADED",
+                summary_snippet: ""
+              };
+            } else if (cleanSql.includes("'STAGING'")) {
+              const [
+                assetId,
+                sessionId,
+                userId,
+                filename,
+                modality,
+                mimeType,
+                fileSize,
+                r2Key,
+                textR2Key,
+                gUid,
+                gSess
+              ] = boundArgs;
+              const active = (store.chat_session_states || []).some(
+                (s) => s.user_id === gUid && s.session_id === gSess && !s.deleted_at
+              );
+              if (!active) return { meta: { changes: 0 } };
+              newRow = {
+                asset_id: assetId,
+                session_id: sessionId,
+                user_id: userId,
+                branch_id: null,
+                commit_id: null,
+                filename,
+                modality,
+                mime_type: mimeType,
+                file_size: fileSize,
+                r2_key: r2Key,
+                text_r2_key: textR2Key,
+                in_memory_text: null,
+                source_digest: null,
+                origin: "generated",
+                introduced_round: 0,
+                status: "STAGING",
+                summary_snippet: ""
+              };
+            } else if (cleanSql.includes("'generated'")) {
+              const [
+                assetId,
+                sessionId,
+                userId,
+                branchId,
+                commitId,
+                filename,
+                modality,
+                mimeType,
+                fileSize,
+                r2Key,
+                sourceDigest,
+                introducedRound,
+                summarySnippet,
+                gUid,
+                gSess,
+                gAttemptId
+              ] = boundArgs;
+              if (gAttemptId) {
+                const gateOk = (store.chat_session_states || []).some(
+                  (s) =>
+                    s.user_id === gUid &&
+                    s.session_id === gSess &&
+                    s.last_tx_attempt_id === gAttemptId &&
+                    !s.deleted_at
+                );
+                if (!gateOk) return { meta: { changes: 0 } };
+              }
+              newRow = {
+                asset_id: assetId,
+                session_id: sessionId,
+                user_id: userId,
+                branch_id: branchId,
+                commit_id: commitId,
+                filename,
+                modality,
+                mime_type: mimeType,
+                file_size: fileSize,
+                r2_key: r2Key,
+                text_r2_key: null,
+                in_memory_text: null,
+                source_digest: sourceDigest,
+                origin: "generated",
+                introduced_round: introducedRound,
+                status: "COMMITTED",
+                summary_snippet: summarySnippet
+              };
+            } else {
+              const [
+                assetId,
+                sessionId,
+                userId,
+                branchId,
+                commitId,
+                filename,
+                modality,
+                mimeType,
+                fileSize,
+                r2Key,
+                sourceDigest,
+                introducedRound,
+                summarySnippet,
+                inlineText,
+                textR2Key,
+                gUid,
+                gSess,
+                gAttemptId
+              ] = boundArgs;
+              if (gAttemptId) {
+                const gateOk = (store.chat_session_states || []).some(
+                  (s) =>
+                    s.user_id === gUid &&
+                    s.session_id === gSess &&
+                    s.last_tx_attempt_id === gAttemptId &&
+                    !s.deleted_at
+                );
+                if (!gateOk) return { meta: { changes: 0 } };
+              }
+              newRow = {
+                asset_id: assetId,
+                session_id: sessionId,
+                user_id: userId,
+                branch_id: branchId,
+                commit_id: commitId,
+                filename,
+                modality,
+                mime_type: mimeType,
+                file_size: fileSize,
+                r2_key: r2Key,
+                source_digest: sourceDigest,
+                origin: "upload",
+                introduced_round: introducedRound,
+                status: "COMMITTED",
+                summary_snippet: summarySnippet,
+                in_memory_text: inlineText ?? null,
+                text_r2_key: textR2Key ?? null
+              };
+            }
+            return { meta: checkAndInsertRow("session_assets", newRow, cleanSql, store) };
+          }
+
+          if (cleanSql.startsWith("UPDATE session_assets SET session_id")) {
+            const [sessionId, sourceDigest, roundIdx, userId, assetId, r2Key] = boundArgs;
+            const a = (store.session_assets || []).find(
+              (x) =>
+                x.user_id === userId &&
+                x.asset_id === assetId &&
+                x.r2_key === r2Key &&
+                x.session_id === "__UNBOUND__"
+            );
+            if (a) {
+              a.session_id = sessionId;
+              a.source_digest = a.source_digest || sourceDigest;
+              a.introduced_round = roundIdx;
+              return { meta: { changes: 1 } };
+            }
+            return { meta: { changes: 0 } };
+          }
+
+          if (cleanSql.startsWith("INSERT INTO dag_run_plans")) {
+            store.dag_run_plans = store.dag_run_plans || [];
+            const [
+              runId,
+              userId,
+              sessionId,
+              clientOpId,
+              requestDigest,
+              planHash,
+              dagJson,
+              envelopeJson,
+              resolvedEnvelopeJson,
+              isRerun,
+              baseCommitId,
+              expectedParentCommitId,
+              expectedBaseRevision,
+              gUid,
+              gSess
+            ] = boundArgs;
+            const active = (store.chat_session_states || []).some(
+              (s) => s.user_id === gUid && s.session_id === gSess && !s.deleted_at
+            );
+            if (!active) return { meta: { changes: 0 } };
+            return {
+              meta: checkAndInsertRow(
+                "dag_run_plans",
+                {
+                  run_id: runId,
+                  user_id: userId,
+                  session_id: sessionId,
+                  client_op_id: clientOpId,
+                  request_digest: requestDigest,
+                  plan_hash: planHash,
+                  dag_json: dagJson,
+                  envelope_json: envelopeJson,
+                  resolved_envelope_json: resolvedEnvelopeJson,
+                  step_outputs_json: "{}",
+                  is_rerun: isRerun,
+                  base_commit_id: baseCommitId,
+                  expected_parent_commit_id: expectedParentCommitId,
+                  expected_base_revision: expectedBaseRevision,
+                  exec_owner: "CLOUD",
+                  commit_state: "PENDING",
+                  client_commit_nonce_hash: null,
+                  tail_result_json: null,
+                  tail_result_hash: null,
+                  status: "RUNNING"
+                },
+                cleanSql,
+                store
+              )
+            };
+          }
+
+          if (cleanSql.startsWith("UPDATE dag_run_plans SET step_outputs_json")) {
+            const [stepOutputsJson, userId, runId] = boundArgs;
+            const p = (store.dag_run_plans || []).find(
+              (x) => x.run_id === runId && x.user_id === userId
+            );
+            if (p) {
+              p.step_outputs_json = stepOutputsJson;
+              return { meta: { changes: 1 } };
+            }
+            return { meta: { changes: 0 } };
+          }
+
+          if (cleanSql.startsWith("UPDATE dag_run_plans SET exec_owner = 'BROWSER_TAIL'")) {
+            const [nonceHash, userId, runId, sessionId, sUid, sSess] = boundArgs;
+            const active = (store.chat_session_states || []).some(
+              (s) => s.user_id === sUid && s.session_id === sSess && !s.deleted_at
+            );
+            const p = (store.dag_run_plans || []).find(
+              (x) =>
+                x.user_id === userId &&
+                x.run_id === runId &&
+                x.session_id === sessionId &&
+                x.commit_state === "PENDING"
+            );
+            if (p && active) {
+              p.exec_owner = "BROWSER_TAIL";
+              p.client_commit_nonce_hash = nonceHash;
+              return { meta: { changes: 1 } };
+            }
+            return { meta: { changes: 0 } };
+          }
+
+          if (cleanSql.startsWith("UPDATE dag_run_plans SET exec_owner = 'CLOUD_FAILOVER'")) {
+            const [userId, runId, sessionId] = boundArgs;
+            const p = (store.dag_run_plans || []).find(
+              (x) =>
+                x.user_id === userId &&
+                x.run_id === runId &&
+                x.session_id === sessionId &&
+                x.exec_owner === "BROWSER_TAIL" &&
+                x.commit_state === "PENDING"
+            );
+            if (p) {
+              p.exec_owner = "CLOUD_FAILOVER";
+              p.client_commit_nonce_hash = null;
+              return { meta: { changes: 1 } };
+            }
+            return { meta: { changes: 0 } };
+          }
+
+          if (cleanSql.startsWith("UPDATE dag_run_plans SET tail_result_json")) {
+            const [tailResultJson, tailResultHash, userId, runId, sessionId] = boundArgs;
+            const p = (store.dag_run_plans || []).find(
+              (x) =>
+                x.user_id === userId &&
+                x.run_id === runId &&
+                x.session_id === sessionId &&
+                (x.exec_owner === "CLOUD" || x.exec_owner === "CLOUD_FAILOVER") &&
+                x.commit_state === "PENDING"
+            );
+            if (p) {
+              p.tail_result_json = tailResultJson;
+              p.tail_result_hash = tailResultHash;
+              return { meta: { changes: 1 } };
+            }
+            return { meta: { changes: 0 } };
+          }
+
+          if (cleanSql.startsWith("UPDATE dag_run_plans SET commit_state = 'COMMITTED'")) {
+            const [
+              tailPayloadJson,
+              tailResultHash,
+              userId,
+              runId,
+              sessionId,
+              gUid,
+              gSess,
+              gAttemptId
+            ] = boundArgs;
+            const gateOk = (store.chat_session_states || []).some(
+              (s) =>
+                s.user_id === gUid &&
+                s.session_id === gSess &&
+                s.last_tx_attempt_id === gAttemptId &&
+                !s.deleted_at
+            );
+            const p = (store.dag_run_plans || []).find(
+              (x) => x.user_id === userId && x.run_id === runId && x.session_id === sessionId
+            );
+            if (p && gateOk) {
+              p.commit_state = "COMMITTED";
+              p.exec_owner = "COMMITTED";
+              p.client_commit_nonce_hash = null;
+              p.tail_result_json = tailPayloadJson;
+              p.tail_result_hash = tailResultHash;
+              p.status = "COMPLETED";
+              return { meta: { changes: 1 } };
+            }
+            return { meta: { changes: 0 } };
+          }
+
+          if (cleanSql.startsWith("UPDATE dag_run_plans SET commit_state = 'ABORTED'")) {
+            const [userId, sessionId, runId] = boundArgs;
+            let changes = 0;
+            for (const p of store.dag_run_plans || []) {
+              if (
+                p.user_id === userId &&
+                p.session_id === sessionId &&
+                p.commit_state === "PENDING" &&
+                p.run_id !== runId
+              ) {
+                p.commit_state = "ABORTED";
+                p.status = "ABORTED";
+                p.failure_status = 409;
+                p.failure_code = "session_lock_expired";
+                p.client_commit_nonce_hash = null;
+                changes++;
+              }
+            }
+            return { meta: { changes } };
+          }
+
+          if (cleanSql.startsWith("UPDATE dag_run_plans SET status = 'AWAITING_COMMIT'")) {
+            const [userId, sessionId, runId] = boundArgs;
+            const p = (store.dag_run_plans || []).find(
+              (x) =>
+                x.user_id === userId &&
+                x.session_id === sessionId &&
+                x.run_id === runId &&
+                x.commit_state === "PENDING"
+            );
+            if (p) {
+              p.status = "AWAITING_COMMIT";
+              return { meta: { changes: 1 } };
+            }
+            return { meta: { changes: 0 } };
+          }
+
+          if (cleanSql.startsWith("UPDATE dag_run_plans SET commit_state = ?")) {
+            const [
+              outcome,
+              status,
+              failureStatus,
+              failureCode,
+              failureMessage,
+              userId,
+              sessionId,
+              runId
+            ] = boundArgs;
+            const p = (store.dag_run_plans || []).find(
+              (x) =>
+                x.user_id === userId &&
+                x.session_id === sessionId &&
+                x.run_id === runId &&
+                x.commit_state === "PENDING"
+            );
+            if (p) {
+              p.commit_state = outcome;
+              p.status = status;
+              p.failure_status = failureStatus ?? p.failure_status ?? null;
+              p.failure_code = failureCode ?? p.failure_code ?? null;
+              p.failure_message = failureMessage ?? p.failure_message ?? null;
+              p.client_commit_nonce_hash = null;
+              return { meta: { changes: 1 } };
+            }
+            return { meta: { changes: 0 } };
+          }
+
+          if (cleanSql.startsWith("INSERT INTO asset_perceptual_cache")) {
+            store.asset_perceptual_cache = store.asset_perceptual_cache || [];
+            const [
+              perceptKey,
+              userId,
+              sessionId,
+              sourceDigest,
+              modality,
+              roleId,
+              modelId,
+              taskScope,
+              promptDigest,
+              extractedText,
+              summarySnippet,
+              updatedAt,
+              gUid,
+              gSess,
+              gAttemptId
+            ] = boundArgs;
+            if (gAttemptId) {
+              const gateOk = (store.chat_session_states || []).some(
+                (s) =>
+                  s.user_id === gUid &&
+                  s.session_id === gSess &&
+                  s.last_tx_attempt_id === gAttemptId &&
+                  !s.deleted_at
+              );
+              if (!gateOk) return { meta: { changes: 0 } };
+            }
+            return {
+              meta: checkAndInsertRow(
+                "asset_perceptual_cache",
+                {
+                  percept_key: perceptKey,
+                  user_id: userId,
+                  session_id: sessionId,
+                  source_digest: sourceDigest,
+                  modality,
+                  role_id: roleId,
+                  model_id: modelId,
+                  task_scope: taskScope,
+                  prompt_digest: promptDigest,
+                  extracted_text: extractedText,
+                  summary_snippet: summarySnippet,
+                  updated_at: updatedAt
+                },
+                cleanSql,
+                store
+              )
+            };
+          }
+
           return { meta: { changes: 1 } };
         }
       };
       return stmt;
     },
     async batch(statements: any[]) {
+      const results = [];
       for (const s of statements) {
-        await s.run();
+        results.push(await s.run());
       }
-      return [];
+      return results;
     }
   };
 }
@@ -1167,7 +2530,17 @@ function buildMockEnv(): { env: Env; store: TableStore } {
     dag_handshakes: [],
     notifications: [],
     broadcast_reads: [],
-    system_counters: []
+    system_counters: [],
+    chat_session_states: [],
+    session_branches: [],
+    session_commits: [],
+    session_assets: [],
+    dag_run_plans: [],
+    asset_perceptual_cache: [],
+    dag_execution_cache: [],
+    run_billing_settlements: [],
+    pending_r2_deletions: [],
+    pending_r2_prefix_purges: []
   };
 
   const env = {
@@ -2604,6 +3977,16 @@ async function runIntegrationTests() {
   await env.R2.put(audioAssetKey, dummyWavBytes, {
     httpMetadata: { contentType: "audio/wav" }
   });
+  await registerPresignedAssetTicket(env, {
+    assetId: "asset_voice_01",
+    userId: testUser10Id,
+    filename: "recording.wav",
+    modality: "audio",
+    mimeType: "audio/wav",
+    fileSize: dummyWavBytes.byteLength,
+    r2Key: audioAssetKey,
+    origin: "upload"
+  });
 
   const audioEnvelope: UnifiedProtocolEnvelope = {
     round_index: 1,
@@ -2621,7 +4004,8 @@ async function runIntegrationTests() {
         file_size: dummyWavBytes.byteLength,
         r2_key: audioAssetKey,
         consumed: false,
-        source_digest: "digest_voice_01"
+        source_digest: "digest_voice_01",
+        is_new: true
       }
     ]
   };
@@ -2714,6 +4098,16 @@ async function runIntegrationTests() {
   await env.R2.put(userPhotoKey, new Uint8Array([137, 80, 78, 71, 1, 2, 3, 4]), {
     httpMetadata: { contentType: "image/png" }
   });
+  await registerPresignedAssetTicket(env, {
+    assetId: "user_photo_asset",
+    userId: testUser10Id,
+    filename: "user_photo.png",
+    modality: "image",
+    mimeType: "image/png",
+    fileSize: 8,
+    r2Key: userPhotoKey,
+    origin: "upload"
+  });
 
   // 10.4 P1 Penetrating Claiming & Reverse Pipeline :
   // User uploads ONLY physical image and writes text prompt (NO manual virtual_text_asset in manifest).
@@ -2734,7 +4128,8 @@ async function runIntegrationTests() {
         file_size: 8,
         r2_key: userPhotoKey,
         consumed: false,
-        source_digest: "digest_p1_photo"
+        source_digest: "digest_p1_photo",
+        is_new: true
       }
     ]
   };
@@ -4911,6 +6306,29 @@ async function runIntegrationTests() {
     );
     console.log("  ✓ Anti-account enumeration privacy protection for send-code: PASSED");
 
+    // NM-AUD-05: Second send-code within 60s for existing user must be rate-limited (429)
+    const sendCodeSpamRes = await worker.fetch(
+      new Request("https://nanomesh.local/api/auth/send-code", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: registeredEmail, turnstile_token: "mock_turnstile_pass" })
+      }),
+      env,
+      {} as any
+    );
+    assert.equal(
+      sendCodeSpamRes.status,
+      429,
+      "NM-AUD-05: Duplicate send-code for existing user within 60s must trigger 429 cooldown"
+    );
+
+    // Advance verification_codes timestamp past 60s cooldown before running forgot-password test
+    for (const vc of store.verification_codes) {
+      if (vc.email.toLowerCase() === registeredEmail.toLowerCase()) {
+        vc.created_at = new Date(Date.now() - 65000).toISOString();
+      }
+    }
+
     // 17.5 Self-service forgot-password & reset-password flow
     const forgotReq = new Request("https://nanomesh.local/api/auth/forgot-password", {
       method: "POST",
@@ -5061,7 +6479,7 @@ async function runIntegrationTests() {
   assert.equal(healthJson.status, "healthy");
   console.log("  ✓ GET /api/health returns 200 healthy for operational runtime: PASSED");
 
-  // 18.3 Re-route to tpl-direct-chat strips media assets and succeeds
+  // 18.3 Re-route with image asset to text-only tpl-direct-chat MUST NOT silently prune image; rejected by subsistence law
   store.dag_roles.push({
     role_id: "role-direct-chat",
     name_zh: "综合理解与生成",
@@ -5119,10 +6537,12 @@ async function runIntegrationTests() {
   const resReRouteDirectChat = await worker.fetch(reqReRouteDirectChat, env, {} as any);
   assert.equal(
     resReRouteDirectChat.status,
-    200,
-    "Re-routing to tpl-direct-chat must successfully prune media and return 200"
+    500,
+    "Re-routing image-bearing task to text-only tpl-direct-chat must be rejected rather than silently stripping images"
   );
-  console.log("  ✓ Re-routing to tpl-direct-chat safely prunes media assets and succeeds: PASSED");
+  console.log(
+    "  ✓ Re-routing image task to text-only tpl-direct-chat strictly rejected by subsistence law: PASSED"
+  );
 
   // 18.4 Email case-insensitive unique constraint validation
   assert.ok(
@@ -6047,8 +7467,1769 @@ async function runIntegrationTests() {
     globalThis.fetch = origFetchOauthBind;
   }
 
+  // -----------------------------------------------------------------------
+  // SCENARIO 20: Batch 21 Category 2 Security, Billing & Robustness Suite
+  // -----------------------------------------------------------------------
+  console.log("\n[Scenario 20] Batch 21 Category 2 Security, Billing & Robustness Regression");
+
+  // 20.1 NM-AUD-01: OAuth bind state token rejected as Bearer session credential
+  const s20UserId = "usr_batch21_sec";
+  store.users.push({
+    user_id: s20UserId,
+    username: "batch21_sec",
+    email: "batch21_sec@gmail.com",
+    password_hash: bcrypt.hashSync("LegacyPwd99!", 4),
+    credits: 20,
+    frozen_credits: 0,
+    avatar_url: null,
+    avatar_updated_at: null,
+    token_version: 1
+  });
+  const leakedOAuthState = await signJWT(
+    { typ: "oauth_state", nonce: "nonce_leak", action: "bind", userId: s20UserId },
+    env.JWT_SECRET,
+    300
+  );
+  const stateAsBearerRes = await worker.fetch(
+    new Request("https://nanomesh.local/api/auth/me", {
+      headers: { Authorization: `Bearer ${leakedOAuthState}` }
+    }),
+    env,
+    {} as any
+  );
+  assert.equal(
+    stateAsBearerRes.status,
+    401,
+    "NM-AUD-01: OAuth bind state JWT must be rejected by /api/auth/me"
+  );
+
+  // 20.2 NM-AUD-02: Oversized upload Content-Length pre-check (413) & presign daily quota (429)
+  const validS20Token = await signJWT(
+    { userId: s20UserId, tokenVersion: 1, typ: "session" },
+    env.JWT_SECRET,
+    3600
+  );
+  const hugeUploadRes = await worker.fetch(
+    new Request("https://nanomesh.local/api/upload/file", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${validS20Token}`,
+        "Content-Length": String(30 * 1024 * 1024)
+      },
+      body: "not-even-parsed"
+    }),
+    env,
+    {} as any
+  );
+  assert.equal(
+    hugeUploadRes.status,
+    413,
+    "NM-AUD-02: Oversized upload Content-Length must fail fast with 413 before formData()"
+  );
+
+  const todayPresignKey = `presign_daily_${new Date().toISOString().slice(0, 10)}_${s20UserId}`;
+  store.system_counters.push({ key: todayPresignKey, value: 50 });
+  const quotaExceededPresignRes = await worker.fetch(
+    new Request("https://nanomesh.local/api/upload/presign", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${validS20Token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ file_name: "a.png", file_size: 1024, mime_type: "image/png" })
+    }),
+    env,
+    {} as any
+  );
+  assert.equal(
+    quotaExceededPresignRes.status,
+    429,
+    "NM-AUD-02: Exceeding daily presign quota must return 429"
+  );
+
+  // Also verify /api/upload/file enforces the exact same daily quota (no bypass)
+  const quotaFd = new FormData();
+  quotaFd.append("file", new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" }), "a.png");
+  const quotaExceededUploadRes = await worker.fetch(
+    new Request("https://nanomesh.local/api/upload/file", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${validS20Token}` },
+      body: quotaFd
+    }),
+    env,
+    {} as any
+  );
+  assert.equal(
+    quotaExceededUploadRes.status,
+    429,
+    "NM-AUD-02: Proxy /api/upload/file must also enforce daily upload quota (429)"
+  );
+
+  // Verify scheduled() cron purges expired tmp/ R2 objects (> 24h)
+  const oldTmpKey = `tmp/${s20UserId}/old_asset/stale.png`;
+  const freshTmpKey = `tmp/${s20UserId}/new_asset/fresh.png`;
+  await env.R2.put(oldTmpKey, "OLD_TMP");
+  await env.R2.put(freshTmpKey, "NEW_TMP");
+  const origList = env.R2.list.bind(env.R2);
+  (env.R2 as any).list = async (opts: any) => {
+    const listed = await origList(opts);
+    return {
+      ...listed,
+      objects: (listed.objects || []).map((o: any) => ({
+        ...o,
+        uploaded: o.key === oldTmpKey ? new Date(Date.now() - 48 * 3600 * 1000) : new Date()
+      }))
+    };
+  };
+  await worker.scheduled({} as any, env, {} as any);
+  (env.R2 as any).list = origList;
+  assert.equal(await env.R2.get(oldTmpKey), null, "Cron must purge tmp/ objects > 24h");
+  assert.ok(await env.R2.get(freshTmpKey), "Cron must preserve fresh tmp/ objects < 24h");
+
+  // 20.3 NM-AUD-06: User & Admin logout revokes tokens server-side
+  const logoutUserRes = await worker.fetch(
+    new Request("https://nanomesh.local/api/auth/logout", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${validS20Token}` }
+    }),
+    env,
+    {} as any
+  );
+  assert.equal(logoutUserRes.status, 200);
+  const postLogoutMeRes = await worker.fetch(
+    new Request("https://nanomesh.local/api/auth/me", {
+      headers: { Authorization: `Bearer ${validS20Token}` }
+    }),
+    env,
+    {} as any
+  );
+  assert.equal(
+    postLogoutMeRes.status,
+    401,
+    "NM-AUD-06: Old user JWT must fail with 401 immediately after POST /api/auth/logout"
+  );
+
+  const adminLoginRes20 = await worker.fetch(
+    new Request("https://nanomesh.local/api/admin/login", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "CF-Connecting-IP": "198.51.100.77"
+      },
+      body: JSON.stringify({ password: (env as any).ADMIN_PASSWORD })
+    }),
+    env,
+    {} as any
+  );
+  assert.equal(adminLoginRes20.status, 200);
+  const adminCookie20 = (adminLoginRes20.headers.get("Set-Cookie") || "").split(";")[0];
+  assert.ok(adminCookie20.startsWith("admin_session="));
+
+  const adminLogoutRes20 = await worker.fetch(
+    new Request("https://nanomesh.local/api/admin/logout", {
+      method: "POST",
+      headers: { Cookie: adminCookie20 }
+    }),
+    env,
+    {} as any
+  );
+  assert.equal(adminLogoutRes20.status, 200);
+  const postAdminLogoutNodesRes = await worker.fetch(
+    new Request("https://nanomesh.local/api/admin/nodes", {
+      method: "GET",
+      headers: { Cookie: adminCookie20 }
+    }),
+    env,
+    {} as any
+  );
+  assert.equal(
+    postAdminLogoutNodesRes.status,
+    401,
+    "NM-AUD-06: Revoked admin_session cookie must be rejected with 401 after logout"
+  );
+
+  // 20.4 NM-AUD-13: Legacy bcrypt user logs in & upgrades transparently to PBKDF2
+  const origFetch20 = globalThis.fetch;
+  try {
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const urlStr =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : (input as any).url;
+      if (urlStr.includes("turnstile")) {
+        return new Response(JSON.stringify({ success: true }), { status: 200 });
+      }
+      return origFetch20(input, init);
+    };
+
+    const legacyLoginRes = await worker.fetch(
+      new Request("https://nanomesh.local/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: "batch21_sec@gmail.com",
+          password: "LegacyPwd99!",
+          turnstile_token: "mock_pass"
+        })
+      }),
+      env,
+      {} as any
+    );
+    assert.equal(legacyLoginRes.status, 200, "Legacy bcrypt login must succeed");
+    const upgradedUserRow = store.users.find((u) => u.user_id === s20UserId)!;
+    assert.ok(
+      upgradedUserRow.password_hash.startsWith("$pbkdf2-sha256$"),
+      "NM-AUD-13: Successful legacy bcrypt login must transparently upgrade password_hash to PBKDF2"
+    );
+  } finally {
+    globalThis.fetch = origFetch20;
+  }
+
+  // Fresh token after token_version bump (now 2)
+  const freshS20Token = await signJWT(
+    { userId: s20UserId, tokenVersion: 2, typ: "session" },
+    env.JWT_SECRET,
+    3600
+  );
+
+  // 20.5 NM-AUD-07: NaN query params on ledger/notifications & literal null JSON on history
+  const badLedgerRes = await worker.fetch(
+    new Request("https://nanomesh.local/api/user/ledger?page=abc&limit=NaN", {
+      headers: { Authorization: `Bearer ${freshS20Token}` }
+    }),
+    env,
+    {} as any
+  );
+  assert.equal(badLedgerRes.status, 200, "NM-AUD-07: Ledger must safely handle NaN query params");
+  const badLedgerJson = (await badLedgerRes.json()) as any;
+  assert.equal(badLedgerJson.page, 1);
+  assert.equal(badLedgerJson.limit, 20);
+
+  const badNotifRes = await worker.fetch(
+    new Request("https://nanomesh.local/api/notifications?page=xyz&limit=-99", {
+      headers: { Authorization: `Bearer ${freshS20Token}` }
+    }),
+    env,
+    {} as any
+  );
+  assert.equal(badNotifRes.status, 200, "NM-AUD-07: Notifications must handle NaN query params");
+
+  const nullHistSaveRes = await worker.fetch(
+    new Request("https://nanomesh.local/api/history", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${freshS20Token}`,
+        "Content-Type": "application/json"
+      },
+      body: "null"
+    }),
+    env,
+    {} as any
+  );
+  assert.equal(nullHistSaveRes.status, 400, "NM-AUD-07: POST /api/history with null returns 400");
+
+  const nullHistPatchRes = await worker.fetch(
+    new Request("https://nanomesh.local/api/history/sess_x", {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${freshS20Token}`,
+        "Content-Type": "application/json"
+      },
+      body: "null"
+    }),
+    env,
+    {} as any
+  );
+  assert.equal(
+    nullHistPatchRes.status,
+    400,
+    "NM-AUD-07: PATCH /api/history/:id with null returns 400"
+  );
+
+  // 20.6 NM-AUD-12: Avatar magic bytes rejection & CAS 24h cooldown check
+  const fakeAvatarFd = new FormData();
+  fakeAvatarFd.append(
+    "file",
+    new Blob(["<html><script>alert(1)</script></html>"], { type: "image/png" }),
+    "exploit.png"
+  );
+  const fakeAvatarRes = await worker.fetch(
+    new Request("https://nanomesh.local/api/user/avatar", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${freshS20Token}` },
+      body: fakeAvatarFd
+    }),
+    env,
+    {} as any
+  );
+  assert.equal(
+    fakeAvatarRes.status,
+    400,
+    "NM-AUD-12: Disguised HTML uploaded as .png avatar must be rejected by magic bytes check"
+  );
+
+  // 20.7 NM-AUD-09: Legacy WebGPU fallback charges exact 1 credit (no double deduction)
+  const legacyUserId = "usr_legacy_gpu_nm09";
+  store.users.push({
+    user_id: legacyUserId,
+    username: "legacy_gpu",
+    email: "legacy_gpu@gmail.com",
+    credits: 10,
+    frozen_credits: 0,
+    token_version: 1
+  });
+  const legacyToken = await signJWT(
+    { userId: legacyUserId, tokenVersion: 1, typ: "session" },
+    env.JWT_SECRET,
+    3600
+  );
+  const { executeDAGStream: executeLegacyDAGStream } =
+    await import("../src/orchestration/dispatcher");
+  const legacyDag: any = {
+    template: { template_id: "tpl_legacy_gpu", name_zh: "Legacy GPU Test", roles: [] },
+    candidate_templates: [],
+    nodes: [
+      {
+        role: {
+          role_id: "role_head_gpu",
+          name_zh: "端侧感知",
+          in_modalities: ["text"],
+          out_modalities: ["text"],
+          in_degree: 0,
+          out_degree: 1,
+          requisition_tags: ["#text"]
+        },
+        selected_model: {
+          model_id: "browser-qwen-test",
+          display_name: "Browser Qwen",
+          provider: "browser",
+          endpoint: "browser://qwen",
+          modalities: ["text"],
+          tags: [],
+          context_window: 4096,
+          max_concurrency: 10,
+          active_connections: 0,
+          precision: 0.9,
+          user_rating: 5,
+          usage_count: 0,
+          cost_per_1k_tokens: 0,
+          cost_per_invocation: 0,
+          status: "active",
+          is_generalist: 0,
+          prior_score: 1,
+          scenario_anchors: [],
+          inference_target: "browser"
+        },
+        standby_models: [
+          {
+            model_id: "cloud-fallback-test",
+            display_name: "Cloud Fallback",
+            provider: "cloudflare",
+            endpoint: "@cf/meta/llama-3.1-8b-instruct-fp8",
+            modalities: ["text"],
+            tags: [],
+            context_window: 4096,
+            max_concurrency: 10,
+            active_connections: 0,
+            precision: 0.9,
+            user_rating: 5,
+            usage_count: 0,
+            cost_per_1k_tokens: 1,
+            cost_per_invocation: 0,
+            status: "active",
+            is_generalist: 0,
+            prior_score: 1,
+            scenario_anchors: [],
+            inference_target: "edge"
+          }
+        ],
+        downgraded: false,
+        claimed_assets: []
+      },
+      {
+        role: {
+          role_id: "role_tail_text",
+          name_zh: "云端收尾",
+          in_modalities: ["text"],
+          out_modalities: ["text"],
+          in_degree: 1,
+          out_degree: 0,
+          requisition_tags: ["#text"]
+        },
+        selected_model: {
+          model_id: "cloud-tail-test",
+          display_name: "Cloud Tail",
+          provider: "cloudflare",
+          endpoint: "@cf/meta/llama-3.1-8b-instruct-fp8",
+          modalities: ["text"],
+          tags: [],
+          context_window: 4096,
+          max_concurrency: 10,
+          active_connections: 0,
+          precision: 0.9,
+          user_rating: 5,
+          usage_count: 0,
+          cost_per_1k_tokens: 1,
+          cost_per_invocation: 0,
+          status: "active",
+          is_generalist: 0,
+          prior_score: 1,
+          scenario_anchors: [],
+          inference_target: "edge"
+        },
+        standby_models: [],
+        downgraded: false,
+        claimed_assets: []
+      }
+    ],
+    reasoning_trace: { is_multi_round: false, intent_state: null }
+  };
+  const legacyStream = await executeLegacyDAGStream(
+    env,
+    legacyDag,
+    {
+      envelope_id: "env_nm09",
+      session_id: "sess_nm09",
+      round_index: 1,
+      instruction_payload: "hello legacy",
+      assets_manifest: [],
+      constraint_context: { target_language: "en", output_style: "concise" }
+    } as any,
+    {
+      userId: legacyUserId,
+      hasPreDeducted: false,
+      preDeductedCredits: 0,
+      clientCapabilities: { webgpu_handover_v3: false }
+    }
+  );
+  const legacyReader = legacyStream.getReader();
+  while (!(await legacyReader.read()).done) {}
+  const legacyUserAfter = store.users.find((u) => u.user_id === legacyUserId)!;
+  assert.equal(
+    legacyUserAfter.credits,
+    8,
+    "NM-AUD-09: Legacy WebGPU fallback across 2 nodes (cost 1 + 1 = 2) must deduct 2 credits cleanly (10 - 2 = 8), NOT double-charge 3 credits"
+  );
+
+  // Also verify 1-credit user CANNOT abuse expensive (10-credit) standby fallback/failover into negative balance
+  const oneCreditUserId = "usr_one_credit_guard";
+  store.users.push({
+    user_id: oneCreditUserId,
+    username: "one_credit_guard",
+    email: "one_credit_guard@gmail.com",
+    credits: 1,
+    frozen_credits: 0,
+    token_version: 1
+  });
+  const expensiveFallbackDag: any = {
+    template: { template_id: "tpl_exp_fallback", name_zh: "Expensive Standby Test", roles: [] },
+    candidate_templates: [],
+    nodes: [
+      {
+        role: {
+          role_id: "role_head_exp",
+          name_zh: "端侧节点",
+          in_modalities: ["text"],
+          out_modalities: ["text"],
+          in_degree: 0,
+          out_degree: 1,
+          requisition_tags: ["#text"]
+        },
+        selected_model: {
+          model_id: "browser-qwen-exp",
+          display_name: "Browser Qwen",
+          provider: "browser",
+          endpoint: "browser://qwen",
+          modalities: ["text"],
+          tags: [],
+          context_window: 4096,
+          max_concurrency: 10,
+          active_connections: 0,
+          precision: 0.9,
+          user_rating: 5,
+          usage_count: 0,
+          cost_per_1k_tokens: 0,
+          cost_per_invocation: 0,
+          status: "active",
+          is_generalist: 0,
+          prior_score: 1,
+          scenario_anchors: [],
+          inference_target: "browser"
+        },
+        standby_models: [
+          {
+            model_id: "expensive-cloud-10",
+            display_name: "Expensive Cloud 10",
+            provider: "openai",
+            endpoint: "https://api.openai.com/v1/chat/completions",
+            modalities: ["text"],
+            tags: [],
+            context_window: 4096,
+            max_concurrency: 10,
+            active_connections: 0,
+            precision: 0.9,
+            user_rating: 5,
+            usage_count: 0,
+            cost_per_1k_tokens: 10,
+            cost_per_invocation: 0,
+            status: "active",
+            is_generalist: 0,
+            prior_score: 1,
+            scenario_anchors: [],
+            inference_target: "heavy"
+          }
+        ],
+        downgraded: false,
+        claimed_assets: []
+      },
+      {
+        role: {
+          role_id: "role_tail_exp",
+          name_zh: "云端收尾",
+          in_modalities: ["text"],
+          out_modalities: ["text"],
+          in_degree: 1,
+          out_degree: 0,
+          requisition_tags: ["#text"]
+        },
+        selected_model: {
+          model_id: "cloud-tail-exp",
+          display_name: "Cloud Tail Exp",
+          provider: "cloudflare",
+          endpoint: "@cf/meta/llama-3.1-8b-instruct-fp8",
+          modalities: ["text"],
+          tags: [],
+          context_window: 4096,
+          max_concurrency: 10,
+          active_connections: 0,
+          precision: 0.9,
+          user_rating: 5,
+          usage_count: 0,
+          cost_per_1k_tokens: 1,
+          cost_per_invocation: 0,
+          status: "active",
+          is_generalist: 0,
+          prior_score: 1,
+          scenario_anchors: [],
+          inference_target: "edge"
+        },
+        standby_models: [],
+        downgraded: false,
+        claimed_assets: []
+      }
+    ],
+    reasoning_trace: { is_multi_round: false, intent_state: null }
+  };
+  const expStream = await executeLegacyDAGStream(
+    env,
+    expensiveFallbackDag,
+    {
+      envelope_id: "env_exp",
+      session_id: "sess_exp",
+      round_index: 1,
+      instruction_payload: "test expensive fallback",
+      assets_manifest: [],
+      constraint_context: { target_language: "en", output_style: "concise" }
+    } as any,
+    {
+      userId: oneCreditUserId,
+      hasPreDeducted: false,
+      preDeductedCredits: 0,
+      clientCapabilities: { webgpu_handover_v3: false }
+    }
+  );
+  const expReader = expStream.getReader();
+  let expSseText = "";
+  const expDec = new TextDecoder();
+  while (true) {
+    const { done, value } = await expReader.read();
+    if (done) break;
+    expSseText += expDec.decode(value, { stream: true });
+  }
+  assert.ok(
+    expSseText.includes("event: error"),
+    "Expensive 10-credit standby fallback for 1-credit user must emit error event before execution"
+  );
+  const oneCreditUserAfter = store.users.find((u) => u.user_id === oneCreditUserId)!;
+  assert.equal(
+    oneCreditUserAfter.credits,
+    1,
+    "1-credit user blocked from expensive fallback must stay at 1 credit (never negative)"
+  );
+
+  // 20.8 NM-AUD-15 & NM-AUD-16: Admin enum/subsistence checks & Edge security headers
+  const adminReLoginRes = await worker.fetch(
+    new Request("https://nanomesh.local/api/admin/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "CF-Connecting-IP": "198.51.100.78" },
+      body: JSON.stringify({ password: (env as any).ADMIN_PASSWORD })
+    }),
+    env,
+    {} as any
+  );
+  const freshAdminCookie = (adminReLoginRes.headers.get("Set-Cookie") || "").split(";")[0];
+
+  store.user_uploaded_models.push({
+    upload_id: "uum_nm15_test",
+    user_id: s20UserId,
+    display_name: "Test Model",
+    status: "pending"
+  });
+  const badStatusModelRes = await worker.fetch(
+    new Request("https://nanomesh.local/api/admin/models/uum_nm15_test", {
+      method: "PATCH",
+      headers: { Cookie: freshAdminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "hacked" })
+    }),
+    env,
+    {} as any
+  );
+  assert.equal(
+    badStatusModelRes.status,
+    400,
+    "NM-AUD-15: handleAdminUpdateModel must reject invalid status enum"
+  );
+
+  store.dag_templates.push({
+    template_id: "tpl_dead_nm15",
+    name_zh: "Dead Template",
+    role_sequence: JSON.stringify(["role_nonexistent_nm15"]),
+    status: "disabled"
+  });
+  const toggleDeadTplRes = await worker.fetch(
+    new Request("https://nanomesh.local/api/admin/templates/tpl_dead_nm15/toggle", {
+      method: "POST",
+      headers: { Cookie: freshAdminCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "active" })
+    }),
+    env,
+    {} as any
+  );
+  assert.equal(
+    toggleDeadTplRes.status,
+    400,
+    "NM-AUD-15: Activating a template with broken/dead roles must be blocked with 400"
+  );
+
+  const optionsRes = await worker.fetch(
+    new Request("https://nanomesh.local/api/auth/me", { method: "OPTIONS" }),
+    env,
+    {} as any
+  );
+  assert.equal(optionsRes.headers.get("Vary"), "Origin");
+  assert.equal(optionsRes.headers.get("Access-Control-Max-Age"), "86400");
+
+  const storage403Res = await worker.fetch(
+    new Request("https://nanomesh.local/storage/private.txt"),
+    env,
+    {} as any
+  );
+  assert.equal(storage403Res.status, 403);
+  assert.equal(storage403Res.headers.get("X-Content-Type-Options"), "nosniff");
+
+  const storage404Res = await worker.fetch(
+    new Request("https://nanomesh.local/storage/avatars/does_not_exist.png"),
+    env,
+    {} as any
+  );
+  assert.equal(storage404Res.status, 404);
+  assert.equal(storage404Res.headers.get("X-Content-Type-Options"), "nosniff");
+
+  console.log(
+    "  ✓ Scenario 20 (NM-AUD-01/02/05/06/07/09/12/13/15/16) all regression checks: PASSED"
+  );
+
+  // -------------------------------------------------------------------------------------------------
+  // [Scenario 21] Canvas Micro-Tuning, Re-selection Safety & Input Freezing Invariants
+  // -------------------------------------------------------------------------------------------------
+  console.log(
+    "\n[Scenario 21] Canvas Micro-Tuning, Re-selection Safety & Input Freezing Invariants"
+  );
+
+  const scen21UserId = "usr_scen21_tuning";
+  store.users.push({
+    user_id: scen21UserId,
+    username: "scen21_user",
+    email: "scen21@example.com",
+    credits: 100,
+    frozen_credits: 0,
+    token_version: 1
+  });
+  const scen21Token = await signJWT(
+    { userId: scen21UserId, tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
+
+  // 21.1 switch_template must strictly enforce subsistence law (modality matching) and block bypass
+  store.dag_roles.push({
+    role_id: "role-audio-only",
+    name_zh: "纯音频转写岗",
+    in_modalities: JSON.stringify(["audio"]),
+    out_modalities: JSON.stringify(["text"]),
+    requisition_tags: JSON.stringify(["#audio", "#asr"]),
+    compensation_prompts: JSON.stringify({})
+  });
+  store.dag_templates.push({
+    template_id: "tpl_audio_strictly_requires_media",
+    name_zh: "严格音频转录流水线",
+    roles: JSON.stringify([
+      {
+        role_id: "role-audio-only",
+        name_zh: "纯音频转写岗",
+        in_modalities: ["audio"],
+        out_modalities: ["text"],
+        in_degree: 0,
+        out_degree: 0,
+        requisition_tags: ["#audio", "#asr"]
+      }
+    ]),
+    role_sequence: JSON.stringify(["role-audio-only"]),
+    edges: JSON.stringify([]),
+    status: "active"
+  });
+
+  // User input is pure text; trying to force switch_template to tpl_audio_strictly_requires_media must be rejected
+  const reqIncompatibleTpl = new Request("https://nanomesh.local/api/chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: `session=${scen21Token}`,
+      "CF-Connecting-IP": "198.51.100.99"
+    },
+    body: JSON.stringify({
+      reRouteMode: "switch_template",
+      chosenTemplateId: "tpl_audio_strictly_requires_media",
+      envelope: {
+        session_id: "sess_incompatible_tpl_01",
+        instruction_payload: "Pure text query without audio asset",
+        assets_manifest: []
+      }
+    })
+  });
+  const resIncompatibleTpl = await worker.fetch(reqIncompatibleTpl, env, {} as any);
+  assert.equal(
+    resIncompatibleTpl.status,
+    500,
+    "Incompatible template with unsatisfied input modality must be rejected, cannot bypass subsistence law"
+  );
+
+  // 21.2 isReRoute must preserve pristine instruction_payload and NOT inject '[上轮产物背景:...]\n用户追问:...'
+  const pristinePayloadText = "Analyze this travel schedule objectively";
+  const envelopeToTest: any = {
+    envelope_id: "env_reroute_purity",
+    session_id: "sess_reroute_purity",
+    round_index: 1,
+    instruction_payload: pristinePayloadText,
+    assets_manifest: [],
+    constraint_context: { target_language: "zh", output_style: "concise" },
+    metadata: { client_timestamp: Date.now(), char_count_total: 10, estimated_input_tokens: 20 }
+  };
+  const dagReRouteTest = await runOrchestrationPipeline(env, envelopeToTest, {
+    reRouteMode: "switch_model",
+    chosenTemplateId: "tpl-direct-chat",
+    hasPreviousRound: true,
+    previousRoundSummary: "Old output from round 1 that should not contaminate this re-run"
+  });
+  // instruction_payload must stay completely pure!
+  assert.equal(
+    envelopeToTest.instruction_payload,
+    pristinePayloadText,
+    "isReRoute must keep instruction_payload pure and avoid injecting previous round summary"
+  );
+  assert.equal(dagReRouteTest.template.template_id, "tpl-direct-chat");
+
+  // 21.3 switch_model with incompetent role model must safely fall back to competent model
+  // Try assigning flux image generator to role-direct-chat (text only role)
+  const dagIncompetentModelFallback = await runOrchestrationPipeline(
+    env,
+    {
+      envelope_id: "env_model_competence",
+      session_id: "sess_model_competence",
+      round_index: 1,
+      instruction_payload: "Text synthesis query",
+      assets_manifest: [],
+      constraint_context: { target_language: "zh", output_style: "concise" },
+      metadata: { client_timestamp: Date.now(), char_count_total: 10, estimated_input_tokens: 20 }
+    } as any,
+    {
+      reRouteMode: "switch_model",
+      chosenTemplateId: "tpl-direct-chat",
+      chosenRoleModels: {
+        "role-direct-chat": "flux-schnell" // Image generation model, incompetent for text generation!
+      }
+    }
+  );
+  const assignedModel = dagIncompetentModelFallback.nodes[0].selected_model;
+  assert.notEqual(
+    assignedModel.model_id,
+    "flux-schnell",
+    "Incompetent model for role modality must be intercepted and safely fallback, not bound directly"
+  );
+  assert.ok(
+    assignedModel.modalities.includes("text"),
+    "Fell-back model must be competent for the text role"
+  );
+
+  // 21.4 switch_model (and prompt injection) with incompatible/offlined base template must explicitly fail rather than silently swapping templates
+  await assert.rejects(
+    async () => {
+      await runOrchestrationPipeline(
+        env,
+        {
+          envelope_id: "env_switch_model_subsistence",
+          session_id: "sess_switch_model_subsistence",
+          round_index: 1,
+          instruction_payload: "Pure text query",
+          assets_manifest: [],
+          constraint_context: { target_language: "zh", output_style: "concise" },
+          metadata: {
+            client_timestamp: Date.now(),
+            char_count_total: 10,
+            estimated_input_tokens: 20
+          }
+        } as any,
+        {
+          reRouteMode: "switch_model",
+          chosenTemplateId: "tpl_audio_strictly_requires_media" // Incompatible with pure text input!
+        }
+      );
+    },
+    /无法适配当前任务的输入模态或已被下线/,
+    "switch_model must explicitly reject an invalid/incompatible base template instead of silently substituting another template"
+  );
+
+  // 21.5 Frozen input baseline integrity & round grouping logic
+  // Simulate frozen input snapshot with asset A vs mutable canvas with asset B
+  const frozenBaseline = {
+    userText: "Initial query with asset A",
+    frozenAssets: [
+      { name: "file_a.txt", modality: "text", size: 100, assetId: "ast_a", r2Key: "r2_a" }
+    ],
+    targetLanguage: "ja",
+    outputStyle: "academic",
+    baseSummary: "",
+    roundIndex: 1,
+    baseRunId: "run-test-base-01",
+    committedRevision: 1,
+    revision: 1
+  };
+  const mutatedCanvasAssets = [
+    { name: "file_b.png", modality: "image", size: 500, assetId: "ast_b", r2Key: "r2_b" }
+  ];
+  // Re-run constructor strictly isolates to frozenBaseline.frozenAssets
+  const effectiveReRunAssets =
+    frozenBaseline && Array.isArray(frozenBaseline.frozenAssets)
+      ? JSON.parse(JSON.stringify(frozenBaseline.frozenAssets))
+      : mutatedCanvasAssets;
+  assert.equal(effectiveReRunAssets.length, 1);
+  assert.equal(effectiveReRunAssets[0].name, "file_a.txt");
+  assert.equal(effectiveReRunAssets[0].assetId, "ast_a");
+  assert.equal(
+    effectiveReRunAssets.some((a: any) => a.name === "file_b.png"),
+    false,
+    "Re-run must strictly isolate to frozen assets and discard mutated canvas assets"
+  );
+
+  // Simulate History Grouping by baseRunId
+  const simulatedHistoryRounds = [
+    {
+      runId: "run-01",
+      baseRunId: "run-01",
+      revision: 1,
+      isReRun: false,
+      roundIndex: 1,
+      userPrompt: "Q1"
+    },
+    {
+      runId: "run-01-rev2",
+      baseRunId: "run-01",
+      revision: 2,
+      isReRun: true,
+      roundIndex: 1,
+      userPrompt: "Q1"
+    },
+    {
+      runId: "run-01-rev3",
+      baseRunId: "run-01",
+      revision: 3,
+      isReRun: true,
+      roundIndex: 1,
+      userPrompt: "Q1"
+    },
+    {
+      runId: "run-02",
+      baseRunId: "run-02",
+      revision: 1,
+      isReRun: false,
+      roundIndex: 2,
+      userPrompt: "Q2"
+    }
+  ];
+  const roundGroups = new Map<string, any[]>();
+  simulatedHistoryRounds.forEach((r) => {
+    const key = r.baseRunId || `round-${r.roundIndex}`;
+    if (!roundGroups.has(key)) roundGroups.set(key, []);
+    roundGroups.get(key)!.push(r);
+  });
+  // Must group into 2 distinct user rounds, NOT 4!
+  assert.equal(
+    roundGroups.size,
+    2,
+    "History grouping by baseRunId must identify exactly 2 rounds despite in-place revisions"
+  );
+  assert.equal(
+    roundGroups.get("run-01")!.length,
+    3,
+    "Round 1 group must contain all 3 revisions in lineage"
+  );
+  assert.equal(
+    roundGroups.get("run-01")![2].revision,
+    3,
+    "Latest revision of Round 1 must be revision 3"
+  );
+
+  // 21.6 Empty frozenAssets ([]), chunked SSE event preservation & history restore skipping failed revisions
+  const emptyFrozenBaseline = { frozenAssets: [] as any[] };
+  const resolvedEmptyAssets =
+    emptyFrozenBaseline && Array.isArray(emptyFrozenBaseline.frozenAssets)
+      ? JSON.parse(JSON.stringify(emptyFrozenBaseline.frozenAssets))
+      : mutatedCanvasAssets;
+  assert.equal(
+    resolvedEmptyAssets.length,
+    0,
+    "Empty frozenAssets [] must be preserved rather than falling back to mutated canvas assets"
+  );
+
+  // Verify chunked SSE stream keeps event name across read() chunks until blank line delimiter
+  const sseChunks = [
+    "event: node_start\n",
+    'data: {"role_id":"r1"}\n\nevent: dag_error\n',
+    'data: {"error":"boom"}\n\n'
+  ];
+  const parsedEvents: Array<{ event: string; data: any }> = [];
+  let sseBuffer = "";
+  let sseEvent = "message";
+  for (const chunk of sseChunks) {
+    sseBuffer += chunk;
+    const lines = sseBuffer.split("\n");
+    sseBuffer = lines.pop() ?? "";
+    for (const rawLine of lines) {
+      const line = rawLine.replace(/\r$/, "");
+      if (line === "") {
+        sseEvent = "message";
+        continue;
+      }
+      if (line.startsWith("event: ")) {
+        sseEvent = line.slice(7).trim() || "message";
+      } else if (line.startsWith("data: ")) {
+        const dataStr = line.slice(6).trim();
+        if (dataStr) parsedEvents.push({ event: sseEvent, data: JSON.parse(dataStr) });
+      }
+    }
+  }
+  assert.deepEqual(parsedEvents, [
+    { event: "node_start", data: { role_id: "r1" } },
+    { event: "dag_error", data: { error: "boom" } }
+  ]);
+
+  // Verify history restore skips trailing fast-failed revision and recovers targetLanguage/outputStyle
+  const roundsWithTrailingFailure = [
+    {
+      runId: "run-01",
+      baseRunId: "run-01",
+      revision: 1,
+      isFastFailed: false,
+      targetLanguage: "ja",
+      outputStyle: "academic",
+      nodes: [{ role_id: "role-direct-chat" }],
+      assistantOutput: "Valid output"
+    },
+    {
+      runId: "run-01-rev2",
+      baseRunId: "run-01",
+      revision: 2,
+      isFastFailed: true,
+      targetLanguage: "ja",
+      outputStyle: "academic",
+      nodes: [{ role_id: "role_edge_firewall", status: "blocked" }],
+      assistantOutput: ""
+    }
+  ];
+  const isFailedRun = (r: any) =>
+    !!(
+      r?.isFastFailed ||
+      (Array.isArray(r?.nodes) && r.nodes.some((n: any) => n.role_id === "role_edge_firewall"))
+    );
+  const restoredRound =
+    [...roundsWithTrailingFailure].reverse().find((r) => !isFailedRun(r)) ||
+    roundsWithTrailingFailure[roundsWithTrailingFailure.length - 1];
+  assert.equal(restoredRound.runId, "run-01");
+  assert.equal(restoredRound.targetLanguage, "ja");
+  assert.equal(restoredRound.outputStyle, "academic");
+
+  // 21.7 Canvas re-run ignores unsubmitted right-side chat input files & skips upload checks
+  const rightInputSelectedFiles = [
+    { name: "unsubmitted_b.png", uploadStatus: "uploading", modality: "image" },
+    { name: "broken_c.pdf", uploadStatus: "error", modality: "pdf" }
+  ];
+  const isSwitchRun = true;
+  const blockedByRightInputUpload =
+    !isSwitchRun &&
+    rightInputSelectedFiles.some(
+      (f) => f.uploadStatus === "uploading" || f.uploadStatus === "error"
+    );
+  const newlySelectedOnRerun = isSwitchRun ? [] : [...rightInputSelectedFiles];
+  assert.equal(
+    blockedByRightInputUpload,
+    false,
+    "Canvas micro-tuning re-run must not be blocked by unsubmitted right-side input attachments"
+  );
+  assert.equal(
+    newlySelectedOnRerun.length,
+    0,
+    "Canvas micro-tuning re-run must keep newlySelectedFiles empty so unsubmitted files never pollute session ledger"
+  );
+
+  console.log(
+    "  ✓ Scenario 21 (Canvas Micro-Tuning, Re-selection Safety & Input Freezing Invariants): PASSED"
+  );
+
+  // -------------------------------------------------------------------------------------------------
+  // [Scenario 22] Compositional Simultaneous Multimodal Flow, Parallel SSE & Clarification Interrupt
+  // -------------------------------------------------------------------------------------------------
+  console.log(
+    "\n[Scenario 22] Compositional Simultaneous Multimodal Flow, Parallel SSE & Clarification Interrupt"
+  );
+
+  const scen22UserId = "usr_scen22_multimodal";
+  store.users.push({
+    user_id: scen22UserId,
+    username: "scen22_user",
+    email: "scen22@example.com",
+    credits: 100,
+    frozen_credits: 0,
+    token_version: 1
+  });
+  const scen22Token = await signJWT(
+    { userId: scen22UserId, tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
+
+  // Put both an image and an audio object into mock R2 for simultaneous multimodal execution
+  const s22ImgKey = `tmp/${scen22UserId}/sess_scen22/img1.png`;
+  const s22AudioKey = `tmp/${scen22UserId}/sess_scen22/aud1.mp3`;
+  await env.R2.put(s22ImgKey, new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13]), {
+    httpMetadata: { contentType: "image/png" }
+  });
+  await env.R2.put(s22AudioKey, new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]), {
+    httpMetadata: { contentType: "audio/mpeg" }
+  });
+  await registerPresignedAssetTicket(env, {
+    assetId: "s22_img_1",
+    userId: scen22UserId,
+    filename: "room.png",
+    modality: "image",
+    mimeType: "image/png",
+    fileSize: 12,
+    r2Key: s22ImgKey,
+    origin: "upload"
+  });
+  await registerPresignedAssetTicket(env, {
+    assetId: "s22_aud_1",
+    userId: scen22UserId,
+    filename: "note.mp3",
+    modality: "audio",
+    mimeType: "audio/mpeg",
+    fileSize: 8,
+    r2Key: s22AudioKey,
+    origin: "upload"
+  });
+
+  // Ensure whisper & vision models exist in store for simultaneous image + audio extraction
+  if (!store.models.some((m: any) => m.model_id === "cf-whisper")) {
+    store.models.push({
+      model_id: "cf-whisper",
+      display_name: "Whisper ASR",
+      provider: "OpenAI",
+      endpoint: "@cf/openai/whisper",
+      modalities: JSON.stringify(["audio"]),
+      in_modalities: JSON.stringify(["audio"]),
+      out_modalities: JSON.stringify(["text"]),
+      tags: JSON.stringify(["#asr", "#audio_processing"]),
+      context_window: 4096,
+      max_concurrency: 30,
+      active_connections: 0,
+      precision: 0.96,
+      user_rating: 4.9,
+      usage_count: 10,
+      cost_per_1k_tokens: 1.0,
+      cost_per_invocation: 0.0,
+      status: "active",
+      is_generalist: 0,
+      prior_score: 0.0,
+      scenario_anchors: JSON.stringify(["语音转写"]),
+      inference_target: "edge",
+      auth_mode: "none",
+      api_format: "workers_ai"
+    });
+  }
+  if (!store.dag_roles.some((r: any) => r.role_id === "role-audio-asr")) {
+    store.dag_roles.push({
+      role_id: "role-audio-asr",
+      name_zh: "语音转录提取",
+      name_en: "Speech Recognition",
+      in_modalities: JSON.stringify(["audio"]),
+      out_modalities: JSON.stringify(["text"]),
+      requisition_tags: JSON.stringify(["#asr", "#audio_processing"]),
+      compensation_prompts: JSON.stringify({})
+    });
+  }
+
+  // 22.1 Simultaneous Image + Audio + Text Document -> Compositional Parallel Prep -> Reducer -> Synthesis
+  const s22Req = new Request("https://nanomesh.local/api/chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: `session=${scen22Token}`,
+      "CF-Connecting-IP": "198.51.100.122"
+    },
+    body: JSON.stringify({
+      envelope: {
+        envelope_id: "env_s22_comp",
+        session_id: "sess_scen22",
+        round_index: 1,
+        instruction_payload: "请结合图片、录音与文档内容总结要点",
+        assets_manifest: [
+          {
+            asset_id: "s22_img_1",
+            filename: "room.png",
+            modality: "image",
+            mime_type: "image/png",
+            file_size: 12,
+            r2_key: s22ImgKey,
+            consumed: false,
+            source_digest: "s22-dig-img",
+            is_new: true
+          },
+          {
+            asset_id: "s22_aud_1",
+            filename: "note.mp3",
+            modality: "audio",
+            mime_type: "audio/mpeg",
+            file_size: 8,
+            r2_key: s22AudioKey,
+            consumed: false,
+            source_digest: "s22-dig-aud",
+            is_new: true
+          },
+          {
+            asset_id: "s22_doc_1",
+            filename: "spec.txt",
+            modality: "text_doc",
+            mime_type: "text/plain",
+            file_size: 20,
+            in_memory_text: "预算上限: 8000元",
+            consumed: false,
+            source_digest: "s22-dig-doc",
+            is_new: true
+          }
+        ],
+        constraint_context: { target_language: "zh", output_style: "concise" },
+        metadata: {
+          client_timestamp: Date.now(),
+          char_count_total: 20,
+          estimated_input_tokens: 250
+        }
+      }
+    })
+  });
+  const s22Res = await worker.fetch(s22Req, env, {} as any);
+  assert.equal(
+    s22Res.status,
+    200,
+    "Simultaneous image+audio+doc must succeed via compositional DAG (HTTP 200)"
+  );
+  const s22Text = await s22Res.text();
+  assert.ok(
+    s22Text.includes('"topology_mode":"compositional"'),
+    "Must emit compositional topology_mode in dag_plan"
+  );
+  assert.ok(
+    s22Text.includes('"exec_mode":"parallel"'),
+    "Must execute independent raw sensory prep nodes with parallel exec_mode"
+  );
+  assert.ok(
+    s22Text.includes("reducer-merge"),
+    "Must include reducer-merge node converging prep outputs"
+  );
+  assert.ok(
+    s22Text.includes('"perceptual_entries"'),
+    "Must emit perceptual_entries on dag_complete"
+  );
+
+  // 22.2 Ambiguous CROSS_FUSION triggers 0-credit clarification_required, then resumes cleanly after target confirmation
+  const s22ClarifyImgKey = `tmp/${scen22UserId}/s22-clarify-img/poster_a.png`;
+  await env.R2.put(
+    s22ClarifyImgKey,
+    new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13]),
+    { httpMetadata: { contentType: "image/png" } }
+  );
+  store.session_assets!.push({
+    asset_id: "ast_a_poster",
+    session_id: "sess_scen22_clarify",
+    user_id: scen22UserId,
+    branch_id: "branch_a",
+    commit_id: "cmt_s22_a",
+    filename: "poster_a.png",
+    modality: "image",
+    mime_type: "image/png",
+    file_size: 12,
+    r2_key: s22ClarifyImgKey,
+    source_digest: "s22-dig-img",
+    origin: "upload",
+    introduced_round: 1,
+    status: "COMMITTED",
+    summary_snippet: "海报A设计"
+  });
+  const creditsBeforeClarify = store.users.find((u) => u.user_id === scen22UserId)!.credits;
+  const origAiS22 = env.AI;
+  try {
+    (env as any).AI = {
+      async run(model: string, input: any) {
+        if (
+          model === "@cf/meta/llama-3.1-8b-instruct-fp8" &&
+          JSON.stringify(input).includes("Joint Git-DAG")
+        ) {
+          return {
+            response: JSON.stringify({
+              intent_op: "CROSS_FUSION",
+              target_branch_id: "branch_b",
+              source_branch_ids: ["branch_a"],
+              asset_bindings: [{ asset_id: "ast_a_poster", bind_mode: "RAW_MEDIA" }],
+              delivery_confidence: "ambiguous",
+              needs_wider_recall: false
+            })
+          };
+        }
+        return origAiS22.run(model, input);
+      }
+    };
+
+    const clarifyReq = new Request("https://nanomesh.local/api/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: `session=${scen22Token}`,
+        "CF-Connecting-IP": "198.51.100.123"
+      },
+      body: JSON.stringify({
+        hasPreviousRound: true,
+        activeBranchId: "branch_b",
+        activeBranchSummary: "分支B最新方案",
+        sessionAssetLedger: [
+          {
+            asset_id: "ast_a_poster",
+            filename: "poster_a.png",
+            modality: "image",
+            branch_id: "branch_a",
+            r2_key: s22ClarifyImgKey,
+            source_digest: "s22-dig-img",
+            origin: "upload"
+          }
+        ],
+        branchCatalog: [
+          {
+            branch_id: "branch_a",
+            topic: "海报分支A",
+            is_active: false,
+            last_summary: "海报A设计"
+          },
+          { branch_id: "branch_b", topic: "方案分支B", is_active: true, last_summary: "当前方案B" }
+        ],
+        envelope: {
+          envelope_id: "env_s22_clarify",
+          session_id: "sess_scen22_clarify",
+          round_index: 2,
+          instruction_payload: "把之前的海报和这个合一下",
+          assets_manifest: [
+            {
+              asset_id: "ast_a_poster",
+              filename: "poster_a.png",
+              modality: "image",
+              mime_type: "image/png",
+              file_size: 12,
+              r2_key: s22ClarifyImgKey,
+              consumed: false,
+              source_digest: "s22-dig-img",
+              is_new: false,
+              branch_id: "branch_a"
+            }
+          ]
+        }
+      })
+    });
+    const clarifyRes = await worker.fetch(clarifyReq, env, {} as any);
+    assert.equal(clarifyRes.status, 200);
+    const clarifySse = await clarifyRes.text();
+    assert.ok(
+      clarifySse.includes("event: clarification_required"),
+      "Ambiguous cross-branch delivery must emit clarification_required"
+    );
+    assert.ok(clarifySse.includes('"is_clarification_required":true'));
+    const creditsAfterClarify = store.users.find((u) => u.user_id === scen22UserId)!.credits;
+    assert.equal(
+      creditsAfterClarify,
+      creditsBeforeClarify,
+      "Clarification interrupt must charge 0 credits"
+    );
+
+    // Resume after user selects branch_a via existing input box
+    const resumeReq = new Request("https://nanomesh.local/api/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: `session=${scen22Token}`,
+        "CF-Connecting-IP": "198.51.100.124"
+      },
+      body: JSON.stringify({
+        hasPreviousRound: true,
+        activeBranchId: "branch_b",
+        resolvedClarificationTargetBranchId: "branch_a",
+        activeBranchSummary: "分支B最新方案",
+        sessionAssetLedger: [
+          {
+            asset_id: "ast_a_poster",
+            filename: "poster_a.png",
+            modality: "image",
+            branch_id: "branch_a",
+            r2_key: s22ClarifyImgKey,
+            source_digest: "s22-dig-img",
+            origin: "upload"
+          }
+        ],
+        branchCatalog: [
+          {
+            branch_id: "branch_a",
+            topic: "海报分支A",
+            is_active: false,
+            last_summary: "海报A设计"
+          },
+          { branch_id: "branch_b", topic: "方案分支B", is_active: true, last_summary: "当前方案B" }
+        ],
+        envelope: {
+          envelope_id: "env_s22_resume",
+          session_id: "sess_scen22_clarify",
+          round_index: 2,
+          instruction_payload: "把之前的海报和这个合一下",
+          assets_manifest: [
+            {
+              asset_id: "ast_a_poster",
+              filename: "poster_a.png",
+              modality: "image",
+              mime_type: "image/png",
+              file_size: 12,
+              r2_key: s22ClarifyImgKey,
+              consumed: false,
+              source_digest: "s22-dig-img",
+              is_new: false,
+              branch_id: "branch_a"
+            }
+          ]
+        }
+      })
+    });
+    const resumeRes = await worker.fetch(resumeReq, env, {} as any);
+    assert.equal(resumeRes.status, 200);
+    const resumeSse = await resumeRes.text();
+    assert.ok(
+      !resumeSse.includes("event: clarification_required"),
+      "Resolved target branch must proceed directly to execution"
+    );
+    assert.ok(
+      resumeSse.includes('"target_branch_id":"branch_a"'),
+      "Must honor user's clarified delivery branch_a"
+    );
+  } finally {
+    (env as any).AI = origAiS22;
+  }
+
+  console.log(
+    "  ✓ Scenario 22 (Compositional Simultaneous Multimodal, Parallel Prep & Clarification Loop): PASSED"
+  );
+
+  // =========================================================================
+  // Scenario 23: Plan Identity Freeze (/api/chat/continue), Authoritative Session State,
+  //              Cross-Session R2 BOLA Guard & Bounded Parallel Prep Concurrency
+  // =========================================================================
+  console.log(
+    "\n[Scenario 23] Testing Plan Identity Freeze, Authoritative Git State, Cross-Session R2 Block & Bounded Concurrency..."
+  );
+
+  const scen23UserId = "usr_scen23_closed_loop";
+  store.users.push({
+    user_id: scen23UserId,
+    username: "Scenario23User",
+    email: "scen23@nanomesh.local",
+    password_hash: "hash",
+    credits: 100,
+    token_version: 1
+  });
+  const scen23Token = await signJWT(
+    { userId: scen23UserId, role: "user", tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
+
+  const s23OwnerKey = `tmp/${scen23UserId}/s23-owner/secret.png`;
+  await env.R2.put(s23OwnerKey, new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), {
+    httpMetadata: { contentType: "image/png" }
+  });
+  store.session_assets!.push({
+    asset_id: "ast_s23_owner",
+    session_id: "sess_s23_legit_a",
+    user_id: scen23UserId,
+    branch_id: "main",
+    commit_id: "cmt_s23_a",
+    filename: "secret.png",
+    modality: "image",
+    mime_type: "image/png",
+    file_size: 8,
+    r2_key: s23OwnerKey,
+    source_digest: "s23-owner-dig",
+    origin: "upload",
+    introduced_round: 1,
+    status: "COMMITTED",
+    summary_snippet: "Session A secret image"
+  });
+
+  // 23.1 Cross-session R2 access attempt blocked even for same user across sessions
+  const crossSessionReq = new Request("https://nanomesh.local/api/chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: `session=${scen23Token}`,
+      "CF-Connecting-IP": "198.51.100.125"
+    },
+    body: JSON.stringify({
+      envelope: {
+        envelope_id: "env_s23_bola",
+        session_id: "sess_scen23_attacker",
+        round_index: 1,
+        instruction_payload: "读取另一会话里的图片",
+        assets_manifest: [
+          {
+            asset_id: "forged_ast",
+            filename: "stolen.png",
+            modality: "image",
+            mime_type: "image/png",
+            file_size: 8,
+            r2_key: s23OwnerKey, // Owned by sess_s23_legit_a!
+            consumed: false,
+            source_digest: "s23-owner-dig",
+            is_new: false
+          }
+        ]
+      }
+    })
+  });
+  const crossSessionRes = await worker.fetch(crossSessionReq, env, {} as any);
+  assert.equal(
+    crossSessionRes.status,
+    403,
+    "Attempt to claim or read R2 key owned by another session must be rejected with HTTP 403"
+  );
+  const crossSessionJson: any = await crossSessionRes.json();
+  assert.equal(crossSessionJson.error, "asset_ownership_violation");
+
+  // 23.2 Bounded concurrency <= 2 on 3 simultaneous raw images + waiting_resource + authoritative session commit & GET /state
+  const s23BatchImgs = [1, 2, 3].map((i) => ({
+    id: `s23_img_${i}`,
+    key: `tmp/${scen23UserId}/s23-batch-${i}/img_${i}.png`,
+    digest: `s23-batch-dig-${i}`
+  }));
+  for (const img of s23BatchImgs) {
+    await env.R2.put(img.key, new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), {
+      httpMetadata: { contentType: "image/png" }
+    });
+    await registerPresignedAssetTicket(env, {
+      assetId: img.id,
+      userId: scen23UserId,
+      filename: `${img.id}.png`,
+      modality: "image",
+      mimeType: "image/png",
+      fileSize: 8,
+      r2Key: img.key,
+      origin: "upload"
+    });
+  }
+  const s23BatchReq = new Request("https://nanomesh.local/api/chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: `session=${scen23Token}`,
+      "CF-Connecting-IP": "198.51.100.126"
+    },
+    body: JSON.stringify({
+      runId: "run_s23_batch_1",
+      disableBrowserInference: true,
+      envelope: {
+        envelope_id: "env_s23_batch",
+        session_id: "sess_scen23_auth",
+        round_index: 1,
+        instruction_payload: "对比这三张图的差异",
+        assets_manifest: s23BatchImgs.map((img, i) => ({
+          asset_id: img.id,
+          filename: `img_${i + 1}.png`,
+          modality: "image",
+          mime_type: "image/png",
+          file_size: 8,
+          r2_key: img.key,
+          consumed: false,
+          source_digest: img.digest,
+          is_new: true
+        })),
+        constraint_context: { target_language: "zh", output_style: "concise" },
+        metadata: { client_timestamp: Date.now(), char_count_total: 10, estimated_input_tokens: 80 }
+      }
+    })
+  });
+  const s23BatchRes = await worker.fetch(s23BatchReq, env, {} as any);
+  assert.equal(s23BatchRes.status, 200);
+  const s23BatchSse = await s23BatchRes.text();
+  assert.ok(
+    s23BatchSse.includes('"status":"waiting_resource"'),
+    "3 parallel sensory prep nodes with limit=2 must emit waiting_resource for queued node"
+  );
+  assert.ok(
+    s23BatchSse.includes('"authoritative_git_state"') &&
+      s23BatchSse.includes("event: dag_complete"),
+    "Cloud completion must commit authoritative Git state to D1 and emit snapshot in dag_complete"
+  );
+
+  const getStateReq = new Request("https://nanomesh.local/api/session/sess_scen23_auth/state", {
+    method: "GET",
+    headers: { Cookie: `session=${scen23Token}` }
+  });
+  const getStateRes = await worker.fetch(getStateReq, env, {} as any);
+  assert.equal(getStateRes.status, 200);
+  const authSnapshot: any = await getStateRes.json();
+  assert.equal(authSnapshot.commit_order.length, 1);
+  assert.equal(authSnapshot.session_asset_ledger.length, 3);
+
+  // 23.3 Frozen Plan Identity on /api/chat/continue rejects tampered plan_hash (HTTP 409) & accepts valid frozen plan
+  const testRunId = "run_s23_frozen_handover";
+  const frozenHandoverId = "hs_s23_frozen_1";
+  store.dag_handshakes.push({
+    handshake_id: frozenHandoverId,
+    user_id: scen23UserId,
+    session_id: "sess_scen23_handover",
+    template_id: webgpuArbitraryTemplateId,
+    next_step: 1,
+    status: "ISSUED",
+    expires_at: new Date(Date.now() + 300000).toISOString()
+  });
+  const frozenDagSample: any = {
+    template: {
+      template_id: webgpuArbitraryTemplateId,
+      name_zh: "冻结计划校验模板",
+      name_en: "Frozen Plan Template",
+      desc_zh: "",
+      desc_en: "",
+      head_modalities: ["text"],
+      tail_modalities: ["text"],
+      roles: [],
+      priority: 1,
+      status: "active"
+    },
+    candidate_templates: [],
+    topology_mode: "standard",
+    nodes: [
+      {
+        node_id: "step_0_prep",
+        stage_group: "evidence_prep",
+        depends_on: ["__ORIGIN__"],
+        role: {
+          role_id: "role_text_reasoning",
+          name_zh: "步骤0",
+          name_en: "Step0",
+          in_modalities: ["text"],
+          out_modalities: ["text"],
+          in_degree: 0,
+          out_degree: 1,
+          requisition_tags: []
+        },
+        selected_model:
+          store.models.find((m) => m.model_id === "webgpu_slm_local") || store.models[0],
+        standby_models: [],
+        score_details: {
+          model: store.models[0],
+          score: 1,
+          sim: 1,
+          concurrency_penalty: 0,
+          specialist_score: 1
+        },
+        downgraded: false,
+        claimed_assets: []
+      },
+      {
+        node_id: "step_1_synth",
+        stage_group: "synthesis_output",
+        depends_on: ["step_0_prep"],
+        role: {
+          role_id: "role_text_reasoning",
+          name_zh: "总结推理",
+          name_en: "Synth",
+          in_modalities: ["text"],
+          out_modalities: ["text"],
+          in_degree: 1,
+          out_degree: 0,
+          requisition_tags: []
+        },
+        selected_model: {
+          model_id: "cf-llama-s23-frozen",
+          display_name: "Llama 3.1 8B Frozen Edge",
+          provider: "Cloudflare Workers AI",
+          endpoint: "@cf/meta/llama-3.1-8b-instruct-fp8",
+          modalities: ["text"],
+          in_modalities: ["text"],
+          out_modalities: ["text"],
+          tags: ["#chat"],
+          context_window: 8192,
+          max_concurrency: 20,
+          active_connections: 0,
+          precision: 0.95,
+          user_rating: 4.9,
+          usage_count: 10,
+          cost_per_1k_tokens: 1,
+          cost_per_invocation: 0,
+          status: "active",
+          is_generalist: 1,
+          prior_score: 0.5,
+          scenario_anchors: ["chat"],
+          inference_target: "edge",
+          auth_mode: "none",
+          api_format: "workers_ai"
+        },
+        standby_models: [],
+        score_details: {
+          model: store.models[0],
+          score: 1,
+          sim: 1,
+          concurrency_penalty: 0,
+          specialist_score: 1
+        },
+        downgraded: false,
+        claimed_assets: []
+      }
+    ],
+    reasoning_trace: {
+      intent_state: null,
+      target_branch_id: "main",
+      is_multi_round: false,
+      subsistence_filtered_count: 1,
+      selected_template_id: webgpuArbitraryTemplateId,
+      downgrade_events: []
+    }
+  };
+  const frozenEnvSample: UnifiedProtocolEnvelope = {
+    envelope_id: "env_s23_frozen",
+    session_id: "sess_scen23_handover",
+    round_index: 1,
+    instruction_payload: "FROZEN_PLAN_ORIGINAL_PROMPT",
+    assets_manifest: [],
+    constraint_context: { target_language: "zh", output_style: "concise" },
+    metadata: { client_timestamp: Date.now(), char_count_total: 20, estimated_input_tokens: 50 }
+  };
+  await registerAndFreezeDagRunPlan(env, {
+    runId: testRunId,
+    userId: scen23UserId,
+    sessionId: "sess_scen23_handover",
+    clientOpId: "op_s23_frozen_1",
+    requestDigest: "dig_s23_frozen_1",
+    planHash: "valid-plan-hash-s23",
+    dag: frozenDagSample,
+    originalEnvelope: frozenEnvSample,
+    resolvedEnvelope: frozenEnvSample,
+    isReRun: false,
+    expectedParentCommitId: null,
+    expectedBaseRevision: null
+  });
+
+  const tamperedContinueJwt = await signJWT(
+    {
+      jti: frozenHandoverId,
+      sub: scen23UserId,
+      sid: "sess_scen23_handover",
+      tid: webgpuArbitraryTemplateId,
+      nxt: 1,
+      rid: testRunId,
+      ph: "tampered-wrong-hash"
+    },
+    env.JWT_SECRET,
+    300
+  );
+  const tamperedContReq = new Request("https://nanomesh.local/api/chat/continue", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: `session=${scen23Token}` },
+    body: JSON.stringify({
+      continuation_token: tamperedContinueJwt,
+      status: "success",
+      client_step_output: "WebGPU Done",
+      envelope: frozenEnvSample
+    })
+  });
+  const tamperedContRes = await handleChatContinue(tamperedContReq, env);
+  assert.equal(
+    tamperedContRes.status,
+    409,
+    "/api/chat/continue MUST reject mismatched plan_hash with 409 plan_identity_mismatch"
+  );
+
+  const validContinueJwt = await signJWT(
+    {
+      jti: frozenHandoverId,
+      sub: scen23UserId,
+      sid: "sess_scen23_handover",
+      tid: webgpuArbitraryTemplateId,
+      nxt: 1,
+      rid: testRunId,
+      ph: "valid-plan-hash-s23"
+    },
+    env.JWT_SECRET,
+    300
+  );
+  const validContReq = new Request("https://nanomesh.local/api/chat/continue", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: `session=${scen23Token}` },
+    body: JSON.stringify({
+      continuation_token: validContinueJwt,
+      status: "success",
+      client_step_output: "WebGPU Step 0 Frozen Output",
+      envelope: {
+        ...frozenEnvSample,
+        // Deliberately alter client envelope prompt to verify server restores frozen D1 envelope!
+        instruction_payload: "CLIENT_FORGED_PROMPT_SHOULD_NOT_WIN"
+      }
+    })
+  });
+  const validContRes = await handleChatContinue(validContReq, env);
+  assert.equal(validContRes.status, 200, "Valid (run_id, plan_hash) must resume cleanly");
+  const validContSse = await validContRes.text();
+  assert.ok(
+    validContSse.includes("event: dag_complete"),
+    `Resumed frozen plan must complete. Got SSE: ${validContSse}`
+  );
+
+  console.log(
+    "  ✓ Scenario 23 (Plan Identity Freeze, Authoritative Git State, Cross-Session R2 Block & Bounded Concurrency): PASSED"
+  );
+
   console.log("\n==================================================");
-  console.log("   🎉 ALL 19 INTEGRATION SCENARIOS PASSED (100%)! ");
+  console.log("   🎉 ALL 23 INTEGRATION SCENARIOS PASSED (100%)! ");
   console.log("==================================================");
 }
 

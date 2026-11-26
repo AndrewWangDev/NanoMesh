@@ -1,5 +1,5 @@
 import { Env } from "../types";
-import { safeJsonBody } from "../lib/utils";
+import { safeJsonBody, safeParseInt } from "../lib/utils";
 import { getSession } from "../auth/middleware";
 import { getAdminSession } from "./admin";
 
@@ -101,8 +101,8 @@ export async function handleGetNotifications(req: Request, env: Env): Promise<Re
 
   const url = new URL(req.url);
   const filter = url.searchParams.get("filter") || "all";
-  const page = Math.max(1, parseInt(url.searchParams.get("page") || "1"));
-  const limit = Math.min(50, Math.max(1, parseInt(url.searchParams.get("limit") || "20")));
+  const page = safeParseInt(url.searchParams.get("page"), 1, 1);
+  const limit = safeParseInt(url.searchParams.get("limit"), 20, 1, 50);
   const offset = (page - 1) * limit;
 
   let filterClause = "";

@@ -9,7 +9,7 @@ import {
   handleGoogleCallback as goCallback
 } from "../auth/oauth";
 import { getPersistentSalt } from "./billing";
-import * as bcrypt from "bcryptjs";
+import { hashPasswordPBKDF2, verifyPassword } from "../lib/password";
 import { safeJsonBody } from "../lib/utils";
 
 export const VALID_EMAIL_DOMAINS = [
@@ -104,6 +104,16 @@ async function generateOAuthUsername(
   return `user_${crypto.randomUUID().substring(0, 8)}`;
 }
 
+function getClientIp(req: Request, env: Env): string {
+  const cfIp = req.headers.get("CF-Connecting-IP");
+  if (cfIp && cfIp.trim()) return cfIp.trim();
+  if (env.ENVIRONMENT !== "production") {
+    const xff = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+    if (xff) return xff;
+  }
+  return "unknown";
+}
+
 export async function handleRegister(req: Request, env: Env) {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
   const body: any = await safeJsonBody(req);
@@ -111,10 +121,8 @@ export async function handleRegister(req: Request, env: Env) {
   let { username, email, password, code, turnstile_token, referral_code } = body;
   if (typeof email === "string") email = email.toLowerCase().trim();
 
-  const clientIp =
-    req.headers.get("CF-Connecting-IP") ||
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    null;
+  const rawIp = getClientIp(req, env);
+  const clientIp = rawIp !== "unknown" ? rawIp : null;
   if (!(await verifyTurnstile(turnstile_token, env.TURNSTILE_SECRET_KEY, clientIp))) {
     return Response.json({ error: "error.invalidCaptcha" }, { status: 400 });
   }
@@ -210,7 +218,7 @@ export async function handleRegister(req: Request, env: Env) {
     referrerId = referrer.user_id;
   }
 
-  const hash = bcrypt.hashSync(password, 10);
+  const hash = await hashPasswordPBKDF2(password);
   const userId = crypto.randomUUID();
   const newReferralCode = await generateUniqueReferralCode(env.DB);
   const initialCredits = referrerId ? 150 : 100;
@@ -270,7 +278,11 @@ export async function handleRegister(req: Request, env: Env) {
 
   await env.DB.batch(statements);
 
-  const token = await signJWT({ userId, tokenVersion: 1 }, env.JWT_SECRET, SESSION_TTL_SECONDS);
+  const token = await signJWT(
+    { userId, tokenVersion: 1, typ: "session" },
+    env.JWT_SECRET,
+    SESSION_TTL_SECONDS
+  );
 
   return new Response(
     JSON.stringify({ user_id: userId || "", username, email, credits: initialCredits }),
@@ -287,10 +299,8 @@ export async function handleLogin(req: Request, env: Env) {
   let { email, password, turnstile_token } = body;
   if (typeof email === "string") email = email.toLowerCase().trim();
 
-  const clientIp =
-    req.headers.get("CF-Connecting-IP") ||
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    null;
+  const rawIp = getClientIp(req, env);
+  const clientIp = rawIp !== "unknown" ? rawIp : null;
   if (!(await verifyTurnstile(turnstile_token, env.TURNSTILE_SECRET_KEY, clientIp))) {
     return Response.json({ error: "Invalid captcha" }, { status: 400 });
   }
@@ -308,11 +318,23 @@ export async function handleLogin(req: Request, env: Env) {
     return Response.json({ error: "Invalid credentials" }, { status: 401 });
   }
 
-  const valid = bcrypt.compareSync(password, user.password_hash);
+  const { valid, needsUpgrade } = await verifyPassword(password, user.password_hash);
   if (!valid) return Response.json({ error: "Invalid credentials" }, { status: 401 });
 
+  // Transparently upgrade legacy bcrypt password hashes to native PBKDF2-SHA256 on successful login
+  if (needsUpgrade) {
+    try {
+      const upgradedHash = await hashPasswordPBKDF2(password);
+      await env.DB.prepare("UPDATE users SET password_hash = ? WHERE user_id = ?")
+        .bind(upgradedHash, user.user_id)
+        .run();
+    } catch (upgradeErr) {
+      console.warn("[Auth] Transparent password hash upgrade failed:", upgradeErr);
+    }
+  }
+
   const token = await signJWT(
-    { userId: user.user_id, tokenVersion: user.token_version || 1 },
+    { userId: user.user_id, tokenVersion: user.token_version || 1, typ: "session" },
     env.JWT_SECRET,
     SESSION_TTL_SECONDS
   );
@@ -356,10 +378,7 @@ export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionCont
 
   if (typeof email === "string") email = email.toLowerCase().trim();
 
-  const clientIp =
-    req.headers.get("CF-Connecting-IP") ||
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    "unknown";
+  const clientIp = getClientIp(req, env);
   if (
     !(await verifyTurnstile(
       turnstile_token,
@@ -433,6 +452,14 @@ export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionCont
   }
 
   if (existingUser || inCooldown) {
+    // Write unguessable notice token to verification_codes so the 60s per-email cooldown applies (NM-AUD-05)
+    const noticeToken = `NOTICE_REGISTERED_${crypto.randomUUID()}`;
+    await env.DB.prepare(
+      "INSERT INTO verification_codes (email, code, expires_at) VALUES (?, ?, datetime('now', '+10 minutes'))"
+    )
+      .bind(email, noticeToken)
+      .run();
+
     if (clientIp !== "unknown") {
       await env.DB.prepare(
         "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
@@ -440,11 +467,6 @@ export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionCont
         .bind(ipHourlyKey)
         .run();
     }
-    await env.DB.prepare(
-      "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
-    )
-      .bind(dailyKey)
-      .run();
 
     const isZh = lang === "zh";
     const noticeSubject = isZh ? "[NanoMesh] 账户注册提醒" : "[NanoMesh] Account Notice";
@@ -466,7 +488,7 @@ export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionCont
       </div>
     `;
 
-    await fetch("https://api.resend.com/emails", {
+    const resendRes = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${env.RESEND_API_KEY}`,
@@ -478,7 +500,18 @@ export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionCont
         subject: noticeSubject,
         html: noticeHtml
       })
-    }).catch((err) => console.error("Failed to send notice email:", err));
+    }).catch((err) => {
+      console.error("Failed to send notice email:", err);
+      return null;
+    });
+
+    if (resendRes && resendRes.ok) {
+      await env.DB.prepare(
+        "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
+      )
+        .bind(dailyKey)
+        .run();
+    }
 
     return Response.json({ success: true, message: "Code sent" });
   }
@@ -558,6 +591,15 @@ export async function handleSendCode(req: Request, env: Env, ctx?: ExecutionCont
 export async function handleLogout(req: Request, env: Env) {
   if (req.method !== "POST") {
     return new Response("Method not allowed", { status: 405 });
+  }
+  const session = await getSession(req, env);
+  if (session && session.userId) {
+    await env.DB.prepare(
+      "UPDATE users SET token_version = COALESCE(token_version, 1) + 1 WHERE user_id = ?"
+    )
+      .bind(session.userId)
+      .run()
+      .catch((err) => console.warn("[Auth] Failed to increment token_version on logout:", err));
   }
   return new Response(JSON.stringify({ success: true }), { headers: setCookieHeaders(null) });
 }
@@ -767,36 +809,30 @@ async function handleOAuthCallback(
             profile.username || profile.name,
             profile.email
           );
-          // Insert new user
-          await env.DB.prepare(
+          // Atomic user initialization batch (NM-AUD-03)
+          await env.DB.batch([
+            env.DB.prepare(
+              `
+              INSERT INTO users (user_id, username, email, avatar_url, credits, referral_code)
+              VALUES (?, ?, ?, ?, 100, ?)
             `
-          INSERT INTO users (user_id, username, email, avatar_url, credits, referral_code)
-          VALUES (?, ?, ?, ?, 100, ?)
-        `
-          )
-            .bind(
+            ).bind(
               userId || "",
               safeUsername,
               (profile.email || "").toLowerCase(),
               avatarToSet,
               oauthReferralCode
-            )
-            .run();
-          // Write signup bonus ledger
-          await env.DB.prepare(
+            ),
+            env.DB.prepare(
+              `
+              INSERT INTO credit_ledger (ledger_id, user_id, category, amount, balance, title, detail)
+              VALUES (?, ?, 'signup_bonus', 100, 100, 'Signup Bonus', 'Welcome credit pack')
             `
-          INSERT INTO credit_ledger (ledger_id, user_id, category, amount, balance, title, detail)
-          VALUES (?, ?, 'signup_bonus', 100, 100, 'Signup Bonus', 'Welcome credit pack')
-        `
-          )
-            .bind(crypto.randomUUID(), userId || "")
-            .run();
-          // Bind new user
-          await env.DB.prepare(
-            "INSERT INTO user_oauth_bindings (user_id, provider, provider_id) VALUES (?, ?, ?)"
-          )
-            .bind(userId || "", provider, String(profile.id || ""))
-            .run();
+            ).bind(crypto.randomUUID(), userId || ""),
+            env.DB.prepare(
+              "INSERT INTO user_oauth_bindings (user_id, provider, provider_id) VALUES (?, ?, ?)"
+            ).bind(userId || "", provider, String(profile.id || ""))
+          ]);
         }
       }
     }
@@ -805,7 +841,7 @@ async function handleOAuthCallback(
       .bind(userId)
       .first<{ token_version: number | null }>();
     const token = await signJWT(
-      { userId, tokenVersion: dbUser?.token_version || 1 },
+      { userId, tokenVersion: dbUser?.token_version || 1, typ: "session" },
       env.JWT_SECRET,
       SESSION_TTL_SECONDS
     );
@@ -911,10 +947,7 @@ export async function handleForgotPassword(
   let { email, turnstile_token, lang } = body;
   if (typeof email === "string") email = email.toLowerCase().trim();
 
-  const clientIp =
-    req.headers.get("CF-Connecting-IP") ||
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    "unknown";
+  const clientIp = getClientIp(req, env);
   if (
     !(await verifyTurnstile(
       turnstile_token,
@@ -1116,7 +1149,7 @@ export async function handleResetPassword(
 ): Promise<Response> {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
   const body: any = await safeJsonBody(req);
-  let { email, code, newPassword } = body;
+  let { email, code, newPassword, turnstile_token } = body;
   if (typeof email === "string") email = email.toLowerCase().trim();
 
   if (typeof email !== "string" || !isValidEmailDomain(email)) {
@@ -1124,14 +1157,28 @@ export async function handleResetPassword(
   }
 
   // Rate limiting (IP rate limit and email rate limit)
-  const clientIp = req.headers.get("cf-connecting-ip") || "unknown";
+  const clientIp = getClientIp(req, env);
+
+  if (typeof turnstile_token === "string" && turnstile_token.trim()) {
+    if (
+      !(await verifyTurnstile(
+        turnstile_token,
+        env.TURNSTILE_SECRET_KEY,
+        clientIp !== "unknown" ? clientIp : null
+      ))
+    ) {
+      return Response.json({ error: "error.invalidCaptcha" }, { status: 400 });
+    }
+  }
+
   const currentMinuteStr = new Date().toISOString().slice(0, 16); // YYYY-MM-DDTHH:mm
-  if (clientIp !== "unknown") {
+  if (clientIp !== "unknown" || env.ENVIRONMENT === "production") {
     const ipKey = `ip_pwd_rate_${currentMinuteStr}_${clientIp}`;
+    const ipLimit = clientIp === "unknown" ? 5 : 10;
     const ipCounter = await env.DB.prepare("SELECT value FROM system_counters WHERE key = ?")
       .bind(ipKey)
       .first<{ value: number }>();
-    if (ipCounter && ipCounter.value >= 10) {
+    if (ipCounter && ipCounter.value >= ipLimit) {
       return Response.json({ error: "error.ipRateLimit" }, { status: 429 });
     }
     await env.DB.prepare(
@@ -1209,8 +1256,8 @@ export async function handleResetPassword(
     return Response.json({ error: "error.invalidCode" }, { status: 400 });
   }
 
-  // Hash new password using bcrypt
-  const hash = bcrypt.hashSync(newPassword, 10);
+  // Hash new password using hardware-accelerated PBKDF2-SHA256
+  const hash = await hashPasswordPBKDF2(newPassword);
 
   // Update password and invalidate verification code atomically
   await env.DB.batch([

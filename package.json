@@ -15,7 +15,7 @@
     "lint": "eslint src/ tests/ --max-warnings=0",
     "format:check": "prettier --check \"src/**/*.{ts,js}\" \"tests/**/*.{ts,js}\"",
     "format": "prettier --write \"src/**/*.{ts,js}\" \"tests/**/*.{ts,js}\"",
-    "test": "npx tsx tests/unit_test.ts && npx tsx tests/integration_test.ts"
+    "test": "npx tsx tests/unit_test.ts && npx tsx tests/integration_test.ts && npx tsx tests/sqlite_state_closure_test.ts"
   },
   "dependencies": {
     "aws4fetch": "^1.0.19",

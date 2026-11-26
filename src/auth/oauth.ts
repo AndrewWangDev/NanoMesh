@@ -7,7 +7,7 @@ export async function getGitHubAuthURL(
   action: string = "login",
   userId?: string
 ): Promise<string> {
-  const payload: any = { nonce: crypto.randomUUID(), action };
+  const payload: any = { typ: "oauth_state", nonce: crypto.randomUUID(), action };
   if (action === "bind" && userId) {
     payload.userId = userId;
   }
@@ -79,7 +79,7 @@ export async function getGoogleAuthURL(
   action: string = "login",
   userId?: string
 ): Promise<string> {
-  const payload: any = { nonce: crypto.randomUUID(), action };
+  const payload: any = { typ: "oauth_state", nonce: crypto.randomUUID(), action };
   if (action === "bind" && userId) {
     payload.userId = userId;
   }

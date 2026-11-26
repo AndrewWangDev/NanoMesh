@@ -74,36 +74,46 @@ export function sliceEnvelopeForNode(
     }
   }
 
-  // 2. P1 Priority: Claim unconsumed matching user initial assets from envelope
-  // Head nodes claim unconsumed sensory media assets matching their input modalities.
-  // Masked head nodes (in_degree === 0 && out_degree > 0) must NEVER greedily harvest
-  // cognitive document assets (text, text_doc), reserving them for downstream reasoning nodes.
+  // 2. P1 Priority: If compositional planner pre-assigned bound assets to this node, claim them deterministically.
+  // Otherwise, penetrate to claim unconsumed matching user initial assets from envelope.
   const isHeadNode = node.role.in_degree === 0;
   const isTailNode = node.role.out_degree === 0;
   const isMaskedHeadNode = isHeadNode && !isTailNode;
 
-  for (const asset of envelope.assets_manifest) {
-    if (asset.consumed) continue;
-
-    const isSensoryModality = asset.modality === "image" || asset.modality === "audio";
-
-    // Masked head nodes focus purely on sensory feature extraction
-    // and do not consume cognitive documents (text, text_doc).
-    if (isMaskedHeadNode && !isSensoryModality) {
-      continue;
+  if (Array.isArray(node.claimed_assets) && node.claimed_assets.length > 0) {
+    for (const preBound of node.claimed_assets) {
+      const envAsset = envelope.assets_manifest.find((a) => a.asset_id === preBound.asset_id);
+      if (envAsset) {
+        envAsset.consumed = true;
+        claimedAssets.push(envAsset);
+      } else {
+        claimedAssets.push({ ...preBound, consumed: true });
+      }
     }
+  } else {
+    for (const asset of envelope.assets_manifest) {
+      if (asset.consumed) continue;
 
-    const isExplicitlyNeeded =
-      supportsModality(requiredInModalities, asset.modality) &&
-      supportsModality(modelInModalities, asset.modality);
-    const isTailHarvest = isTailNode && supportsModality(modelInModalities, asset.modality);
-    const isHeadHarvest = isHeadNode && supportsModality(modelInModalities, asset.modality);
+      const isSensoryModality = asset.modality === "image" || asset.modality === "audio";
 
-    if (isExplicitlyNeeded || isTailHarvest || isHeadHarvest) {
-      asset.consumed = true;
-      claimedAssets.push(asset);
-      requiredInModalities.delete(asset.modality);
-      if (asset.modality === "text_doc") requiredInModalities.delete("text");
+      // Masked head nodes focus purely on sensory feature extraction
+      // and do not consume cognitive documents (text, text_doc).
+      if (isMaskedHeadNode && !isSensoryModality) {
+        continue;
+      }
+
+      const isExplicitlyNeeded =
+        supportsModality(requiredInModalities, asset.modality) &&
+        supportsModality(modelInModalities, asset.modality);
+      const isTailHarvest = isTailNode && supportsModality(modelInModalities, asset.modality);
+      const isHeadHarvest = isHeadNode && supportsModality(modelInModalities, asset.modality);
+
+      if (isExplicitlyNeeded || isTailHarvest || isHeadHarvest) {
+        asset.consumed = true;
+        claimedAssets.push(asset);
+        requiredInModalities.delete(asset.modality);
+        if (asset.modality === "text_doc") requiredInModalities.delete("text");
+      }
     }
   }
 

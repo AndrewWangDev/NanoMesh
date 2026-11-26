@@ -57,10 +57,21 @@ export async function signJWT(
 
 export async function verifyJWT(token: string, secret: string): Promise<any | null> {
   try {
+    if (!token || typeof token !== "string") return null;
     const parts = token.split(".");
     if (parts.length !== 3) return null;
 
     const [header, payload, signature] = parts;
+    const decodedHeader = JSON.parse(new TextDecoder().decode(base64UrlDecode(header)));
+    if (
+      !decodedHeader ||
+      typeof decodedHeader !== "object" ||
+      decodedHeader.alg !== "HS256" ||
+      (decodedHeader.typ !== undefined && decodedHeader.typ !== "JWT")
+    ) {
+      return null;
+    }
+
     const dataToVerify = `${header}.${payload}`;
 
     const key = await importKey(secret);
@@ -74,8 +85,12 @@ export async function verifyJWT(token: string, secret: string): Promise<any | nu
     if (!isValid) return null;
 
     const decodedPayload = JSON.parse(new TextDecoder().decode(base64UrlDecode(payload)));
+    if (!decodedPayload || typeof decodedPayload !== "object") return null;
 
-    if (decodedPayload.exp && decodedPayload.exp < Math.floor(Date.now() / 1000)) {
+    if (typeof decodedPayload.exp !== "number" || !Number.isFinite(decodedPayload.exp)) {
+      return null;
+    }
+    if (decodedPayload.exp < Math.floor(Date.now() / 1000)) {
       return null;
     }
 
@@ -110,6 +125,7 @@ export async function signHeavyNodeToken(
   secret: string
 ): Promise<string> {
   const payload = {
+    typ: "heavy_node",
     iss: "nanomesh-edge",
     aud: "nanomesh-heavy",
     sub: claims.sub,

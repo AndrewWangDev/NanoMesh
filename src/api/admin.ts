@@ -1,5 +1,5 @@
 import type { Env } from "../types";
-import { safeJsonBody } from "../lib/utils";
+import { safeJsonBody, safeParseInt } from "../lib/utils";
 import { signJWT, verifyJWT } from "../auth/jwt";
 import { AwsClient } from "aws4fetch";
 import { getCloudflareAccountId } from "../lib/r2s3";
@@ -31,13 +31,20 @@ function generateCrockfordCode(): { raw: string; formatted: string } {
   return { raw: chars, formatted };
 }
 
-function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
+async function timingSafeEqual(a: Uint8Array, b: Uint8Array): Promise<boolean> {
+  // Normalize arbitrary-length secrets via SHA-256 digests so comparison is fixed 32 bytes
+  // with zero password-length timing side channel (NM-AUD-06).
+  const [hashA, hashB] = await Promise.all([
+    crypto.subtle.digest("SHA-256", a as BufferSource),
+    crypto.subtle.digest("SHA-256", b as BufferSource)
+  ]);
+  const bytesA = new Uint8Array(hashA);
+  const bytesB = new Uint8Array(hashB);
   let diff = 0;
-  for (let i = 0; i < a.length; i++) {
-    diff |= a[i] ^ b[i];
+  for (let i = 0; i < 32; i++) {
+    diff |= bytesA[i] ^ bytesB[i];
   }
-  return diff === 0;
+  return diff === 0 && a.length === b.length;
 }
 
 export async function getAdminSigningSecret(env: Env): Promise<string> {
@@ -57,7 +64,17 @@ export async function getAdminSession(request: Request, env: Env) {
   try {
     const adminSecret = await getAdminSigningSecret(env);
     const payload = await verifyJWT(token, adminSecret);
-    if (payload && payload.role === "admin") return payload;
+    if (!payload || payload.role !== "admin") return null;
+    if (payload.typ !== undefined && payload.typ !== "admin_session") return null;
+
+    if (payload.jti) {
+      const revoked = await env.DB.prepare("SELECT value FROM system_counters WHERE key = ?")
+        .bind(`admin_revoked_${payload.jti}`)
+        .first<{ value: number }>();
+      if (revoked) return null;
+    }
+
+    return payload;
   } catch (e) {}
   return null;
 }
@@ -71,12 +88,17 @@ export async function handleAdminLogin(
     return new Response("Method not allowed", { status: 405 });
   }
 
-  // Opportunistic cleanup of stale admin login attempts (> 1 day old)
-  const cleanupPromise = env.DB.prepare(
-    "DELETE FROM admin_login_attempts WHERE created_at < datetime('now', '-1 day')"
-  )
-    .run()
-    .catch(() => {});
+  // Opportunistic cleanup of stale admin login attempts (> 1 day old) and expired admin revocation markers
+  const nowEpoch = Math.floor(Date.now() / 1000);
+  const cleanupPromise = Promise.all([
+    env.DB.prepare("DELETE FROM admin_login_attempts WHERE created_at < datetime('now', '-1 day')")
+      .run()
+      .catch(() => {}),
+    env.DB.prepare("DELETE FROM system_counters WHERE key LIKE 'admin_revoked_%' AND value < ?")
+      .bind(nowEpoch)
+      .run()
+      .catch(() => {})
+  ]);
   if (ctx && typeof ctx.waitUntil === "function") {
     ctx.waitUntil(cleanupPromise);
   }
@@ -90,7 +112,19 @@ export async function handleAdminLogin(
     });
   }
 
-  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+  const ip =
+    request.headers.get("CF-Connecting-IP") ||
+    (env.ENVIRONMENT !== "production"
+      ? request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+      : undefined) ||
+    "unknown";
+
+  if (env.ENVIRONMENT === "production" && ip === "unknown") {
+    return new Response(JSON.stringify({ error: "Client IP verification required" }), {
+      status: 403,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
 
   // Rate limit: 5 failed attempts per IP in last 15 minutes
   const failRecord = await env.DB.prepare(
@@ -111,9 +145,9 @@ export async function handleAdminLogin(
 
   const body = (await safeJsonBody(request)) as { password?: string };
   const enc = new TextEncoder();
-  const inputBuffer = enc.encode(body.password || "");
+  const inputBuffer = enc.encode(typeof body.password === "string" ? body.password : "");
   const passBuffer = enc.encode(adminPass);
-  const isMatch = timingSafeEqual(inputBuffer, passBuffer);
+  const isMatch = await timingSafeEqual(inputBuffer, passBuffer);
 
   if (!isMatch) {
     await env.DB.prepare("INSERT INTO admin_login_attempts (ip) VALUES (?)").bind(ip).run();
@@ -127,7 +161,11 @@ export async function handleAdminLogin(
   await env.DB.prepare("DELETE FROM admin_login_attempts WHERE ip = ?").bind(ip).run();
 
   const adminSecret = await getAdminSigningSecret(env);
-  const token = await signJWT({ role: "admin" }, adminSecret, 2 * 3600);
+  const token = await signJWT(
+    { role: "admin", typ: "admin_session", jti: crypto.randomUUID() },
+    adminSecret,
+    2 * 3600
+  );
   const headers = new Headers();
   headers.set(
     "Set-Cookie",
@@ -140,6 +178,17 @@ export async function handleAdminLogin(
 export async function handleAdminLogout(request: Request, env: Env): Promise<Response> {
   if (request.method !== "POST") {
     return new Response("Method not allowed", { status: 405 });
+  }
+  const adminSession = await getAdminSession(request, env);
+  if (adminSession && adminSession.jti) {
+    const expEpoch =
+      typeof adminSession.exp === "number"
+        ? adminSession.exp
+        : Math.floor(Date.now() / 1000) + 2 * 3600;
+    await env.DB.prepare("INSERT OR IGNORE INTO system_counters (key, value) VALUES (?, ?)")
+      .bind(`admin_revoked_${adminSession.jti}`, expEpoch)
+      .run()
+      .catch((err) => console.warn("[Admin] Failed to revoke admin session jti:", err));
   }
   const headers = new Headers();
   headers.set("Set-Cookie", "admin_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax; Secure");
@@ -235,10 +284,11 @@ export async function handleAdminCreateNode(request: Request, env: Env): Promise
   }
 
   if (endpoint.startsWith("http://") || endpoint.startsWith("https://")) {
-    if (!isSafeExternalUrl(endpoint)) {
+    if (!isSafeExternalUrl(endpoint, env.ENVIRONMENT === "production")) {
       return Response.json(
         {
-          error: "非法算力终端地址：禁止绑定本地回环、内网私有地址（RFC1918）或受保护的网络接口"
+          error:
+            "非法算力终端地址：生产环境强制要求 HTTPS，禁止绑定本地回环、内网私有地址（RFC1918）或受保护的网络接口"
         },
         { status: 400 }
       );
@@ -394,10 +444,11 @@ export async function handleAdminUpdateNode(
 
   if (body.endpoint !== undefined) {
     if (endpoint.startsWith("http://") || endpoint.startsWith("https://")) {
-      if (!isSafeExternalUrl(endpoint)) {
+      if (!isSafeExternalUrl(endpoint, env.ENVIRONMENT === "production")) {
         return Response.json(
           {
-            error: "非法算力终端地址：禁止绑定本地回环、内网私有地址（RFC1918）或受保护的网络接口"
+            error:
+              "非法算力终端地址：生产环境强制要求 HTTPS，禁止绑定本地回环、内网私有地址（RFC1918）或受保护的网络接口"
           },
           { status: 400 }
         );
@@ -828,31 +879,17 @@ export async function handleAdminListTemplates(request: Request, env: Env): Prom
   return Response.json({ success: true, templates });
 }
 
-export async function handleAdminCreateOrUpdateTemplate(
-  request: Request,
-  env: Env
-): Promise<Response> {
-  const session = await getAdminSession(request, env);
-  if (!session) return new Response("Unauthorized", { status: 401 });
-
-  const body = (await safeJsonBody(request)) as any;
-  const nameZh = (body.name_zh || body.name || "").trim();
-  const nameEn = (body.name_en || body.name || nameZh).trim();
-  const descZh = (body.desc_zh || body.description || "").trim();
-  const descEn = (body.desc_en || body.description || descZh).trim();
-  const roleSequence: string[] = Array.isArray(body.role_sequence)
-    ? (body.role_sequence as string[])
-    : [];
-  let templateId = (body.template_id || "").trim();
-
-  if (!nameZh || roleSequence.length === 0) {
-    return Response.json(
-      { error: "Missing required fields: name and non-empty role_sequence" },
-      { status: 400 }
-    );
+async function validateTemplatePipeline(
+  env: Env,
+  roleSequence: string[]
+): Promise<
+  | { ok: true; rolesMap: Map<string, DAGRole>; inModalities: string[]; outModalities: string[] }
+  | { ok: false; error: string }
+> {
+  if (!roleSequence || roleSequence.length === 0) {
+    return { ok: false, error: "Pipeline role_sequence cannot be empty" };
   }
 
-  // 1. Fetch all roles from dag_roles
   const rolesRows = await env.DB.prepare("SELECT * FROM dag_roles").all<any>();
   const rolesMap = new Map<string, DAGRole>();
   for (const r of rolesRows.results || []) {
@@ -869,34 +906,28 @@ export async function handleAdminCreateOrUpdateTemplate(
     });
   }
 
-  // 2. Verify all roles exist
   for (let i = 0; i < roleSequence.length; i++) {
     const rid = roleSequence[i];
     if (!rolesMap.has(rid)) {
-      return Response.json(
-        { error: `Step ${i + 1}: Role '${rid}' does not exist in dag_roles` },
-        { status: 400 }
-      );
+      return { ok: false, error: `Step ${i + 1}: Role '${rid}' does not exist in dag_roles` };
     }
   }
 
-  // 3. VALIDATION GATE: Linear Modality Continuity Check (R_i.out ∩ R_{i+1}.in ≠ ∅)
+  // Linear Modality Continuity Check (R_i.out ∩ R_{i+1}.in ≠ ∅)
   for (let i = 0; i < roleSequence.length - 1; i++) {
     const currentRole = rolesMap.get(roleSequence[i])!;
     const nextRole = rolesMap.get(roleSequence[i + 1])!;
     const outSet = new Set(currentRole.out_modalities);
     const hasIntersection = nextRole.in_modalities.some((m) => outSet.has(m));
     if (!hasIntersection) {
-      return Response.json(
-        {
-          error: `Modality Discontinuity: Step ${i + 1} (${currentRole.name_zh || currentRole.role_id}) outputs [${currentRole.out_modalities.join(", ")}], but Step ${i + 2} (${nextRole.name_zh || nextRole.role_id}) requires inputs [${nextRole.in_modalities.join(", ")}]. Pipeline connection rejected.`
-        },
-        { status: 400 }
-      );
+      return {
+        ok: false,
+        error: `Modality Discontinuity: Step ${i + 1} (${currentRole.name_zh || currentRole.role_id}) outputs [${currentRole.out_modalities.join(", ")}], but Step ${i + 2} (${nextRole.name_zh || nextRole.role_id}) requires inputs [${nextRole.in_modalities.join(", ")}]. Pipeline connection rejected.`
+      };
     }
   }
 
-  // 4. VALIDATION GATE: Role Subsistence Check (Active compute node availability)
+  // Role Subsistence Check (Active compute node availability)
   const modelsRes = await env.DB.prepare("SELECT * FROM models WHERE status = 'active'").all<any>();
   const activeModels: ModelMetadata[] = (modelsRes.results || []).map((r) => ({
     model_id: r.model_id,
@@ -935,28 +966,59 @@ export async function handleAdminCreateOrUpdateTemplate(
   for (let i = 0; i < roleSequence.length; i++) {
     const role = rolesMap.get(roleSequence[i])!;
     let hasModels = false;
-    let res: any = null;
     try {
-      res = resolveRoleCompetence(role, activeModels);
+      const res = resolveRoleCompetence(role, activeModels);
       hasModels = res.selectedModels.length > 0;
     } catch {
       hasModels = false;
     }
     if (!hasModels) {
-      return Response.json(
-        {
-          error: `Subsistence Check Failed: Step ${i + 1} Role '${role.name_zh || role.role_id}' currently has 0 active models in the compute pool. An un-executable pipeline cannot be saved.`
-        },
-        { status: 400 }
-      );
+      return {
+        ok: false,
+        error: `Subsistence Check Failed: Step ${i + 1} Role '${role.name_zh || role.role_id}' currently has 0 active models in the compute pool. An un-executable pipeline cannot be saved.`
+      };
     }
   }
 
-  // 5. Determine in_modalities & out_modalities
   const firstRole = rolesMap.get(roleSequence[0])!;
   const lastRole = rolesMap.get(roleSequence[roleSequence.length - 1])!;
-  const inModalities = firstRole.in_modalities;
-  const outModalities = lastRole.out_modalities;
+  return {
+    ok: true,
+    rolesMap,
+    inModalities: firstRole.in_modalities,
+    outModalities: lastRole.out_modalities
+  };
+}
+
+export async function handleAdminCreateOrUpdateTemplate(
+  request: Request,
+  env: Env
+): Promise<Response> {
+  const session = await getAdminSession(request, env);
+  if (!session) return new Response("Unauthorized", { status: 401 });
+
+  const body = (await safeJsonBody(request)) as any;
+  const nameZh = (body.name_zh || body.name || "").trim();
+  const nameEn = (body.name_en || body.name || nameZh).trim();
+  const descZh = (body.desc_zh || body.description || "").trim();
+  const descEn = (body.desc_en || body.description || descZh).trim();
+  const roleSequence: string[] = Array.isArray(body.role_sequence)
+    ? (body.role_sequence as string[])
+    : [];
+  let templateId = (body.template_id || "").trim();
+
+  if (!nameZh || roleSequence.length === 0) {
+    return Response.json(
+      { error: "Missing required fields: name and non-empty role_sequence" },
+      { status: 400 }
+    );
+  }
+
+  const validation = await validateTemplatePipeline(env, roleSequence);
+  if (!validation.ok) {
+    return Response.json({ error: validation.error }, { status: 400 });
+  }
+  const { rolesMap, inModalities, outModalities } = validation;
 
   if (!templateId) {
     templateId = `tpl-custom-${Date.now().toString(36)}`;
@@ -1042,6 +1104,22 @@ export async function handleAdminToggleTemplate(
     : body.is_active === false || body.is_active === 0
       ? "disabled"
       : "active";
+
+  if (newStatus === "active") {
+    const tpl = await env.DB.prepare(
+      "SELECT role_sequence FROM dag_templates WHERE template_id = ?"
+    )
+      .bind(templateId)
+      .first<{ role_sequence: string }>();
+    if (!tpl) {
+      return Response.json({ error: "Template not found" }, { status: 404 });
+    }
+    const roleSequence = safeJsonParse<string[]>(tpl.role_sequence, []);
+    const validation = await validateTemplatePipeline(env, roleSequence);
+    if (!validation.ok) {
+      return Response.json({ error: validation.error }, { status: 400 });
+    }
+  }
 
   await env.DB.prepare("UPDATE dag_templates SET status = ? WHERE template_id = ?")
     .bind(newStatus, templateId)
@@ -1162,7 +1240,12 @@ export async function handleAdminUpdateModel(request: Request, env: Env): Promis
       api_format?: string;
       auth_secret?: string;
     };
-    if (!body.status) return Response.json({ error: "Missing status" }, { status: 400 });
+    if (!body.status || !["pending", "approved", "published", "rejected"].includes(body.status)) {
+      return Response.json(
+        { error: "Invalid status (allowed: pending, approved, published, rejected)" },
+        { status: 400 }
+      );
+    }
 
     const model = await env.DB.prepare("SELECT * FROM user_uploaded_models WHERE upload_id = ?")
       .bind(id)
@@ -1195,10 +1278,11 @@ export async function handleAdminUpdateModel(request: Request, env: Env): Promis
       }
 
       if (targetEndpoint.startsWith("http://") || targetEndpoint.startsWith("https://")) {
-        if (!isSafeExternalUrl(targetEndpoint)) {
+        if (!isSafeExternalUrl(targetEndpoint, env.ENVIRONMENT === "production")) {
           return Response.json(
             {
-              error: "非法算力终端地址：禁止绑定本地回环、内网私有地址（RFC1918）或受保护的网络接口"
+              error:
+                "非法算力终端地址：生产环境强制要求 HTTPS，禁止绑定本地回环、内网私有地址（RFC1918）或受保护的网络接口"
             },
             { status: 400 }
           );
@@ -1475,8 +1559,8 @@ export async function handleAdminListGiftCodes(request: Request, env: Env): Prom
   const status = url.searchParams.get("status") || "all";
   const batch = url.searchParams.get("batch") || "all";
   const q = (url.searchParams.get("q") || "").trim();
-  const page = Math.max(1, parseInt(url.searchParams.get("page") || "1"));
-  const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") || "50")));
+  const page = safeParseInt(url.searchParams.get("page"), 1, 1);
+  const limit = safeParseInt(url.searchParams.get("limit"), 50, 1, 100);
   const offset = (page - 1) * limit;
 
   // 1. Stats calculation

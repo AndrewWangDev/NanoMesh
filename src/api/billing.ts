@@ -1,6 +1,6 @@
 import { Env } from "../types";
 import { getSession } from "../auth/middleware";
-import { safeJsonBody } from "../lib/utils";
+import { safeJsonBody, safeParseInt } from "../lib/utils";
 
 export function getPersistentSalt(env: Env): string {
   if (env.PERSISTENT_DATA_SALT) return env.PERSISTENT_DATA_SALT;
@@ -48,8 +48,8 @@ export async function handleGetLedger(req: Request, env: Env) {
 
   const url = new URL(req.url);
   const category = url.searchParams.get("category") || "all";
-  const page = Math.max(1, parseInt(url.searchParams.get("page") || "1"));
-  const limit = Math.min(50, Math.max(1, parseInt(url.searchParams.get("limit") || "20")));
+  const page = safeParseInt(url.searchParams.get("page"), 1, 1);
+  const limit = safeParseInt(url.searchParams.get("limit"), 20, 1, 50);
   const offset = (page - 1) * limit;
 
   // Map frontend filter to backend categories

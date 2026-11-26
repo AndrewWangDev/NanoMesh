@@ -1,10 +1,44 @@
 import { Env } from "../types";
 import { getSession } from "../auth/middleware";
 import { getSinglePresignedPutUrl } from "../lib/r2s3";
+import { registerPresignedAssetTicket } from "./session";
 
 const MAX_CHAT_FILE_SIZE = 25 * 1024 * 1024; // 25MB hard limit
+const DAILY_UPLOAD_QUOTA = 50;
 
-export async function handleChatPresign(request: Request, env: Env): Promise<Response> {
+async function checkDailyUploadQuota(
+  env: Env,
+  userId: string,
+  ctx?: ExecutionContext
+): Promise<{ allowed: boolean; counterKey: string }> {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const counterKey = `presign_daily_${todayStr}_${userId}`;
+
+  // Opportunistically prune expired daily upload counters (> 2 days old)
+  const prunePromise = env.DB.prepare(
+    "DELETE FROM system_counters WHERE key LIKE 'presign_daily_%' AND key < 'presign_daily_' || date('now', '-2 days')"
+  )
+    .run()
+    .catch(() => {});
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(prunePromise);
+  }
+
+  const counter = await env.DB.prepare("SELECT value FROM system_counters WHERE key = ?")
+    .bind(counterKey)
+    .first<{ value: number }>();
+
+  return {
+    allowed: !counter || counter.value < DAILY_UPLOAD_QUOTA,
+    counterKey
+  };
+}
+
+export async function handleChatPresign(
+  request: Request,
+  env: Env,
+  ctx?: ExecutionContext
+): Promise<Response> {
   if (request.method !== "POST") {
     return new Response("Method not allowed", { status: 405 });
   }
@@ -35,6 +69,22 @@ export async function handleChatPresign(request: Request, env: Env): Promise<Res
       }
     );
   }
+
+  // 1b. Per-user daily upload quota check to prevent unmetered tmp/ R2 exhaustion (NM-AUD-02)
+  const quota = await checkDailyUploadQuota(env, session.userId, ctx);
+  if (!quota.allowed) {
+    return new Response(
+      JSON.stringify({
+        error: "presign_daily_limit",
+        message: "今日临时文件上传次数已达上限（50 次/日），请明日再试。"
+      }),
+      {
+        status: 429,
+        headers: { "Content-Type": "application/json" }
+      }
+    );
+  }
+  const presignCounterKey = quota.counterKey;
 
   // 2. Parse request
   let body: { file_name?: string; file_size?: number; mime_type?: string; modality?: string };
@@ -88,6 +138,22 @@ export async function handleChatPresign(request: Request, env: Env): Promise<Res
 
   try {
     const uploadUrl = await getSinglePresignedPutUrl(env, r2Key, mimeType, fileSize, 300);
+    await env.DB.prepare(
+      "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
+    )
+      .bind(presignCounterKey)
+      .run()
+      .catch(() => {});
+    await registerPresignedAssetTicket(env, {
+      assetId,
+      userId: session.userId,
+      filename: fileName,
+      modality: body.modality || "image",
+      mimeType,
+      fileSize,
+      r2Key,
+      origin: "upload"
+    });
     return new Response(
       JSON.stringify({
         assetId,
@@ -117,7 +183,11 @@ export async function handleChatPresign(request: Request, env: Env): Promise<Res
   }
 }
 
-export async function handleChatUpload(request: Request, env: Env): Promise<Response> {
+export async function handleChatUpload(
+  request: Request,
+  env: Env,
+  ctx?: ExecutionContext
+): Promise<Response> {
   const session = await getSession(request, env);
   if (!session) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
@@ -149,7 +219,40 @@ export async function handleChatUpload(request: Request, env: Env): Promise<Resp
     );
   }
 
-  // 2. Parse FormData
+  // 1b. Unified per-user daily upload quota check (closes /api/upload/file bypass for NM-AUD-02)
+  const uploadQuota = await checkDailyUploadQuota(env, session.userId, ctx);
+  if (!uploadQuota.allowed) {
+    return new Response(
+      JSON.stringify({
+        error: "presign_daily_limit",
+        message: "今日临时文件上传次数已达上限（50 次/日），请明日再试。"
+      }),
+      {
+        status: 429,
+        headers: { "Content-Type": "application/json" }
+      }
+    );
+  }
+
+  // 2. Check Content-Length BEFORE buffering multipart FormData into 128MB Worker memory (NM-AUD-02)
+  const rawContentLength = request.headers.get("Content-Length");
+  if (rawContentLength) {
+    const contentLen = Number(rawContentLength);
+    if (Number.isFinite(contentLen) && contentLen > MAX_CHAT_FILE_SIZE + 65536) {
+      return new Response(
+        JSON.stringify({
+          error: "file_too_large",
+          message: "请求体积超出 25MB 上传限制，已拒绝解析。"
+        }),
+        {
+          status: 413,
+          headers: { "Content-Type": "application/json" }
+        }
+      );
+    }
+  }
+
+  // 3. Parse FormData
   let formData: FormData;
   try {
     formData = await request.formData();
@@ -198,6 +301,24 @@ export async function handleChatUpload(request: Request, env: Env): Promise<Resp
         originalName: fileName,
         assetId: assetId
       }
+    });
+
+    await env.DB.prepare(
+      "INSERT INTO system_counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1"
+    )
+      .bind(uploadQuota.counterKey)
+      .run()
+      .catch(() => {});
+
+    await registerPresignedAssetTicket(env, {
+      assetId,
+      userId: session.userId,
+      filename: fileName,
+      modality,
+      mimeType: contentType,
+      fileSize: file.size,
+      r2Key,
+      origin: "upload"
     });
 
     return new Response(

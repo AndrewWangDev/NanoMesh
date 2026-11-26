@@ -24,6 +24,24 @@ export async function getSession(request: Request, env: Env): Promise<SessionPay
   const payload = await verifyJWT(token, env.JWT_SECRET);
   if (!payload || !payload.userId) return null;
 
+  // Enforce strict token purpose isolation (NM-AUD-01 / NM-AUD-17):
+  // Reject OAuth state tokens, continuation tokens, heavy node tokens, or admin tokens.
+  if (payload.typ !== undefined && payload.typ !== "session") {
+    return null;
+  }
+  if (
+    payload.action !== undefined ||
+    payload.nonce !== undefined ||
+    payload.jti !== undefined ||
+    payload.nxt !== undefined ||
+    payload.role === "admin"
+  ) {
+    return null;
+  }
+  if (typeof payload.tokenVersion !== "number" || !Number.isFinite(payload.tokenVersion)) {
+    return null;
+  }
+
   // Verify token_version and active status against database (supports immediate session revocation and blocks deleted accounts)
   let user: { token_version: number | null; email: string } | null = null;
   try {
@@ -41,8 +59,7 @@ export async function getSession(request: Request, env: Env): Promise<SessionPay
   if (!user || (user.email && user.email.startsWith("deleted_"))) return null;
 
   const currentVersion = user.token_version ?? 1;
-  const tokenVersion = payload.tokenVersion ?? 1;
-  if (tokenVersion < currentVersion) {
+  if (payload.tokenVersion < currentVersion) {
     return null;
   }
 

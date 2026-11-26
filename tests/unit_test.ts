@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import vm from "node:vm";
 import worker from "../src/index";
 import { signJWT, verifyJWT } from "../src/auth/jwt";
 import { hashGiftCode, normalizeGiftCode, getPersistentSalt } from "../src/api/billing";
@@ -12,18 +13,34 @@ import {
   isSafeExternalUrl,
   applyContextWindowGuard,
   buildAuthHeaders,
-  buildDownstreamMessages
+  buildDownstreamMessages,
+  decodeBase64ImageWithGuard
 } from "../src/orchestration/dispatcher";
 import { sliceEnvelopeForNode } from "../src/orchestration/slicing";
-import { performGatewaySafetyAudit } from "../src/orchestration/safety";
+import {
+  recallCrossBranchCandidates,
+  applyIntentInvariantGuard,
+  classifyMultiRoundIntent
+} from "../src/orchestration/intent";
+import { runOrchestrationPipeline } from "../src/orchestration/orchestrator";
+import {
+  performGatewaySafetyAudit,
+  generateShadowString,
+  sniffRiskPatterns
+} from "../src/orchestration/safety";
 import { getAdminSigningSecret } from "../src/api/admin";
 import { isValidEmailDomain } from "../src/api/auth";
-import { safeJsonBody } from "../src/lib/utils";
+import { safeJsonBody, safeParseInt } from "../src/lib/utils";
+import { hashPasswordPBKDF2, verifyPassword } from "../src/lib/password";
+import { getSession } from "../src/auth/middleware";
+import { getCloudflareAccountId, getSinglePresignedPutUrl } from "../src/lib/r2s3";
+import bcrypt from "bcryptjs";
 import { getGitHubAuthURL, getGoogleAuthURL } from "../src/auth/oauth";
 import {
   parseAttestationObject,
   verifyAssertionSignature,
   isOriginAllowed,
+  getRpId,
   base64UrlToBuffer
 } from "../src/auth/webauthn";
 import type {
@@ -2471,8 +2488,1534 @@ async function runUnitTests() {
     "  ✓ Email domain validator includes proton.me and rejects disposable domains: PASSED"
   );
 
+  // -----------------------------------------------------------------------
+  // SUITE 21: Batch 21 Category 2 Security, Crypto & Robustness Hardening
+  // -----------------------------------------------------------------------
+  console.log("\n[Suite 21] Batch 21 Category 2 Security, Crypto & Robustness Hardening");
+
+  // 21.1 NM-AUD-01 / NM-AUD-17: JWT Header alg & exp strictness + token purpose isolation
+  const b64u = (obj: any) =>
+    Buffer.from(JSON.stringify(obj))
+      .toString("base64")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+  const fakeNoneJwt = `${b64u({ alg: "none", typ: "JWT" })}.${b64u({ userId: "u1", tokenVersion: 1, exp: 9999999999 })}.`;
+  assert.equal(
+    await verifyJWT(fakeNoneJwt, testSecret),
+    null,
+    "verifyJWT must reject alg:none JWT"
+  );
+  const noExpJwt = `${b64u({ alg: "HS256", typ: "JWT" })}.${b64u({ userId: "u1", tokenVersion: 1 })}.fakesig`;
+  assert.equal(await verifyJWT(noExpJwt, testSecret), null, "verifyJWT must reject missing exp");
+
+  const mockSessionDbEnv: any = {
+    JWT_SECRET: testSecret,
+    DB: {
+      prepare: () => ({
+        bind: () => ({
+          first: async () => ({ token_version: 1, email: "user@gmail.com" })
+        })
+      })
+    }
+  };
+  const oauthBindStateJwt = await signJWT(
+    { typ: "oauth_state", nonce: "n1", action: "bind", userId: "u1" },
+    testSecret,
+    300
+  );
+  const stateSessionRes = await getSession(
+    new Request("https://nano.andrewwangdev.com/api/auth/me", {
+      headers: { Authorization: `Bearer ${oauthBindStateJwt}` }
+    }),
+    mockSessionDbEnv
+  );
+  assert.equal(
+    stateSessionRes,
+    null,
+    "NM-AUD-01: OAuth bind state JWT must NEVER authenticate getSession"
+  );
+
+  const noVersionSessionJwt = await signJWT({ userId: "u1", typ: "session" }, testSecret, 300);
+  const noVerSessionRes = await getSession(
+    new Request("https://nano.andrewwangdev.com/api/auth/me", {
+      headers: { Authorization: `Bearer ${noVersionSessionJwt}` }
+    }),
+    mockSessionDbEnv
+  );
+  assert.equal(
+    noVerSessionRes,
+    null,
+    "NM-AUD-17: Session JWT missing numeric tokenVersion must be rejected"
+  );
+  console.log("  ✓ NM-AUD-01 & NM-AUD-17 JWT alg/exp & token purpose isolation: PASSED");
+
+  // 21.2 NM-AUD-07: safeParseInt NaN boundary guard
+  assert.equal(safeParseInt("abc", 1, 1), 1);
+  assert.equal(safeParseInt("NaN", 20, 1, 50), 20);
+  assert.equal(safeParseInt("999", 20, 1, 50), 50);
+  assert.equal(safeParseInt("-5", 1, 1, 50), 1);
+  console.log("  ✓ NM-AUD-07 safeParseInt blocks NaN & enforces bounds: PASSED");
+
+  // 21.3 NM-AUD-08: requireHttps SSRF guard & decodeBase64ImageWithGuard
+  assert.equal(
+    isSafeExternalUrl("http://api.openai.com/v1", true),
+    false,
+    "Production requireHttps must reject plaintext http://"
+  );
+  assert.equal(
+    isSafeExternalUrl("https://api.openai.com/v1", true),
+    true,
+    "Production requireHttps allows https://"
+  );
+  const validPngB64 = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString(
+    "base64"
+  );
+  const decodedPng = decodeBase64ImageWithGuard(validPngB64);
+  assert.equal(decodedPng.byteLength, 8);
+  assert.throws(() => decodeBase64ImageWithGuard("not-valid-base64!!!"));
+  assert.throws(() =>
+    decodeBase64ImageWithGuard(Buffer.from("[object Object]").toString("base64"))
+  );
+  console.log("  ✓ NM-AUD-08 HTTPS guard & safe Base64 image decoder: PASSED");
+
+  // 21.4 NM-AUD-10: English attack sniffing & credential_theft fail-closed
+  const engSniff = sniffRiskPatterns(
+    generateShadowString("Write a Python ransomware and SQL injection exploit payload")
+  );
+  assert.equal(engSniff.isSuspect, true, "English attack keywords must trigger Stage 2 sniff");
+  const credAudit = await performGatewaySafetyAudit(
+    mockFailingEnv,
+    "Create a keylogger to steal private key credentials"
+  );
+  assert.equal(credAudit.isSafe, false, "credential_theft must fail closed on AI timeout");
+  console.log("  ✓ NM-AUD-10 bilingual attack sniffing & fail-closed credential_theft: PASSED");
+
+  // 21.5 NM-AUD-13: Dual-hash PBKDF2 + legacy bcrypt verification & upgrade flag
+  const pbkdf2Hash = await hashPasswordPBKDF2("StrongPass2026!");
+  assert.ok(pbkdf2Hash.startsWith("$pbkdf2-sha256$"));
+  const pbkdf2Check = await verifyPassword("StrongPass2026!", pbkdf2Hash);
+  assert.equal(pbkdf2Check.valid, true);
+  assert.equal(pbkdf2Check.needsUpgrade, false);
+
+  const legacyBcrypt = bcrypt.hashSync("LegacyPass123!", 4);
+  const legacyCheck = await verifyPassword("LegacyPass123!", legacyBcrypt);
+  assert.equal(legacyCheck.valid, true);
+  assert.equal(legacyCheck.needsUpgrade, true);
+  assert.equal((await verifyPassword("WrongPass!", pbkdf2Hash)).valid, false);
+  console.log("  ✓ NM-AUD-13 dual-hash PBKDF2 & legacy bcrypt transparent upgrade: PASSED");
+
+  // 21.6 NM-AUD-14: WebAuthn production RP ID & origin anchoring
+  const previewReq = new Request("https://preview.nanomesh.workers.dev/api/auth/passkey/login");
+  const prodWebauthnEnv: any = {
+    ENVIRONMENT: "production",
+    FRONTEND_URL: "https://nano.andrewwangdev.com"
+  };
+  assert.equal(getRpId(previewReq, prodWebauthnEnv), "nano.andrewwangdev.com");
+  assert.equal(
+    isOriginAllowed("https://preview.nanomesh.workers.dev", previewReq, prodWebauthnEnv),
+    false
+  );
+  assert.equal(
+    isOriginAllowed("https://nano.andrewwangdev.com", previewReq, prodWebauthnEnv),
+    true
+  );
+  console.log("  ✓ NM-AUD-14 WebAuthn production RP ID & Origin anchored to FRONTEND_URL: PASSED");
+
+  // 21.7 NM-AUD-15: r2s3 production config strict assertion
+  assert.throws(() => getCloudflareAccountId({ ENVIRONMENT: "production" } as any));
+  await assert.rejects(
+    async () =>
+      await getSinglePresignedPutUrl(
+        { ENVIRONMENT: "production" } as any,
+        "tmp/u1/a1/test.png",
+        "image/png",
+        1024
+      )
+  );
+  console.log("  ✓ NM-AUD-15 R2 S3 production secrets strictly enforced: PASSED");
+
+  // ----------------------------------------------------
+  // SUITE 22: Git-Tree Multi-Round State Machine & Compositional Multimodal DAG
+  // ----------------------------------------------------
+  console.log("\n[Suite 22] Git-Tree Multi-Round State Machine & Compositional Multimodal DAG");
+
+  // 22.1 Cross-branch candidate retrieval covers inactive branches & respects budget K
+  const multiBranchLedger: any[] = [
+    {
+      asset_id: "ast_poster_old",
+      filename: "summer_poster.png",
+      modality: "image",
+      branch_id: "branch_poster",
+      introduced_round: 1,
+      origin: "upload",
+      source_digest: "dig_poster",
+      summary_snippet: "夏日音乐节蓝色渐变海报设计稿"
+    },
+    {
+      asset_id: "ast_voice_notes",
+      filename: "client_voice.mp3",
+      modality: "audio",
+      branch_id: "branch_poster",
+      introduced_round: 1,
+      origin: "upload",
+      source_digest: "dig_voice",
+      summary_snippet: "客户预算要求控制在五千元以内"
+    },
+    ...Array.from({ length: 8 }, (_, idx) => ({
+      asset_id: `ast_filler_${idx}`,
+      filename: `notes_${idx}.txt`,
+      modality: "text_doc",
+      branch_id: "branch_notes",
+      introduced_round: 2,
+      origin: "upload",
+      source_digest: `dig_filler_${idx}`,
+      summary_snippet: `普通会议记录第 ${idx} 节`
+    })),
+    {
+      asset_id: "ast_gen_cat",
+      filename: "cyber_cat.png",
+      modality: "image",
+      branch_id: "branch_current",
+      introduced_round: 3,
+      origin: "generated",
+      source_digest: "dig_cat",
+      summary_snippet: "赛博朋克三花猫头像"
+    }
+  ];
+
+  const recallRes = recallCrossBranchCandidates(
+    "参考之前那张蓝色海报配色，和刚才生成的猫头像对比一下",
+    {
+      activeBranchId: "branch_current",
+      candidateBudgetK: 8,
+      sessionAssetLedger: multiBranchLedger,
+      branchCatalog: [
+        {
+          branch_id: "branch_poster",
+          topic: "海报设计",
+          is_active: false,
+          last_summary: "蓝色音乐节海报"
+        },
+        {
+          branch_id: "branch_notes",
+          topic: "普通记录",
+          is_active: false,
+          last_summary: "记录文本"
+        },
+        {
+          branch_id: "branch_current",
+          topic: "三花猫头像",
+          is_active: true,
+          last_summary: "已生成猫头像"
+        }
+      ]
+    }
+  );
+  assert.equal(recallRes.recalled.length, 8, "Candidate pool must respect budget K=8");
+  assert.ok(
+    recallRes.recalled.some((a) => a.asset_id === "ast_poster_old"),
+    "Cross-branch recall must recover inactive branch poster asset"
+  );
+  assert.ok(
+    recallRes.recalled.some((a) => a.asset_id === "ast_gen_cat"),
+    "Recall must preserve active branch generated asset"
+  );
+
+  // 22.2 Invariant Guard: DETACH_RESET firewall, hallucination stripping, CROSS_FUSION default & clarification
+  const detachGuarded = applyIntentInvariantGuard(
+    {
+      intent_op: "DETACH_RESET",
+      target_branch_id: "branch_poster",
+      source_branch_ids: ["branch_poster"],
+      asset_bindings: [
+        { asset_id: "ast_poster_old", bind_mode: "RAW_MEDIA" },
+        { asset_id: "nonexistent_ghost_id", bind_mode: "RAW_MEDIA" }
+      ],
+      delivery_confidence: "clear",
+      needs_wider_recall: false
+    },
+    [
+      {
+        asset_id: "ast_new_doc",
+        modality: "text_doc",
+        mime_type: "text/plain",
+        file_size: 120,
+        consumed: false,
+        source_digest: "dig_new_doc",
+        is_new: true
+      }
+    ],
+    recallRes.allHistorical,
+    [{ branch_id: "branch_poster" }, { branch_id: "branch_current" }],
+    "branch_current"
+  );
+  assert.equal(detachGuarded.intent, "DETACH_RESET");
+  assert.equal(detachGuarded.assetBindings?.length, 1);
+  assert.equal(detachGuarded.assetBindings?.[0].asset_id, "ast_new_doc");
+  assert.deepEqual(detachGuarded.mountBranchSummaries, []);
+
+  // Ambiguous CROSS_FUSION spanning active branch B and historical branch A must emit clarification
+  const ambiguousCrossFusion = applyIntentInvariantGuard(
+    {
+      intent_op: "CROSS_FUSION",
+      target_branch_id: "branch_current",
+      source_branch_ids: ["branch_poster"],
+      asset_bindings: [{ asset_id: "ast_poster_old", bind_mode: "RAW_MEDIA" }],
+      delivery_confidence: "ambiguous",
+      needs_wider_recall: false
+    },
+    [],
+    recallRes.allHistorical,
+    [
+      { branch_id: "branch_poster", topic: "海报设计" },
+      { branch_id: "branch_current", topic: "当前方案" }
+    ],
+    "branch_current"
+  );
+  assert.ok(
+    ambiguousCrossFusion.clarification,
+    "Ambiguous cross-branch delivery must produce clarification"
+  );
+  assert.equal(
+    ambiguousCrossFusion.clarification?.candidate_targets[0].branch_id,
+    "branch_current"
+  );
+  assert.equal(ambiguousCrossFusion.clarification?.candidate_targets[1].branch_id, "branch_poster");
+
+  // 22.3 Stage 0C Escalation Gate: wider recall triggers when initial pool reports shortage
+  let jevCallCount = 0;
+  const mockEscalationEnv: any = {
+    AI: {
+      run: async (model: string) => {
+        if (model === "@cf/meta/llama-3.1-8b-instruct-fp8") {
+          jevCallCount++;
+          if (jevCallCount === 1) {
+            return {
+              response: JSON.stringify({
+                intent_op: "CROSS_FUSION",
+                target_branch_id: "branch_current",
+                source_branch_ids: [],
+                asset_bindings: [],
+                delivery_confidence: "clear",
+                needs_wider_recall: true
+              })
+            };
+          }
+          return {
+            response: JSON.stringify({
+              intent_op: "CROSS_FUSION",
+              target_branch_id: "branch_current",
+              source_branch_ids: ["branch_poster"],
+              asset_bindings: [{ asset_id: "ast_voice_notes", bind_mode: "RAW_MEDIA" }],
+              delivery_confidence: "clear",
+              needs_wider_recall: false
+            })
+          };
+        }
+        return {};
+      }
+    }
+  };
+  const escalatedIntent = await classifyMultiRoundIntent(
+    mockEscalationEnv,
+    "把之前那段客户录音找出来融合一下",
+    true,
+    "summary",
+    true,
+    {
+      activeBranchId: "branch_current",
+      candidateBudgetK: 4,
+      sessionAssetLedger: multiBranchLedger,
+      branchCatalog: [
+        { branch_id: "branch_poster", topic: "海报", last_summary: "海报与录音" },
+        { branch_id: "branch_current", topic: "当前", last_summary: "当前文本" }
+      ]
+    }
+  );
+  assert.equal(
+    escalatedIntent.escalationUsed,
+    true,
+    "Shortage signal must escalate to wider recall"
+  );
+  assert.equal(jevCallCount, 2, "Escalation must execute exactly 1 secondary refinement pass");
+  assert.ok(
+    escalatedIntent.assetBindings?.some(
+      (b) => b.asset_id === "ast_voice_notes" && b.bind_mode === "RAW_MEDIA"
+    ),
+    "Escalated pass must bind recalled audio asset"
+  );
+
+  // 22.4 Simultaneous Multimodal Compositional Subgraph & Pure Vector Routing
+  const compDbRows = {
+    roles: [
+      {
+        role_id: "role-vision-extractor",
+        name_zh: "视觉提取",
+        name_en: "Vision",
+        in_modalities: '["image"]',
+        out_modalities: '["text"]',
+        requisition_tags: '["#vision"]',
+        compensation_prompts: "{}"
+      },
+      {
+        role_id: "role-audio-asr",
+        name_zh: "语音转录",
+        name_en: "ASR",
+        in_modalities: '["audio"]',
+        out_modalities: '["text"]',
+        requisition_tags: '["#asr"]',
+        compensation_prompts: "{}"
+      },
+      {
+        role_id: "role-direct-chat",
+        name_zh: "综合推理",
+        name_en: "Synthesis",
+        in_modalities: '["text"]',
+        out_modalities: '["text"]',
+        requisition_tags: '["#chat"]',
+        compensation_prompts: "{}"
+      }
+    ],
+    templates: [
+      {
+        template_id: "tpl-direct-chat",
+        name_zh: "全能直答",
+        name_en: "Direct Chat",
+        desc_zh: "纯文本综合推理与分析",
+        desc_en: "Text synthesis",
+        head_modalities: '["text"]',
+        tail_modalities: '["text"]',
+        role_sequence: '["role-direct-chat"]',
+        roles: "[]",
+        priority: 10,
+        status: "active"
+      },
+      {
+        template_id: "tpl-vision-ocr-summary",
+        name_zh: "单图分析",
+        name_en: "Vision",
+        desc_zh: "单图识别",
+        desc_en: "Vision",
+        head_modalities: '["image"]',
+        tail_modalities: '["text"]',
+        role_sequence: '["role-vision-extractor","role-direct-chat"]',
+        roles: "[]",
+        priority: 20,
+        status: "active"
+      }
+    ],
+    models: [
+      {
+        model_id: "cf-llava",
+        display_name: "LLaVA",
+        provider: "CF",
+        endpoint: "@cf/llava",
+        modalities: '["image","text"]',
+        in_modalities: '["image","text"]',
+        out_modalities: '["text"]',
+        tags: '["#vision"]',
+        context_window: 4096,
+        status: "active",
+        inference_target: "edge"
+      },
+      {
+        model_id: "cf-whisper",
+        display_name: "Whisper",
+        provider: "CF",
+        endpoint: "@cf/openai/whisper",
+        modalities: '["audio"]',
+        in_modalities: '["audio"]',
+        out_modalities: '["text"]',
+        tags: '["#asr"]',
+        context_window: 4096,
+        status: "active",
+        inference_target: "edge"
+      },
+      {
+        model_id: "cf-llama",
+        display_name: "Llama 8B",
+        provider: "CF",
+        endpoint: "@cf/meta/llama-3.1-8b-instruct-fp8",
+        modalities: '["text"]',
+        in_modalities: '["text"]',
+        out_modalities: '["text"]',
+        tags: '["#chat"]',
+        context_window: 16384,
+        status: "active",
+        inference_target: "edge"
+      }
+    ]
+  };
+  let embeddedPromptSeen = "";
+  const compEnv: any = {
+    DB: {
+      prepare(sql: string) {
+        return {
+          all: async () => {
+            if (sql.includes("dag_roles")) return { results: compDbRows.roles };
+            if (sql.includes("dag_templates")) return { results: compDbRows.templates };
+            if (sql.includes("models")) return { results: compDbRows.models };
+            return { results: [] };
+          }
+        };
+      }
+    },
+    AI: {
+      run: async (model: string, input: any) => {
+        if (model === "@cf/baai/bge-m3") {
+          embeddedPromptSeen = input?.text?.[0] || "";
+          return { data: [new Array(16).fill(0.1)] };
+        }
+        if (model === "@cf/cloudflare/clef-flash") {
+          const answers: Record<string, any> = {};
+          Object.keys(input.questions || {}).forEach((k) => {
+            answers[k] = { score: 2.0 };
+          });
+          return { answers };
+        }
+        if (model === "@cf/meta/llama-3.1-8b-instruct-fp8") {
+          return {
+            response: JSON.stringify({
+              intent_op: "CROSS_FUSION",
+              target_branch_id: "branch_room",
+              source_branch_ids: [],
+              asset_bindings: [{ asset_id: "img_cached", bind_mode: "CACHED_TEXT" }],
+              delivery_confidence: "clear",
+              needs_wider_recall: false
+            })
+          };
+        }
+        return {};
+      }
+    }
+  };
+
+  const pureQuery = "结合两张图、语音和预算表分析风险";
+  const compEnvelope: any = {
+    envelope_id: "env_comp_01",
+    session_id: "sess_comp_01",
+    round_index: 2,
+    instruction_payload: pureQuery,
+    assets_manifest: [
+      {
+        asset_id: "img_cached",
+        filename: "room_cached.jpg",
+        modality: "image",
+        mime_type: "image/jpeg",
+        file_size: 1024,
+        consumed: false,
+        source_digest: "dig_room_cached",
+        is_new: false,
+        branch_id: "branch_room"
+      },
+      {
+        asset_id: "img_new_1",
+        filename: "floor.jpg",
+        modality: "image",
+        mime_type: "image/jpeg",
+        file_size: 2048,
+        consumed: false,
+        source_digest: "dig_floor",
+        is_new: true
+      },
+      {
+        asset_id: "aud_new_1",
+        filename: "voice.mp3",
+        modality: "audio",
+        mime_type: "audio/mpeg",
+        file_size: 4096,
+        consumed: false,
+        source_digest: "dig_voice_new",
+        is_new: true
+      },
+      {
+        asset_id: "doc_new_1",
+        filename: "budget.csv",
+        modality: "text_doc",
+        mime_type: "text/csv",
+        file_size: 256,
+        in_memory_text: "| 项目 | 金额 |\n| 地板 | 5000 |",
+        consumed: false,
+        source_digest: "dig_budget",
+        is_new: true
+      }
+    ],
+    constraint_context: { target_language: "zh", output_style: "concise" },
+    metadata: {
+      client_timestamp: Date.now(),
+      char_count_total: pureQuery.length,
+      estimated_input_tokens: 300
+    }
+  };
+
+  const compDag = await runOrchestrationPipeline(compEnv, compEnvelope, {
+    hasPreviousRound: true,
+    activeBranchId: "branch_room",
+    activeBranchSummary: "LONG_HISTORICAL_SUMMARY_SHOULD_NOT_POLLUTE_EMBEDDING ".repeat(20),
+    branchCatalog: [
+      { branch_id: "branch_room", topic: "装修", is_active: true, last_summary: "客厅装修方案" }
+    ],
+    perceptualCache: {
+      dig_room_cached: {
+        source_digest: "dig_room_cached",
+        modality: "image",
+        role_id: "role-vision-extractor",
+        model_id: "cf-llava",
+        extracted_text: "客厅毛坯房包含大飘窗与白墙。",
+        summary_snippet: "客厅毛坯房大飘窗",
+        updated_at: Date.now()
+      }
+    }
+  });
+
+  assert.equal(
+    compDag.topology_mode,
+    "compositional",
+    "Heterogeneous multi-asset input must synthesize compositional DAG"
+  );
+  assert.equal(
+    compEnvelope.instruction_payload,
+    pureQuery,
+    "Three-channel isolation must keep instruction_payload pure"
+  );
+  assert.equal(
+    embeddedPromptSeen,
+    pureQuery,
+    "Embedding vectorization must use pure directive without summary pollution"
+  );
+  assert.ok(
+    (compDag.reasoning_trace.inherited_context_slices || []).length > 0,
+    "Inherited context slices must be populated in structured channel"
+  );
+  const prepNodes = compDag.nodes.filter((n) => n.stage_group === "evidence_prep");
+  const reducerNode = compDag.nodes.find((n) => n.is_reducer && n.stage_group === "reducer_merge");
+  const synthNodes = compDag.nodes.filter((n) => n.stage_group === "synthesis_output");
+  assert.equal(
+    prepNodes.length,
+    4,
+    "Should synthesize 4 evidence_prep nodes (1 cached img, 1 new img, 1 new audio, 1 doc reader)"
+  );
+  assert.ok(
+    prepNodes.some(
+      (n) => n.claimed_assets[0]?.asset_id === "img_cached" && n.perceptual_cache_hit === true
+    ),
+    "Bound CACHED_TEXT asset must reuse L1 perceptual cache"
+  );
+  const parallelPreps = prepNodes.filter((n) => n.parallel_group === "prep_parallel_batch");
+  assert.equal(
+    parallelPreps.length,
+    2,
+    "Raw image and raw audio must share parallel_group for concurrent execution"
+  );
+  assert.ok(reducerNode, "Must include deterministic reducer-merge node");
+  assert.equal(
+    reducerNode?.depends_on?.length,
+    4,
+    "Reducer must converge all 4 evidence_prep node IDs"
+  );
+  assert.ok(synthNodes.length >= 1 && synthNodes[0].depends_on?.includes("reducer-merge"));
+
+  console.log(
+    "  ✓ Cross-branch recall, Invariant Guard, Escalation, Compositional Multimodal DAG & Pure Routing: PASSED"
+  );
+
+  // =========================================================================
+  // Suite 23: Phase 2 Closed-Loop Hardening (JEV Shortlist, Scope Isolation, Reducer Fail-Fast, DAG Tree)
+  // =========================================================================
+  console.log("\n[Suite 23] Testing Phase 2 Closed-Loop Hardening & State Machine Invariants...");
+
+  // 23.1 Zero out-of-scope reRouteOptions reference in public/app.js + SSE handleSSEMessage isolation + Git DAG invariants
+  const freshAppJs = fs.readFileSync(path.join(process.cwd(), "public/app.js"), "utf8");
+  const handleSseIdx = freshAppJs.indexOf("function handleSSEMessage(");
+  assert.ok(handleSseIdx > 0, "handleSSEMessage must exist in public/app.js");
+  const handleSseSlice = freshAppJs.slice(handleSseIdx, handleSseIdx + 25000);
+  assert.ok(
+    !handleSseSlice.includes("reRouteOptions."),
+    "handleSSEMessage must never reference out-of-scope reRouteOptions"
+  );
+  assert.ok(
+    freshAppJs.includes("recordCanvasRevisionUpdate(") &&
+      freshAppJs.includes("streamOptions?.isSwitch"),
+    "app.js must route isReRun revisions through recordCanvasRevisionUpdate and read streamOptions.isSwitch"
+  );
+
+  // Extract and execute Git state functions from public/app.js to verify acyclic DAG & CROSS_FUSION source_refs invariants
+  const commitFnStart = freshAppJs.indexOf("function createEmptyGitState()");
+  const commitFnEnd = freshAppJs.indexOf("window.chatSessionId = window.chatSessionId");
+  assert.ok(commitFnStart > 0 && commitFnEnd > commitFnStart);
+  const vm = await import("node:vm");
+  const mockWin: any = {
+    gitState: null,
+    activeBranchId: "main",
+    chatRoundIndex: 1,
+    sessionBranches: {},
+    sessionAssets: [],
+    perceptualCacheIndex: {},
+    _currentStagedNewFiles: [],
+    _currentRoundGeneratedAssets: [],
+    _pendingRoundTrace: null
+  };
+  const gitCtx: any = {
+    window: mockWin,
+    Date,
+    Array,
+    Set,
+    Object,
+    JSON,
+    Math,
+    String
+  };
+  vm.runInNewContext(freshAppJs.slice(commitFnStart, commitFnEnd), gitCtx);
+  mockWin.gitState = gitCtx.createEmptyGitState();
+  // Branch A commit
+  gitCtx.commitTurnTransaction({
+    runId: "cmt_a1",
+    userPrompt: "海报A",
+    finalOutput: "海报A初稿",
+    trace: { intent_state: "DETACH_RESET", target_branch_id: "main", mounted_asset_bindings: [] }
+  });
+  // Branch B commit (detach new branch)
+  mockWin.gitState.branches.branch_b = {
+    branchId: "branch_b",
+    topic: "方案B",
+    headCommitId: "cmt_b1",
+    isMediaBranch: false,
+    lastValidSummary: "方案B内容",
+    lineageAssetIds: []
+  };
+  mockWin.gitState.commits.cmt_b1 = {
+    commit_id: "cmt_b1",
+    parents: [],
+    branch_id: "branch_b",
+    output_summary: "方案B内容"
+  };
+  mockWin.gitState.commitOrder.push("cmt_b1");
+  mockWin.gitState.assetVault.ast_from_b = {
+    id: "ast_from_b",
+    assetId: "ast_from_b",
+    branchId: "branch_b",
+    introducedCommitId: "cmt_b1"
+  };
+  // Idempotent duplicate commit MUST NOT create self-loop or push duplicate to commitOrder
+  gitCtx.commitTurnTransaction({
+    runId: "cmt_a1",
+    userPrompt: "海报A重复回执",
+    finalOutput: "重复输出",
+    trace: { intent_state: "ANCHOR_TAIL", target_branch_id: "main" }
+  });
+  assert.deepEqual(
+    [...mockWin.gitState.commitOrder],
+    ["cmt_a1", "cmt_b1"],
+    "Duplicate commitTurnTransaction with same runId must be idempotent"
+  );
+  assert.ok(
+    !mockWin.gitState.commits.cmt_a1.parents.includes("cmt_a1"),
+    "CommitNode parents must NEVER contain a self-loop"
+  );
+  // CROSS_FUSION on main using branch_b asset MUST NOT merge cmt_b1 into parents[]
+  gitCtx.commitTurnTransaction({
+    runId: "cmt_a2_fusion",
+    userPrompt: "结合方案B更新海报A",
+    finalOutput: "融合后海报A v2",
+    trace: {
+      intent_state: "CROSS_FUSION",
+      target_branch_id: "main",
+      source_branch_ids: ["branch_b"],
+      mounted_asset_bindings: [{ asset_id: "ast_from_b", bind_mode: "CACHED_TEXT" }]
+    }
+  });
+  assert.deepEqual(
+    [...mockWin.gitState.commits.cmt_a2_fusion.parents],
+    ["cmt_a1"],
+    "CROSS_FUSION commit must keep single target-branch parent and NEVER merge source branch head into parents[]"
+  );
+  assert.equal(
+    mockWin.gitState.commits.cmt_a2_fusion.source_refs?.[0]?.branch_id,
+    "branch_b",
+    "CROSS_FUSION must record cross-branch asset provenance inside source_refs"
+  );
+  // recordCanvasRevisionUpdate must update base commit revision without adding a commit node
+  const countBeforeRev = mockWin.gitState.commitOrder.length;
+  gitCtx.recordCanvasRevisionUpdate({
+    baseRunId: "cmt_a2_fusion",
+    revision: 2,
+    finalOutput: "微调后海报A v2 rev2"
+  });
+  assert.equal(
+    mockWin.gitState.commitOrder.length,
+    countBeforeRev,
+    "recordCanvasRevisionUpdate must not append a new commit to commitOrder"
+  );
+  assert.equal(mockWin.gitState.commits.cmt_a2_fusion.revision, 2);
+
+  // 23.2 Compositional prep nodes exclude browser WebGPU targets & isolate focused L1 perceptual cache
+  const buildSuite23Env = (
+    opts: { extraModels?: any[]; aiHandler?: (m: string, i: any) => Promise<any> } = {}
+  ): any => ({
+    DB: {
+      prepare(sql: string) {
+        return {
+          bind: () => this,
+          all: async () => {
+            if (sql.includes("dag_roles")) return { results: compDbRows.roles };
+            if (sql.includes("dag_templates")) return { results: compDbRows.templates };
+            if (sql.includes("models")) {
+              return { results: [...compDbRows.models, ...(opts.extraModels || [])] };
+            }
+            return { results: [] };
+          },
+          first: async () => null,
+          run: async () => ({ meta: { changes: 1 } })
+        };
+      },
+      batch: async () => []
+    },
+    AI: {
+      run: opts.aiHandler || (async () => ({ data: [[0.1, 0.2, 0.3, 0.4]] }))
+    }
+  });
+
+  const compScopedDag = await runOrchestrationPipeline(
+    buildSuite23Env({
+      extraModels: [
+        {
+          model_id: "webgpu-vision-local",
+          display_name: "Local WebGPU Vision",
+          provider: "WebGPU",
+          endpoint: "webgpu://qwen-vl-local",
+          modalities: JSON.stringify(["image", "text"]),
+          in_modalities: JSON.stringify(["image"]),
+          out_modalities: JSON.stringify(["text"]),
+          tags: JSON.stringify(["#vision", "#ocr", "#analysis"]),
+          context_window: 4096,
+          max_concurrency: 10,
+          active_connections: 0,
+          precision: 0.85,
+          user_rating: 4.5,
+          usage_count: 10,
+          cost_per_1k_tokens: 0,
+          cost_per_invocation: 0,
+          status: "active",
+          is_generalist: 0,
+          prior_score: 0.99,
+          scenario_anchors: JSON.stringify(["图像解析"]),
+          inference_target: "browser",
+          browser_runtime: "webgpu"
+        }
+      ],
+      aiHandler: async (model: string) => {
+        if (model.includes("clef") || model.includes("llama-3.1-8b")) {
+          return {
+            response: JSON.stringify({
+              intent_op: "ANCHOR_TAIL",
+              target_branch_id: "branch_room",
+              confidence: 0.95,
+              bind_img_custom_only: "CACHED_TEXT"
+            })
+          };
+        }
+        return { data: [[0.1, 0.2, 0.3, 0.4]] };
+      }
+    }),
+    {
+      envelope_id: "env_s23_scope",
+      session_id: "sess_s23_scope",
+      round_index: 2,
+      instruction_payload: "基于客厅图继续设计",
+      assets_manifest: [
+        {
+          asset_id: "img_custom_only",
+          filename: "room_focused.jpg",
+          modality: "image",
+          mime_type: "image/jpeg",
+          file_size: 1024,
+          consumed: false,
+          source_digest: "dig_focused_only",
+          is_new: false,
+          branch_id: "branch_room"
+        },
+        {
+          asset_id: "img_raw_a",
+          filename: "a.jpg",
+          modality: "image",
+          mime_type: "image/jpeg",
+          file_size: 1024,
+          consumed: false,
+          source_digest: "dig_raw_a",
+          is_new: true
+        },
+        {
+          asset_id: "img_raw_b",
+          filename: "b.jpg",
+          modality: "image",
+          mime_type: "image/jpeg",
+          file_size: 1024,
+          consumed: false,
+          source_digest: "dig_raw_b",
+          is_new: true
+        }
+      ],
+      constraint_context: { target_language: "zh", output_style: "concise" },
+      metadata: { client_timestamp: Date.now(), char_count_total: 12, estimated_input_tokens: 60 }
+    },
+    {
+      hasPreviousRound: true,
+      activeBranchId: "branch_room",
+      activeBranchSummary: "客厅基础方案",
+      branchCatalog: [
+        { branch_id: "branch_room", topic: "客厅装修", is_active: true, last_summary: "客厅方案" }
+      ],
+      sessionAssetLedger: [
+        {
+          asset_id: "img_custom_only",
+          filename: "room_focused.jpg",
+          modality: "image",
+          branch_id: "branch_room",
+          source_digest: "dig_focused_only"
+        }
+      ],
+      perceptualCache: {
+        "dig_focused_only::role-vision-extractor::cf-llava::focused_or_custom::abcd": {
+          source_digest: "dig_focused_only",
+          modality: "image",
+          role_id: "role-vision-extractor",
+          model_id: "cf-llava",
+          task_scope: "focused_or_custom",
+          prompt_digest: "abcd",
+          extracted_text: "ONLY_WATERMARK_DETAIL_DO_NOT_TREAT_AS_FULL",
+          summary_snippet: "只看了角落水印",
+          updated_at: Date.now()
+        }
+      }
+    }
+  );
+  assert.equal(
+    compScopedDag.topology_mode,
+    "compositional",
+    "Multiple raw sensory inputs must trigger compositional topology"
+  );
+  const compScopedPreps = compScopedDag.nodes.filter((n) => n.stage_group === "evidence_prep");
+  assert.ok(
+    compScopedPreps.every((n) => n.selected_model.inference_target !== "browser"),
+    "Compositional evidence_prep nodes must stay on server/edge when cloud/edge models exist"
+  );
+  assert.ok(
+    !compScopedPreps.some(
+      (n) => n.claimed_assets[0]?.asset_id === "img_custom_only" && n.perceptual_cache_hit === true
+    ),
+    "focused_or_custom perceptual cache entry must NOT be reused as objective_full CACHED_TEXT"
+  );
+
+  // 23.3 Expanded Recall (>10 assets) retains <=10 bind_* shortlist questions & AI failure does NOT silently DETACH_RESET
+  const largeLedger = Array.from({ length: 14 }, (_, idx) => ({
+    asset_id: `ast_hist_${idx}`,
+    filename: `item_${idx}.png`,
+    modality: "image" as const,
+    branch_id: idx < 7 ? "branch_a" : "branch_b",
+    introduced_round: idx + 1,
+    summary_snippet: `历史图片素材 ${idx}`
+  }));
+  let seenClefQuestionKeys: string[] = [];
+  const largeRecallRes = await classifyMultiRoundIntent(
+    buildSuite23Env({
+      aiHandler: async (model: string, input: any) => {
+        if (model.includes("clef") || model.includes("llama-3.1-8b")) {
+          if (model.includes("clef") && input?.questions) {
+            seenClefQuestionKeys = Object.keys(input.questions);
+          }
+          // Return malformed output to verify AI failure -> clarification (never silent DETACH_RESET)
+          return { response: "NOT_JSON_ERROR" };
+        }
+        return {};
+      }
+    }),
+    "结合之前的 item_1 和新要求做一版总结",
+    true,
+    "分支B摘要",
+    true,
+    {
+      activeBranchId: "branch_b",
+      branchCatalog: [
+        { branch_id: "branch_a", topic: "分支A", is_active: false, last_summary: "分支A摘要" },
+        { branch_id: "branch_b", topic: "分支B", is_active: true, last_summary: "分支B摘要" }
+      ],
+      sessionAssetLedger: largeLedger
+    }
+  );
+  const bindQuestionsSeen = seenClefQuestionKeys.filter((k) => k.startsWith("bind_"));
+  assert.ok(
+    bindQuestionsSeen.length > 0 && bindQuestionsSeen.length <= 10,
+    `Expanded recall (>10 assets) must cap shortlisted bind_* questions between 1 and 10 (got ${bindQuestionsSeen.length})`
+  );
+  assert.ok(
+    largeRecallRes.clarification && largeRecallRes.intent !== "DETACH_RESET",
+    "Total classifier parse failure on multi-round turn must ask for clarification rather than silent DETACH_RESET"
+  );
+
+  // 23.4 Reducer fail-fast: missing required upstream dependency throws instead of dropping inputs
+  const { executeDAGStream } = await import("../src/orchestration/dispatcher");
+  const reducerFailEnv = buildSuite23Env();
+  const brokenReducerDag: any = {
+    template: {
+      template_id: "tpl-comp-test",
+      name_zh: "归约失败测试",
+      name_en: "Reducer Fail Test",
+      desc_zh: "",
+      desc_en: "",
+      head_modalities: ["text"],
+      tail_modalities: ["text"],
+      roles: [],
+      priority: 1,
+      status: "active"
+    },
+    candidate_templates: [],
+    topology_mode: "compositional",
+    nodes: [
+      {
+        node_id: "prep-only-a",
+        stage_group: "evidence_prep",
+        depends_on: ["__ORIGIN__"],
+        perceptual_cache_hit: true,
+        cached_output: "来自资料A的有效证据",
+        role: {
+          role_id: "role-vision-extractor",
+          name_zh: "A提取",
+          name_en: "Prep A",
+          in_modalities: ["image"],
+          out_modalities: ["text"],
+          in_degree: 0,
+          out_degree: 1,
+          requisition_tags: []
+        },
+        selected_model: {
+          model_id: "sys_cache",
+          display_name: "Cache",
+          provider: "System",
+          endpoint: "system://cache",
+          modalities: ["text"],
+          tags: [],
+          context_window: 4096,
+          max_concurrency: 10,
+          active_connections: 0,
+          precision: 1,
+          user_rating: 5,
+          usage_count: 1,
+          cost_per_1k_tokens: 0,
+          status: "active",
+          is_generalist: 1,
+          prior_score: 1,
+          scenario_anchors: []
+        },
+        standby_models: [],
+        score_details: {
+          model: null as any,
+          score: 1,
+          sim: 1,
+          concurrency_penalty: 0,
+          specialist_score: 1
+        },
+        downgraded: false,
+        claimed_assets: []
+      },
+      {
+        node_id: "reducer-merge",
+        stage_group: "reducer_merge",
+        depends_on: ["prep-only-a", "prep-missing-b"],
+        is_reducer: true,
+        role: {
+          role_id: "role_evidence_reducer",
+          name_zh: "多源证据汇聚归约",
+          name_en: "Evidence Reducer",
+          in_modalities: ["text"],
+          out_modalities: ["text"],
+          in_degree: 2,
+          out_degree: 1,
+          requisition_tags: []
+        },
+        selected_model: {
+          model_id: "sys_reducer",
+          display_name: "Reducer",
+          provider: "System",
+          endpoint: "system://reducer",
+          modalities: ["text"],
+          tags: [],
+          context_window: 8192,
+          max_concurrency: 10,
+          active_connections: 0,
+          precision: 1,
+          user_rating: 5,
+          usage_count: 1,
+          cost_per_1k_tokens: 0,
+          status: "active",
+          is_generalist: 1,
+          prior_score: 1,
+          scenario_anchors: []
+        },
+        standby_models: [],
+        score_details: {
+          model: null as any,
+          score: 1,
+          sim: 1,
+          concurrency_penalty: 0,
+          specialist_score: 1
+        },
+        downgraded: false,
+        claimed_assets: []
+      }
+    ],
+    reasoning_trace: {
+      intent_state: null,
+      is_multi_round: true,
+      subsistence_filtered_count: 1,
+      selected_template_id: "tpl-comp-test",
+      downgrade_events: []
+    }
+  };
+  const reducerStream = await executeDAGStream(
+    reducerFailEnv,
+    brokenReducerDag,
+    {
+      envelope_id: "env_red_fail",
+      session_id: "sess_red_fail",
+      round_index: 1,
+      instruction_payload: "对比A与B",
+      assets_manifest: [],
+      constraint_context: { target_language: "zh", output_style: "concise" },
+      metadata: { client_timestamp: Date.now(), char_count_total: 5, estimated_input_tokens: 20 }
+    },
+    { userId: "usr_red" }
+  );
+  const reducerSse = await new Response(reducerStream).text();
+  assert.ok(
+    reducerSse.includes("event: dag_error") && reducerSse.includes("prep-missing-b"),
+    "Reducer with missing dependency output MUST fail fast with dag_error rather than silently continuing"
+  );
+  assert.ok(
+    !reducerSse.includes("event: dag_complete"),
+    "Broken reducer must NOT emit dag_complete"
+  );
+
+  console.log(
+    "  ✓ Suite 23 (Out-of-scope Ref Fix, Scoped L1 Cache, JEV Shortlist Cap, Reducer Fail-Fast): PASSED"
+  );
+
+  // =========================================================================
+  // Suite 24: Frontend public/app.js State Machine (VM Sandbox Execution)
+  // Verifies REV-02 clientOpId, REV-04 hydrateGitStateFromServer, PLAN-06 413 pruning,
+  // deferred WebGPU unlock until /commit resolves, isReRun ("甲" -> "乙") & failed rerun rollback
+  // =========================================================================
+  console.log("\n[Suite 24] Testing Frontend public/app.js State Machine Closure (VM)...");
+  const appJsRaw = fs.readFileSync(path.resolve(process.cwd(), "public/app.js"), "utf8");
+  const rechargeSplitIdx = appJsRaw.indexOf("// --- Recharge & Redeem Modal Logic ---");
+  assert.ok(rechargeSplitIdx > 0);
+  const appJsMain = appJsRaw
+    .slice(0, rechargeSplitIdx)
+    .replace(/\r\n/g, "\n")
+    .replace(/import\s*\{[\s\S]*?\}\s*from\s*['"][^'"]+['"];?/, "")
+    .replace(
+      "document.addEventListener('DOMContentLoaded', async () => {",
+      "window.__bootApp = async () => {"
+    )
+    .replace("\n  }\n});", "\n  }\n};")
+    .replace(
+      "    // Passkey Add Button",
+      `    window._testApi = {
+      getState: () => ({ gitState: window.gitState, lastRoundSummary: window.lastRoundSummary, currentDagBaseSummary: window.currentDagBaseSummary, chatRoundIndex: window.chatRoundIndex, frozen: window._currentRoundFrozenInput, isWorkflowExecuting, pendingModifiedRoleIds: window.pendingModifiedRoleIds, stagedDraft: window._stagedCanvasDraft }),
+      hydrateGitStateFromServer,
+      syncSaveHistoryToCloud,
+      rollbackTurnToPreFlight,
+      sendChatMessage,
+      handleSSEMessage,
+      setWorkflowExecutionLocked
+    };
+    user = { user_id: 'u_vm', username: 'VMUser', credits: 100 };
+    // Passkey Add Button`
+    );
+
+  const mockElements = new Map<string, any>();
+  const makeEl = (id: string) => {
+    const classes = new Set<string>();
+    const el: any = {
+      id,
+      value: "",
+      innerHTML: "",
+      textContent: "",
+      disabled: false,
+      style: {},
+      dataset: {},
+      children: [],
+      scrollHeight: 100,
+      scrollTop: 0,
+      clientHeight: 100,
+      classList: {
+        add: (...c: string[]) => c.forEach((x) => classes.add(x)),
+        remove: (...c: string[]) => c.forEach((x) => classes.delete(x)),
+        toggle: (c: string, force?: boolean) =>
+          force === undefined
+            ? classes.has(c)
+              ? classes.delete(c)
+              : classes.add(c)
+            : force
+              ? classes.add(c)
+              : classes.delete(c),
+        contains: (c: string) => classes.has(c)
+      },
+      appendChild(child: any) {
+        this.children.push(child);
+        return child;
+      },
+      insertBefore(child: any) {
+        this.children.unshift(child);
+        return child;
+      },
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      closest: () => null,
+      getBoundingClientRect: () => ({
+        left: 0,
+        top: 0,
+        width: 100,
+        height: 100,
+        right: 100,
+        bottom: 100
+      }),
+      getAttribute: () => null,
+      setAttribute: () => {},
+      addEventListener: () => {},
+      focus: () => {},
+      remove: () => {}
+    };
+    el.parentNode = { insertBefore: (c: any) => el.insertBefore(c) };
+    mockElements.set(id, el);
+    return el;
+  };
+  [
+    "chat-input",
+    "send-btn",
+    "messages-flow",
+    "chat-messages",
+    "dag-nodes-container",
+    "file-chips-container"
+  ].forEach(makeEl);
+
+  const storageMap = new Map<string, string>();
+  const capturedFetches: Array<{ url: string; method: string; body: any }> = [];
+  let customFetchHandler: ((url: string, init?: any) => Promise<any>) | null = null;
+  let vmSandbox: any;
+
+  const baseWindow: any = {
+    innerWidth: 1280,
+    location: { href: "/", search: "", pathname: "/", replace: () => {} },
+    history: { replaceState: () => {} },
+    localStorage: {
+      getItem: (k: string) => storageMap.get(k) ?? null,
+      setItem: (k: string, v: string) => storageMap.set(k, String(v)),
+      removeItem: (k: string) => storageMap.delete(k)
+    },
+    addEventListener: () => {},
+    matchMedia: () => ({ matches: false, addEventListener: () => {} }),
+    marked: { parse: (s: string) => `<p>${s}</p>` },
+    DOMPurify: { sanitize: (s: string) => s }
+  };
+  baseWindow.window = baseWindow;
+
+  const sandboxDocument: any = {
+    getElementById: (id: string) => mockElements.get(id) || makeEl(id),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    createElement: (tag: string) => makeEl(`dyn-${tag}-${Math.random()}`),
+    createElementNS: (_ns: string, tag: string) => makeEl(`svg-${tag}-${Math.random()}`),
+    addEventListener: () => {},
+    documentElement: makeEl("html"),
+    body: makeEl("body")
+  };
+
+  class MockWorker {
+    onmessage: any = null;
+    onerror: any = null;
+    postMessage() {}
+    terminate() {}
+  }
+
+  vmSandbox = vm.createContext({
+    ...baseWindow,
+    document: sandboxDocument,
+    Worker: MockWorker,
+    crypto: globalThis.crypto,
+    TextDecoder: globalThis.TextDecoder,
+    TextEncoder: globalThis.TextEncoder,
+    AbortController: globalThis.AbortController,
+    URLSearchParams: globalThis.URLSearchParams,
+    setTimeout: globalThis.setTimeout,
+    clearTimeout: globalThis.clearTimeout,
+    setInterval: () => 0,
+    clearInterval: () => {},
+    alert: () => {},
+    requestAnimationFrame: (cb: () => void) => cb(),
+    cancelAnimationFrame: () => {},
+    escapeHtml: (s: string) => String(s || ""),
+    t: (k: string) => k,
+    getLocale: () => "zh",
+    setLocale: () => {},
+    getCompactRoleName: (_id: string, name: string) => name,
+    getCompactModelName: (_id: string, name: string) => name,
+    getCompactTemplateName: (_id: string, name: string) => name,
+    getCompactIntentName: (i: string) => i,
+    getCompactArbitrationText: () => "Arb OK",
+    fetch: async (url: string, init?: any) => {
+      const bodyObj = init?.body ? JSON.parse(init.body) : null;
+      capturedFetches.push({ url: String(url), method: init?.method || "GET", body: bodyObj });
+      if (customFetchHandler) return customFetchHandler(String(url), init);
+      if (String(url).includes("/api/auth/me")) {
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ "content-type": "application/json" }),
+          json: async () => ({ user_id: "u_vm", username: "VMUser", credits: 100 })
+        };
+      }
+      return { ok: true, status: 200, headers: new Headers(), json: async () => ({ ok: true }) };
+    },
+    console
+  });
+  vmSandbox.globalThis = vmSandbox;
+  vm.runInContext(appJsMain, vmSandbox);
+  await vmSandbox.window.__bootApp();
+  const vmApi = vmSandbox.window._testApi;
+
+  // 24.1 hydrateGitStateFromServer updates lastRoundSummary, currentDagBaseSummary, chatRoundIndex & frozenInput
+  vmSandbox.window._currentRoundFrozenInput = {
+    userText: "Round 1 prompt",
+    baseRunId: "old",
+    committedRevision: 1,
+    revision: 1,
+    frozenAssets: []
+  };
+  const hydratedOk = vmApi.hydrateGitStateFromServer({
+    active_branch_id: "main",
+    branches: {
+      main: {
+        branch_id: "main",
+        topic: "测试",
+        head_commit_id: "cmt_srv_1",
+        last_summary: "服务端摘要甲",
+        dominant_modalities: ["text"],
+        lineage_asset_ids: []
+      }
+    },
+    commits: {
+      cmt_srv_1: {
+        commit_id: "cmt_srv_1",
+        parents: [],
+        branch_id: "main",
+        revision: 2,
+        output_summary: "服务端摘要甲",
+        round_index: 1
+      }
+    },
+    commit_order: ["cmt_srv_1"],
+    session_asset_ledger: [],
+    perceptual_cache: {}
+  });
+  assert.equal(hydratedOk, true);
+  assert.equal(vmApi.getState().lastRoundSummary, "服务端摘要甲");
+  assert.equal(vmApi.getState().currentDagBaseSummary, "服务端摘要甲");
+  assert.equal(vmApi.getState().chatRoundIndex, 1);
+  assert.equal(vmApi.getState().frozen.committedRevision, 2);
+  assert.equal(vmApi.getState().frozen.baseRunId, "cmt_srv_1");
+
+  // 24.2 syncSaveHistoryToCloud handles 413 with progressive truncation (keeping newest rounds)
+  const cloudBodiesSent: any[] = [];
+  customFetchHandler = async (url, init) => {
+    if (url === "/api/history") {
+      const parsed = JSON.parse(init.body);
+      cloudBodiesSent.push(parsed);
+      if (parsed.rounds.length > 3) {
+        return { ok: false, status: 413, json: async () => ({ error: "payload_too_large" }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ success: true }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  const syncRes = await vmApi.syncSaveHistoryToCloud({
+    sessionId: "sess_vm_413",
+    rounds: Array.from({ length: 10 }, (_, idx) => ({ round: idx + 1 }))
+  });
+  assert.equal(syncRes.ok, true);
+  assert.ok(cloudBodiesSent.length >= 2, "413 must trigger progressive retry with pruned rounds");
+  const lastSyncPayload = cloudBodiesSent[cloudBodiesSent.length - 1];
+  assert.ok(lastSyncPayload.rounds.length <= 3);
+  assert.equal(lastSyncPayload.rounds[lastSyncPayload.rounds.length - 1].round, 10);
+
+  // 24.3 Deferred WebGPU unlock + "甲" -> micro-tune to "乙" -> follow-up inherits "乙" -> failed micro-tune rollback keeps "乙"
+  let resolveTailCommit!: (val: any) => void;
+  const tailCommitPromise = new Promise((r) => {
+    resolveTailCommit = r;
+  });
+  let postChatMode: "webgpu_tail" | "followup_ok" | "rerun_fail" = "followup_ok";
+  const makeSseResponse = (chunks: string[]) =>
+    new Response(
+      new ReadableStream({
+        start(c) {
+          const enc = new TextEncoder();
+          for (const ch of chunks) c.enqueue(enc.encode(ch));
+          c.close();
+        }
+      }),
+      { status: 200, headers: { "Content-Type": "text/event-stream" } }
+    );
+
+  customFetchHandler = async (url, _init) => {
+    if (url === "/api/chat") {
+      if (postChatMode === "webgpu_tail") {
+        return makeSseResponse([
+          `event: dag_plan\ndata: ${JSON.stringify({ run_id: "srv_run_v1", topology_mode: "standard", template: { template_id: "t1", name_zh: "T1", name_en: "T1" }, nodes: [{ node_id: "n1", role_id: "r1", name_zh: "N1", selected_model: { model_id: "m_webgpu", display_name: "WebGPU", inference_target: "browser" }, standby_models: [] }], reasoning_trace: { target_branch_id: "main", intent_state: null, is_multi_round: false } })}\n\n`,
+          `event: client_exec_request\ndata: ${JSON.stringify({ run_id: "srv_run_v1", node_id: "n1", role_id: "r1", model_id: "m_webgpu", model_name: "WebGPU", is_tail_node: true, client_commit_token: "tok_tail_1" })}\n\n`,
+          `event: dag_complete\ndata: ${JSON.stringify({ run_id: "srv_run_v1", has_client_exec: true, tail_requires_client_commit: true, final_output: "" })}\n\n`
+        ]);
+      }
+      if (postChatMode === "rerun_fail") {
+        return {
+          ok: false,
+          status: 409,
+          headers: new Headers({ "Content-Type": "application/json" }),
+          json: async () => ({ error: "version_conflict", message: "Simulated rerun conflict" })
+        };
+      }
+      return makeSseResponse([
+        `event: dag_plan\ndata: ${JSON.stringify({ run_id: "srv_run_followup", topology_mode: "standard", template: { template_id: "t1", name_zh: "T1", name_en: "T1" }, nodes: [{ node_id: "n1", role_id: "r1", name_zh: "N1", selected_model: { model_id: "m_cloud", display_name: "Cloud", inference_target: "edge" }, standby_models: [] }], reasoning_trace: { target_branch_id: "main", intent_state: "ANCHOR_TAIL", is_multi_round: true } })}\n\n`,
+        `event: dag_complete\ndata: ${JSON.stringify({ run_id: "srv_run_followup", final_output: "丙_follow", state_committed: true, authoritative_git_state: { active_branch_id: "main", branches: { main: { branch_id: "main", topic: "T", head_commit_id: "srv_run_followup", last_summary: "丙_follow", dominant_modalities: [], lineage_asset_ids: [] } }, commits: { cmt_srv_1: { commit_id: "cmt_srv_1", parents: [], branch_id: "main", revision: 2, output_summary: "乙" }, srv_run_followup: { commit_id: "srv_run_followup", parents: ["cmt_srv_1"], branch_id: "main", revision: 1, output_summary: "丙_follow" } }, commit_order: ["cmt_srv_1", "srv_run_followup"], session_asset_ledger: [], perceptual_cache: {} } })}\n\n`
+      ]);
+    }
+    if (url.endsWith("/commit")) {
+      return tailCommitPromise;
+    }
+    return { ok: true, status: 200, headers: new Headers(), json: async () => ({ ok: true }) };
+  };
+
+  // Start WebGPU micro-tuning updating "服务端摘要甲" -> "乙" while holding /commit pending
+  postChatMode = "webgpu_tail";
+  const rerunPromise = vmApi.sendChatMessage({
+    isSwitch: true,
+    reRouteMode: "switch_template",
+    chosenTemplateId: "tpl_2"
+  });
+  // Wait for SSE + worker start
+  await new Promise((r) => setTimeout(r, 20));
+  const localWorker = vmSandbox.window._localWorker;
+  assert.ok(localWorker, "WebGPU worker must be spawned on client_exec_request");
+  localWorker.onmessage({ data: { type: "GENERATE_COMPLETE", output: "乙", duration_ms: 15 } });
+  await new Promise((r) => setTimeout(r, 15));
+  // CRITICAL: Lock MUST STILL BE HELD until /commit resolves!
+  assert.equal(
+    vmApi.getState().isWorkflowExecuting,
+    true,
+    "UI must remain locked while WebGPU tail /api/session/:id/commit is in flight"
+  );
+  // Now resolve /commit with authoritative server snapshot for "乙"
+  resolveTailCommit({
+    ok: true,
+    status: 200,
+    headers: new Headers({ "Content-Type": "application/json" }),
+    json: async () => ({
+      active_branch_id: "main",
+      branches: {
+        main: {
+          branch_id: "main",
+          topic: "测试",
+          head_commit_id: "cmt_srv_1",
+          last_summary: "乙",
+          dominant_modalities: [],
+          lineage_asset_ids: []
+        }
+      },
+      commits: {
+        cmt_srv_1: {
+          commit_id: "cmt_srv_1",
+          parents: [],
+          branch_id: "main",
+          revision: 3,
+          output_summary: "乙",
+          round_index: 1
+        }
+      },
+      commit_order: ["cmt_srv_1"],
+      session_asset_ledger: [],
+      perceptual_cache: {}
+    })
+  });
+  await rerunPromise;
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(vmApi.getState().isWorkflowExecuting, false, "UI unlocks once /commit completes");
+  assert.equal(vmApi.getState().lastRoundSummary, "乙");
+
+  // Failed next canvas micro-tuning must roll back cleanly leaving "乙" intact!
+  postChatMode = "rerun_fail";
+  await vmApi.sendChatMessage({
+    isSwitch: true,
+    reRouteMode: "switch_model",
+    chosenRoleModels: { r1: "m2" }
+  });
+  assert.equal(
+    vmApi.getState().lastRoundSummary,
+    "乙",
+    "Failed micro-tuning rollback must preserve '乙'"
+  );
+  assert.equal(vmApi.getState().gitState.branches.main.lastValidSummary, "乙");
+
+  // Immediately send follow-up in input box & verify actual payload sent to /api/chat carries "乙"
+  capturedFetches.length = 0;
+  postChatMode = "followup_ok";
+  sandboxDocument.getElementById("chat-input").value = "继续扩展乙版方案";
+  await vmApi.sendChatMessage({ isSwitch: false });
+  const followChatReq = capturedFetches.find((f) => f.url === "/api/chat");
+  assert.ok(followChatReq && followChatReq.body.clientOpId);
+  assert.equal(followChatReq.body.isReRun, false);
+  assert.equal(followChatReq.body.activeBranchSummary, "乙");
+  assert.equal(followChatReq.body.previousRoundSummary, "乙");
+
+  // Suite 24b: Phase 4 Closure - Delete 409 keeps local drawer/view & AWAITING_COMMIT lock + abandon (NM-STATE-R01/R03)
+  assert.ok(
+    freshAppJs.includes("syncHistoryItemDelete(itemToDelete.sessionId || itemToDelete.id)") &&
+      freshAppJs.includes("if (!deleteRes.ok)"),
+    "app.js must await server delete confirmation before removing localStorage item or resetting view (NM-STATE-R01)"
+  );
+  assert.ok(
+    freshAppJs.includes("isAwaitingCommitResolution") &&
+      freshAppJs.includes("abandonPendingCommit") &&
+      freshAppJs.includes("/abandon"),
+    "app.js must keep UI locked during AWAITING_COMMIT and provide retry/abandon controls (NM-STATE-R03)"
+  );
+  assert.ok(
+    freshAppJs.includes("if (!isAwaitingCommitResolution)"),
+    "sendChatMessage finally must preserve UI lock when awaiting commit resolution"
+  );
+  assert.ok(
+    freshAppJs.includes("showTailRetryAbandonBanner") &&
+      freshAppJs.includes("if (tailCreds.clientCommitToken)") &&
+      freshAppJs.includes("isRetryableStatus"),
+    "app.js must handle tail commit network/server errors by retaining awaiting-commit resolution & retry/abandon banner (NM-STATE-R03a)"
+  );
+  assert.ok(
+    freshAppJs.includes("allowAbandon = true") &&
+      freshAppJs.includes("if (allowAbandon)") &&
+      freshAppJs.includes("showTailRetryAbandonBanner") &&
+      (freshAppJs.includes("false\n") || freshAppJs.includes("false\r\n")),
+    "app.js must gate abandon button until server confirms AWAITING_COMMIT phase (NM-STATE-R03a-1)"
+  );
+  assert.ok(
+    freshAppJs.includes("reRouteOptions.isSwitch ? false : !!f.isNew") &&
+      freshAppJs.includes("window._currentStagedNewFiles = []"),
+    "app.js must clear isNew on micro-tuning switch reruns and committed asset lifecycles (NM-STATE-R05a)"
+  );
+
+  console.log(
+    "  ✓ Suite 24 (Frontend public/app.js State Machine, Locked Commit & Rollback Continuity): PASSED"
+  );
+
   console.log("\n==================================================");
-  console.log("   🎉 ALL 20 UNIT TEST SUITES PASSED (100%)!      ");
+  console.log("   🎉 ALL 24 UNIT TEST SUITES PASSED (100%)!      ");
   console.log("==================================================");
 }
 

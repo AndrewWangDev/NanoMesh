@@ -2,8 +2,9 @@ import { Env } from "../types";
 import { getSession } from "../auth/middleware";
 import { signJWT } from "../auth/jwt";
 import { getPersistentSalt } from "./billing";
-import * as bcrypt from "bcryptjs";
+import { hashPasswordPBKDF2, verifyPassword } from "../lib/password";
 import { safeJsonBody } from "../lib/utils";
+import { sweepPendingR2Cleanups } from "./session";
 
 export async function handleUpdateProfile(req: Request, env: Env) {
   if (req.method !== "PUT") return new Response("Method not allowed", { status: 405 });
@@ -64,18 +65,18 @@ export async function handleUpdatePassword(req: Request, env: Env) {
     if (!oldPassword) {
       return Response.json({ error: "error.oldPasswordRequired" }, { status: 400 });
     }
-    const valid = bcrypt.compareSync(oldPassword, user.password_hash);
+    const { valid } = await verifyPassword(oldPassword, user.password_hash);
     if (!valid) return Response.json({ error: "error.incorrectOldPassword" }, { status: 400 });
   }
 
-  const newHash = bcrypt.hashSync(newPassword, 10);
+  const newHash = await hashPasswordPBKDF2(newPassword);
   const nextTokenVersion = (user.token_version ?? 1) + 1;
   await env.DB.prepare("UPDATE users SET password_hash = ?, token_version = ? WHERE user_id = ?")
     .bind(newHash, nextTokenVersion, session.userId)
     .run();
 
   const newToken = await signJWT(
-    { userId: session.userId, tokenVersion: nextTokenVersion },
+    { userId: session.userId, tokenVersion: nextTokenVersion, typ: "session" },
     env.JWT_SECRET,
     30 * 24 * 3600
   );
@@ -108,6 +109,15 @@ export async function handleUpdateAvatar(req: Request, env: Env, ctx?: Execution
     }
   }
 
+  // Check Content-Length BEFORE buffering multipart FormData into Worker memory (NM-AUD-02)
+  const rawContentLength = req.headers.get("Content-Length");
+  if (rawContentLength) {
+    const contentLen = Number(rawContentLength);
+    if (Number.isFinite(contentLen) && contentLen > 5 * 1024 * 1024 + 65536) {
+      return Response.json({ error: "error.fileTooLarge" }, { status: 413 });
+    }
+  }
+
   const formData = await req.formData().catch(() => null);
   if (!formData) return Response.json({ error: "error.invalidRequest" }, { status: 400 });
 
@@ -131,6 +141,45 @@ export async function handleUpdateAvatar(req: Request, env: Env, ctx?: Execution
     return Response.json({ error: "error.unsupportedFile" }, { status: 400 });
   }
 
+  // Magic bytes verification to prevent disguised HTML/SVG/binary uploads (NM-AUD-12)
+  const headerBytes = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+  const isPng =
+    headerBytes.length >= 4 &&
+    headerBytes[0] === 0x89 &&
+    headerBytes[1] === 0x50 &&
+    headerBytes[2] === 0x4e &&
+    headerBytes[3] === 0x47;
+  const isJpeg =
+    headerBytes.length >= 3 &&
+    headerBytes[0] === 0xff &&
+    headerBytes[1] === 0xd8 &&
+    headerBytes[2] === 0xff;
+  const isGif =
+    headerBytes.length >= 4 &&
+    headerBytes[0] === 0x47 &&
+    headerBytes[1] === 0x49 &&
+    headerBytes[2] === 0x46 &&
+    headerBytes[3] === 0x38;
+  const isWebp =
+    headerBytes.length >= 12 &&
+    headerBytes[0] === 0x52 &&
+    headerBytes[1] === 0x49 &&
+    headerBytes[2] === 0x46 &&
+    headerBytes[3] === 0x46 &&
+    headerBytes[8] === 0x57 &&
+    headerBytes[9] === 0x45 &&
+    headerBytes[10] === 0x42 &&
+    headerBytes[11] === 0x50;
+
+  const magicMatches =
+    (safeContentType === "image/png" && isPng) ||
+    (safeContentType === "image/jpeg" && isJpeg) ||
+    (safeContentType === "image/gif" && isGif) ||
+    (safeContentType === "image/webp" && isWebp);
+  if (!magicMatches) {
+    return Response.json({ error: "error.unsupportedFile" }, { status: 400 });
+  }
+
   const objectKey = `avatars/${session.userId}_${Date.now()}.${extension}`;
 
   await env.R2.put(objectKey, file.stream(), {
@@ -141,11 +190,19 @@ export async function handleUpdateAvatar(req: Request, env: Env, ctx?: Execution
 
   const avatarUrl = `/storage/${objectKey}`;
 
-  await env.DB.prepare(
-    "UPDATE users SET avatar_url = ?, avatar_updated_at = datetime('now') WHERE user_id = ?"
+  // Atomic CAS cooldown guard to eliminate concurrent 24h TOCTOU orphan uploads (NM-AUD-12)
+  const casUpdate = await env.DB.prepare(
+    "UPDATE users SET avatar_url = ?, avatar_updated_at = datetime('now') WHERE user_id = ? AND (avatar_updated_at IS NULL OR avatar_updated_at <= datetime('now', '-24 hours'))"
   )
     .bind(avatarUrl, session.userId)
     .run();
+
+  if (!casUpdate.meta.changes || casUpdate.meta.changes === 0) {
+    if (env.R2 && typeof env.R2.delete === "function") {
+      await env.R2.delete(objectKey).catch(() => {});
+    }
+    return Response.json({ error: "error.avatarCooldown" }, { status: 429 });
+  }
 
   // Asynchronously clean up previous avatar from R2 to eliminate orphaned storage accumulation
   if (previousAvatarUrl && previousAvatarUrl.startsWith("/storage/avatars/")) {
@@ -244,7 +301,8 @@ export async function handleDeleteAccount(req: Request, env: Env) {
     }
   }
 
-  // 4. In-place anonymization & private session erasure (GDPR compliance)
+  // 4. In-place anonymization & full multi-tenant session/cache erasure (GDPR & PLAN-07/REV-06)
+  const r2Prefixes = [`tmp/${session.userId}/`, `avatars/${session.userId}_`];
   await env.DB.batch([
     env.DB.prepare(
       `
@@ -261,34 +319,43 @@ export async function handleDeleteAccount(req: Request, env: Env) {
       WHERE user_id = ?
     `
     ).bind(session.userId),
+    env.DB.prepare(
+      `INSERT INTO pending_r2_deletions (delete_id, user_id, session_id, r2_key)
+       SELECT lower(hex(randomblob(16))), user_id, session_id, r2_key
+       FROM session_assets
+       WHERE user_id = ? AND r2_key IS NOT NULL AND r2_key != ''
+       ON CONFLICT(user_id, r2_key) DO NOTHING`
+    ).bind(session.userId),
+    env.DB.prepare(
+      `INSERT INTO pending_r2_deletions (delete_id, user_id, session_id, r2_key)
+       SELECT lower(hex(randomblob(16))), user_id, session_id, text_r2_key
+       FROM session_assets
+       WHERE user_id = ? AND text_r2_key IS NOT NULL AND text_r2_key != ''
+       ON CONFLICT(user_id, r2_key) DO NOTHING`
+    ).bind(session.userId),
+    env.DB.prepare(
+      `INSERT INTO pending_r2_prefix_purges (user_id, prefixes_json)
+       VALUES (?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET prefixes_json = excluded.prefixes_json`
+    ).bind(session.userId, JSON.stringify(r2Prefixes)),
     env.DB.prepare("DELETE FROM user_chat_sessions WHERE user_id = ?").bind(session.userId),
+    env.DB.prepare("DELETE FROM chat_session_states WHERE user_id = ?").bind(session.userId),
+    env.DB.prepare("DELETE FROM session_branches WHERE user_id = ?").bind(session.userId),
+    env.DB.prepare("DELETE FROM session_commits WHERE user_id = ?").bind(session.userId),
+    env.DB.prepare("DELETE FROM session_assets WHERE user_id = ?").bind(session.userId),
+    env.DB.prepare("DELETE FROM dag_run_plans WHERE user_id = ?").bind(session.userId),
+    env.DB.prepare("DELETE FROM asset_perceptual_cache WHERE user_id = ?").bind(session.userId),
+    env.DB.prepare("DELETE FROM dag_execution_cache WHERE user_id = ?").bind(session.userId),
+    env.DB.prepare("DELETE FROM run_billing_settlements WHERE user_id = ?").bind(session.userId),
+    env.DB.prepare("DELETE FROM dag_handshakes WHERE user_id = ?").bind(session.userId),
     env.DB.prepare("DELETE FROM user_oauth_bindings WHERE user_id = ?").bind(session.userId),
     env.DB.prepare("DELETE FROM user_passkeys WHERE user_id = ?").bind(session.userId),
     env.DB.prepare("DELETE FROM notifications WHERE user_id = ?").bind(session.userId),
     env.DB.prepare("DELETE FROM broadcast_reads WHERE user_id = ?").bind(session.userId)
   ]);
 
-  // 5. Cascade cleanup of user assets in R2 (GDPR right to be forgotten)
-  if (env.R2 && typeof env.R2.list === "function" && typeof env.R2.delete === "function") {
-    const prefixes = [`tmp/${session.userId}/`, `avatars/${session.userId}_`];
-    for (const prefix of prefixes) {
-      try {
-        let cursor: string | undefined = undefined;
-        let pages = 0;
-        do {
-          const listed = await env.R2.list({ prefix, cursor, limit: 1000 });
-          if (listed && listed.objects && listed.objects.length > 0) {
-            const keys = listed.objects.map((o) => o.key);
-            await env.R2.delete(keys);
-          }
-          cursor = listed.truncated ? listed.cursor : undefined;
-          pages++;
-        } while (cursor && pages < 20); // Safety limit: up to 20,000 files
-      } catch (r2Err) {
-        console.warn(`[GDPR] Failed to delete R2 objects for prefix ${prefix}:`, r2Err);
-      }
-    }
-  }
+  // 5. Cascade cleanup of user assets & prefixes in R2; pending queues remain until full deletion succeeds
+  await sweepPendingR2Cleanups(env, session.userId);
 
   // Clear cookie
   const response = Response.json({ success: true });

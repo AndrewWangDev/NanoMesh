@@ -21,25 +21,28 @@ function getCorsHeaders(env: Env) {
     "Access-Control-Allow-Origin": env.FRONTEND_URL,
     "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, Cookie",
-    "Access-Control-Allow-Credentials": "true"
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Max-Age": "86400",
+    Vary: "Origin"
   };
 }
 
-function applySecurityHeaders(res: Response): Response {
+function applySecurityHeaders(res: Response, isAdmin: boolean = false): Response {
   res.headers.set("X-Content-Type-Options", "nosniff");
-  res.headers.set("X-Frame-Options", "SAMEORIGIN");
+  res.headers.set("X-Frame-Options", isAdmin ? "DENY" : "SAMEORIGIN");
   res.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
   res.headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
   res.headers.set(
     "Content-Security-Policy",
     "default-src 'self'; " +
-      "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://challenges.cloudflare.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; " +
-      "worker-src 'self' blob: https://cdnjs.cloudflare.com; " +
+      "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://challenges.cloudflare.com https://cdn.jsdelivr.net; " +
+      "worker-src 'self' blob:; " +
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
       "font-src 'self' https://fonts.gstatic.com; " +
       "img-src 'self' data: blob: https:; " +
       "connect-src 'self' https://challenges.cloudflare.com https://huggingface.co https://*.huggingface.co https://hf-mirror.com https://cdn.jsdelivr.net https://*.r2.cloudflarestorage.com; " +
       "frame-src https://challenges.cloudflare.com; " +
+      `frame-ancestors ${isAdmin ? "'none'" : "'self'"}; ` +
       "object-src 'none'; base-uri 'self';"
   );
   return res;
@@ -165,7 +168,7 @@ export default {
           res = await handleMarkAsRead(request, env, notifId);
         } else if (cleanPath === "/api/history" && request.method === "GET") {
           const { handleGetHistory } = await import("./api/history");
-          res = await handleGetHistory(request, env);
+          res = await handleGetHistory(request, env, ctx);
         } else if (cleanPath === "/api/history" && request.method === "POST") {
           const { handleSaveHistory } = await import("./api/history");
           res = await handleSaveHistory(request, env);
@@ -176,7 +179,7 @@ export default {
         } else if (cleanPath.startsWith("/api/history/") && request.method === "DELETE") {
           const sessionId = cleanPath.slice("/api/history/".length);
           const { handleDeleteHistoryItem } = await import("./api/history");
-          res = await handleDeleteHistoryItem(request, env, sessionId);
+          res = await handleDeleteHistoryItem(request, env, sessionId, ctx);
         } else if (cleanPath.startsWith("/api/auth/passkey")) {
           const passkey = await import("./api/passkey");
           if (cleanPath === "/api/auth/passkey/register/options" && request.method === "POST") {
@@ -201,6 +204,38 @@ export default {
           } else {
             res = new Response("Not Found", { status: 404 });
           }
+        } else if (
+          cleanPath.startsWith("/api/session/") &&
+          cleanPath.endsWith("/state") &&
+          request.method === "GET"
+        ) {
+          const sessionId = cleanPath.slice("/api/session/".length, -"/state".length);
+          const { handleGetSessionState } = await import("./api/session");
+          res = await handleGetSessionState(request, env, sessionId);
+        } else if (
+          cleanPath.startsWith("/api/session/") &&
+          cleanPath.endsWith("/commit") &&
+          request.method === "POST"
+        ) {
+          const sessionId = cleanPath.slice("/api/session/".length, -"/commit".length);
+          const { handleCommitSessionTurn } = await import("./api/session");
+          res = await handleCommitSessionTurn(request, env, sessionId);
+        } else if (
+          cleanPath.startsWith("/api/session/") &&
+          cleanPath.endsWith("/commit-retry") &&
+          request.method === "POST"
+        ) {
+          const sessionId = cleanPath.slice("/api/session/".length, -"/commit-retry".length);
+          const { handleCommitRetrySessionTurn } = await import("./api/session");
+          res = await handleCommitRetrySessionTurn(request, env, sessionId);
+        } else if (
+          cleanPath.startsWith("/api/session/") &&
+          cleanPath.endsWith("/abandon") &&
+          request.method === "POST"
+        ) {
+          const sessionId = cleanPath.slice("/api/session/".length, -"/abandon".length);
+          const { handleAbandonSessionRun } = await import("./api/session");
+          res = await handleAbandonSessionRun(request, env, sessionId);
         } else if (
           cleanPath === "/api/asset" ||
           cleanPath === "/api/assets" ||
@@ -318,12 +353,12 @@ export default {
             }
             case "/api/upload/presign": {
               const { handleChatPresign } = await import("./api/presign");
-              res = await handleChatPresign(request, env);
+              res = await handleChatPresign(request, env, ctx);
               break;
             }
             case "/api/upload/file": {
               const { handleChatUpload } = await import("./api/presign");
-              res = await handleChatUpload(request, env);
+              res = await handleChatUpload(request, env, ctx);
               break;
             }
             case "/api/health": {
@@ -410,17 +445,25 @@ export default {
         const assetRes = await env.ASSETS.fetch(new Request(new URL("/admin.html", request.url)));
         const res = new Response(assetRes.body, assetRes);
         res.headers.set("X-Robots-Tag", "noindex, nofollow");
-        return applySecurityHeaders(res);
+        return applySecurityHeaders(res, true);
       }
 
       // Serve R2 Storage (strictly restricted to public avatars)
       if (url.pathname.startsWith("/storage/")) {
         const key = url.pathname.slice("/storage/".length);
         if (!key.startsWith("avatars/")) {
-          return new Response("Forbidden", { status: 403 });
+          return new Response("Forbidden", {
+            status: 403,
+            headers: { "X-Content-Type-Options": "nosniff" }
+          });
         }
         const object = await env.R2.get(key);
-        if (!object) return new Response("Not Found", { status: 404 });
+        if (!object) {
+          return new Response("Not Found", {
+            status: 404,
+            headers: { "X-Content-Type-Options": "nosniff" }
+          });
+        }
 
         const headers = new Headers();
         object.writeHttpMetadata(headers);
@@ -467,6 +510,59 @@ export default {
         status: 500,
         headers: { "Content-Type": "application/json", ...getCorsHeaders(env) }
       });
+    }
+  },
+
+  /**
+   * Scheduled Cron Trigger (daily 03:00 UTC):
+   * Automatically purges orphaned R2 tmp/ objects older than 24 hours and stale operational counters (NM-AUD-02).
+   */
+  async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
+    const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
+
+    if (env.R2 && typeof env.R2.list === "function" && typeof env.R2.delete === "function") {
+      try {
+        let cursor: string | undefined = undefined;
+        let pages = 0;
+        do {
+          const listed = await env.R2.list({ prefix: "tmp/", cursor, limit: 1000 });
+          const expiredKeys = (listed.objects || [])
+            .filter((obj) => obj.uploaded && obj.uploaded.getTime() < cutoffMs)
+            .map((obj) => obj.key);
+          if (expiredKeys.length > 0) {
+            await env.R2.delete(expiredKeys);
+          }
+          cursor = listed.truncated ? listed.cursor : undefined;
+          pages++;
+        } while (cursor && pages < 20);
+      } catch (r2Err) {
+        console.warn("[Cron] R2 tmp/ cleanup warning:", r2Err);
+      }
+    }
+
+    if (env.DB) {
+      const nowEpoch = Math.floor(Date.now() / 1000);
+      await Promise.all([
+        env.DB.prepare(
+          "DELETE FROM verification_codes WHERE expires_at < datetime('now', '-1 day')"
+        )
+          .run()
+          .catch(() => {}),
+        env.DB.prepare(
+          "DELETE FROM dag_handshakes WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 day')"
+        )
+          .run()
+          .catch(() => {}),
+        env.DB.prepare(
+          "DELETE FROM system_counters WHERE key LIKE 'presign_daily_%' AND key < 'presign_daily_' || date('now', '-2 days')"
+        )
+          .run()
+          .catch(() => {}),
+        env.DB.prepare("DELETE FROM system_counters WHERE key LIKE 'admin_revoked_%' AND value < ?")
+          .bind(nowEpoch)
+          .run()
+          .catch(() => {})
+      ]);
     }
   }
 };

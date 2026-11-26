@@ -2,6 +2,20 @@
 
 export type Modality = "text" | "image" | "audio" | "text_doc";
 
+export type AssetOrigin = "upload" | "generated";
+export type AssetBindMode = "RAW_MEDIA" | "CACHED_TEXT" | "DROP";
+export type IntentState =
+  "ANCHOR_TAIL" | "REBIND_ROOT" | "CROSS_FUSION" | "SWITCH_BRANCH" | "DETACH_RESET";
+export type TopologyStageGroup = "evidence_prep" | "reducer_merge" | "synthesis_output";
+export type NodeExecutionState =
+  | "pending"
+  | "waiting_resource"
+  | "running"
+  | "parallel_running"
+  | "cache_hit"
+  | "completed"
+  | "failed";
+
 export interface AssetDescriptor {
   asset_id: string;
   modality: Modality;
@@ -14,6 +28,75 @@ export interface AssetDescriptor {
   source_digest: string; // SHA-256 digest of content
   is_new?: boolean; // Whether uploaded in the current round
   filename?: string; // Original filename for display and receipt
+  origin?: AssetOrigin;
+  branch_id?: string;
+  introduced_round?: number;
+  introduced_commit_id?: string;
+  bind_mode?: AssetBindMode;
+  summary_snippet?: string;
+  cached_perceptual_text?: string;
+}
+
+export type PerceptualTaskScope = "objective_full" | "focused_or_custom";
+
+export interface PerceptualCacheEntry {
+  source_digest: string;
+  modality: "image" | "audio";
+  role_id: string;
+  model_id: string;
+  task_scope?: PerceptualTaskScope;
+  prompt_digest?: string;
+  percept_key?: string;
+  extracted_text: string;
+  summary_snippet: string;
+  updated_at: number;
+}
+
+export interface InheritedContextSlice {
+  branch_id: string;
+  topic: string;
+  commit_id?: string;
+  summary: string;
+  relation: "active" | "recalled" | "evidence";
+}
+
+export interface AssetBindingDecision {
+  asset_id: string;
+  bind_mode: AssetBindMode;
+}
+
+export interface SourceRefEntry {
+  asset_id: string;
+  branch_id: string;
+  commit_id?: string;
+  bind_mode: AssetBindMode;
+}
+
+export interface CommitNode {
+  commit_id: string;
+  parents: string[];
+  branch_id: string;
+  evidence_source_branches: string[];
+  source_refs?: SourceRefEntry[];
+  round_index: number;
+  revision: number;
+  intent_op: IntentState | null;
+  user_prompt: string;
+  mounted_assets: Array<{ asset_id: string; bind_mode: Exclude<AssetBindMode, "DROP"> }>;
+  introduced_asset_ids: string[];
+  generated_asset_ids: string[];
+  template_id?: string;
+  output_summary: string;
+  timestamp: number;
+}
+
+export interface BranchPointer {
+  branch_id: string;
+  topic: string;
+  head_commit_id: string;
+  dominant_modalities: string[];
+  last_summary: string;
+  lineage_asset_ids: string[];
 }
 
 export interface ConstraintContext {
@@ -119,6 +202,16 @@ export interface ScoredModel {
 }
 
 export interface InstantiatedDAGNode {
+  node_id?: string; // Unique execution instance ID (prevents role_id collisions in parallel fan-out)
+  stage_group?: TopologyStageGroup;
+  depends_on?: string[];
+  parallel_group?: string;
+  is_reducer?: boolean;
+  perceptual_cache_hit?: boolean;
+  cached_output?: string;
+  focus_hint?: string;
+  task_scope?: PerceptualTaskScope;
+  prompt_digest?: string;
   role: DAGRole;
   selected_model: ModelMetadata;
   standby_models: ModelMetadata[]; // Top 2 & Top 3 for user switching & failover
@@ -135,14 +228,20 @@ export interface InstantiatedDAGNode {
 
 export interface SessionAssetLedgerItem {
   asset_id: string;
-  filename: string;
+  filename?: string;
   modality: Modality;
   mime_type?: string;
   file_size?: number;
   introduced_round?: number;
+  introduced_commit_id?: string;
   branch_id?: string;
   r2_key?: string;
-  origin?: "upload" | "generated";
+  text_r2_key?: string;
+  in_memory_text?: string;
+  source_digest?: string;
+  origin?: AssetOrigin;
+  summary_snippet?: string;
+  cached_perceptual_text?: string;
 }
 
 export interface MediaArtifact {
@@ -168,14 +267,33 @@ export interface ArtifactBundle {
   };
 }
 
+export interface ClarificationPromptInfo {
+  reason_zh: string;
+  reason_en: string;
+  candidate_targets: Array<{
+    branch_id: string;
+    topic: string;
+    relation: "current" | "historical";
+  }>;
+  recalled_asset_ids: string[];
+}
+
 export interface InstantiatedDAG {
   template: DAGTemplate;
   candidate_templates: DAGTemplate[]; // Top 3 candidate templates
   nodes: InstantiatedDAGNode[];
+  topology_mode?: "standard" | "compositional";
   reasoning_trace: {
-    intent_state:
-      "ANCHOR_TAIL" | "REBIND_ROOT" | "CROSS_FUSION" | "SWITCH_BRANCH" | "DETACH_RESET" | null;
+    intent_state: IntentState | null;
     target_branch_id?: string;
+    source_branch_ids?: string[];
+    source_refs?: SourceRefEntry[];
+    mounted_asset_bindings?: AssetBindingDecision[];
+    inherited_context_slices?: InheritedContextSlice[];
+    escalation_used?: boolean;
+    candidate_pool_size?: number;
+    delivery_confidence?: "clear" | "ambiguous";
+    plan_hash?: string;
     is_multi_round: boolean;
     subsistence_filtered_count: number;
     selected_template_id: string;
@@ -183,4 +301,6 @@ export interface InstantiatedDAG {
   };
   is_security_violation?: boolean;
   is_unreachable?: boolean;
+  is_clarification_required?: boolean;
+  clarification?: ClarificationPromptInfo;
 }

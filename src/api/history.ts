@@ -1,7 +1,12 @@
 import { Env } from "../types";
 import { getSession } from "../auth/middleware";
+import { sweepPendingR2Cleanups, tombstoneAndPurgeSession } from "./session";
 
-export async function handleGetHistory(request: Request, env: Env): Promise<Response> {
+export async function handleGetHistory(
+  request: Request,
+  env: Env,
+  ctx?: ExecutionContext
+): Promise<Response> {
   const session = await getSession(request, env);
   if (!session) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
@@ -11,6 +16,10 @@ export async function handleGetHistory(request: Request, env: Env): Promise<Resp
   }
 
   try {
+    const sweepTask = sweepPendingR2Cleanups(env, session.userId);
+    if (ctx && typeof ctx.waitUntil === "function") {
+      ctx.waitUntil(sweepTask);
+    }
     const res = await env.DB.prepare(
       `SELECT session_id, user_id, trace_id, title, cost, duration, nodes_count, cached, pinned, rounds_json, created_at, updated_at
        FROM user_chat_sessions
@@ -67,7 +76,22 @@ export async function handleSaveHistory(request: Request, env: Env): Promise<Res
   }
 
   try {
-    const body: any = await request.json();
+    let rawBody: any;
+    try {
+      rawBody = await request.json();
+    } catch {
+      return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody)) {
+      return new Response(JSON.stringify({ error: "Invalid JSON object" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    const body = rawBody;
     const sessionId = body.sessionId || body.session_id;
     if (
       !sessionId ||
@@ -94,7 +118,9 @@ export async function handleSaveHistory(request: Request, env: Env): Promise<Res
     const cached = body.cached ? 1 : 0;
     const pinned = body.pinned ? 1 : 0;
 
-    const rawRounds = Array.isArray(body.rounds) ? body.rounds.slice(0, 100) : [];
+    const fullRounds = Array.isArray(body.rounds) ? body.rounds : [];
+    const rawRounds = fullRounds.slice(-100);
+    const truncatedOlderCount = Math.max(0, fullRounds.length - rawRounds.length);
     const roundsJson = JSON.stringify(rawRounds);
     if (roundsJson.length > 512 * 1024) {
       return new Response(JSON.stringify({ error: "History payload too large (max 512KB)" }), {
@@ -103,10 +129,23 @@ export async function handleSaveHistory(request: Request, env: Env): Promise<Res
       });
     }
 
+    const stateRow = await env.DB.prepare(
+      "SELECT deleted_at FROM chat_session_states WHERE user_id = ? AND session_id = ?"
+    )
+      .bind(session.userId, cleanSessionId)
+      .first<{ deleted_at: string | null }>()
+      .catch(() => null);
+    if (stateRow?.deleted_at) {
+      return new Response(JSON.stringify({ error: "session_deleted" }), {
+        status: 410,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
     await env.DB.prepare(
       `INSERT INTO user_chat_sessions (session_id, user_id, trace_id, title, cost, duration, nodes_count, cached, pinned, rounds_json, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-       ON CONFLICT(session_id) DO UPDATE SET
+       ON CONFLICT(user_id, session_id) DO UPDATE SET
          trace_id = excluded.trace_id,
          title = excluded.title,
          cost = excluded.cost,
@@ -115,8 +154,7 @@ export async function handleSaveHistory(request: Request, env: Env): Promise<Res
          cached = excluded.cached,
          pinned = excluded.pinned,
          rounds_json = excluded.rounds_json,
-         updated_at = datetime('now')
-       WHERE user_chat_sessions.user_id = excluded.user_id`
+         updated_at = datetime('now')`
     )
       .bind(
         cleanSessionId,
@@ -132,9 +170,12 @@ export async function handleSaveHistory(request: Request, env: Env): Promise<Res
       )
       .run();
 
-    return new Response(JSON.stringify({ success: true, sessionId }), {
-      headers: { "Content-Type": "application/json" }
-    });
+    return new Response(
+      JSON.stringify({ success: true, sessionId, truncated_older_count: truncatedOlderCount }),
+      {
+        headers: { "Content-Type": "application/json" }
+      }
+    );
   } catch (err: any) {
     console.error("Failed to save history:", err);
     const isDev = env.ENVIRONMENT === "development";
@@ -162,7 +203,22 @@ export async function handleUpdateHistoryItem(
   }
 
   try {
-    const body: any = await request.json();
+    let rawBody: any;
+    try {
+      rawBody = await request.json();
+    } catch {
+      return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody)) {
+      return new Response(JSON.stringify({ error: "Invalid JSON object" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    const body = rawBody;
     const updates: string[] = [];
     const values: any[] = [];
 
@@ -211,7 +267,8 @@ export async function handleUpdateHistoryItem(
 export async function handleDeleteHistoryItem(
   request: Request,
   env: Env,
-  sessionId: string
+  sessionId: string,
+  ctx?: ExecutionContext
 ): Promise<Response> {
   const session = await getSession(request, env);
   if (!session) {
@@ -222,11 +279,24 @@ export async function handleDeleteHistoryItem(
   }
 
   try {
-    await env.DB.prepare(
-      `DELETE FROM user_chat_sessions WHERE (session_id = ? OR trace_id = ?) AND user_id = ?`
-    )
-      .bind(sessionId, sessionId, session.userId)
-      .run();
+    const deleteRes = await tombstoneAndPurgeSession(env, session.userId, sessionId, ctx);
+    if (deleteRes.busy) {
+      return new Response(
+        JSON.stringify({
+          error: "session_busy",
+          occupancy_phase: deleteRes.occupancyPhase || "EXECUTING",
+          active_run_id: deleteRes.activeRunId || null,
+          message:
+            deleteRes.occupancyPhase === "AWAITING_COMMIT"
+              ? "当前会话有待保存结果，请先重试保存或放弃后再删除。"
+              : "当前会话正在运行中，请完成后再删除。"
+        }),
+        {
+          status: 409,
+          headers: { "Content-Type": "application/json" }
+        }
+      );
+    }
 
     return new Response(JSON.stringify({ success: true }), {
       headers: { "Content-Type": "application/json" }

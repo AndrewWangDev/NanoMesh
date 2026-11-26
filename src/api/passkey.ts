@@ -34,7 +34,7 @@ export async function handlePasskeyRegisterOptions(request: Request, env: Env): 
     .bind(auth.userId)
     .all<{ credential_id: string; transports: string }>();
 
-  const rpId = getRpId(request);
+  const rpId = getRpId(request, env);
   const { challenge, cookieHeader } = await createChallenge("register", env.JWT_SECRET);
 
   // Opportunistic cleanup of stale challenge CAS entries (> 10m old)
@@ -155,7 +155,7 @@ export async function handlePasskeyRegisterVerify(request: Request, env: Env): P
 
   // 3. Verify rpIdHash
   const enc = new TextEncoder();
-  const rpId = getRpId(request);
+  const rpId = getRpId(request, env);
   const expectedRpIdHash = new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(rpId)));
   for (let i = 0; i < 32; i++) {
     if (expectedRpIdHash[i] !== parsedAttestation.rpIdHash[i]) {
@@ -299,7 +299,7 @@ export async function handlePasskeyLoginOptions(request: Request, env: Env): Pro
   let email = body?.email;
   if (typeof email === "string") email = email.toLowerCase().trim();
 
-  const rpId = getRpId(request);
+  const rpId = getRpId(request, env);
   const { challenge, cookieHeader } = await createChallenge("login", env.JWT_SECRET);
 
   // WebAuthn Resident Key (Discoverable Credentials): keep allowCredentials empty to eliminate email enumeration surface
@@ -417,7 +417,7 @@ export async function handlePasskeyLoginVerify(request: Request, env: Env): Prom
   const clientDataJSONBytes = base64UrlToBuffer(response.clientDataJSON);
   const signatureBytes = base64UrlToBuffer(response.signature);
   const publicKeySpkiBytes = base64UrlToBuffer(passkey.public_key);
-  const rpId = getRpId(request);
+  const rpId = getRpId(request, env);
 
   const isSignatureValid = await verifyAssertionSignature({
     authenticatorData: authenticatorDataBytes,
@@ -461,7 +461,7 @@ export async function handlePasskeyLoginVerify(request: Request, env: Env): Prom
 
   // 6. Issue JWT session token
   const token = await signJWT(
-    { userId: user.user_id, tokenVersion: user.token_version || 1 },
+    { userId: user.user_id, tokenVersion: user.token_version || 1, typ: "session" },
     env.JWT_SECRET,
     SESSION_TTL_SECONDS
   );

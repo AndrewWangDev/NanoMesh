@@ -20,22 +20,39 @@ export function base64UrlToBuffer(base64url: string): Uint8Array {
   return bytes;
 }
 
-export function getRpId(request: Request): string {
+export function getRpId(request: Request, env?: Env): string {
   const url = new URL(request.url);
-  if (url.hostname === "localhost" || url.hostname === "127.0.0.1") {
+  const isProd = env?.ENVIRONMENT === "production";
+  if (!isProd && (url.hostname === "localhost" || url.hostname === "127.0.0.1")) {
     return "localhost";
+  }
+  if (env?.FRONTEND_URL) {
+    try {
+      return new URL(env.FRONTEND_URL).hostname;
+    } catch {
+      // Fallback if FRONTEND_URL is malformed
+    }
   }
   return url.hostname;
 }
 
 export function isOriginAllowed(origin: string, request: Request, env: Env): boolean {
   const reqUrl = new URL(request.url);
-  if (origin === reqUrl.origin) return true;
-  if (env.FRONTEND_URL && origin === env.FRONTEND_URL) return true;
+  const isProd = env.ENVIRONMENT === "production";
+  const isLocalRequest =
+    !isProd && (reqUrl.hostname === "localhost" || reqUrl.hostname === "127.0.0.1");
+
+  if (env.FRONTEND_URL) {
+    try {
+      if (origin === new URL(env.FRONTEND_URL).origin) return true;
+    } catch {}
+  } else if (!isProd && origin === reqUrl.origin) {
+    return true;
+  }
 
   // Allow localhost and loopback origins strictly in non-production local development and testing environments
-  const isLocalRequest = reqUrl.hostname === "localhost" || reqUrl.hostname === "127.0.0.1";
   if (isLocalRequest) {
+    if (origin === reqUrl.origin) return true;
     try {
       const originUrl = new URL(origin);
       if (originUrl.hostname === "localhost" || originUrl.hostname === "127.0.0.1") {

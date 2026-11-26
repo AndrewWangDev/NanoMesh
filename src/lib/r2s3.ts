@@ -8,9 +8,16 @@ import { Env } from "../types";
  * Initializes an S3-compatible SigV4 client for Cloudflare R2.
  */
 function getClient(env: Env) {
+  const accessKeyId = env.R2_ACCESS_KEY_ID;
+  const secretAccessKey = env.R2_SECRET_ACCESS_KEY;
+  if (env.ENVIRONMENT === "production" && (!accessKeyId || !secretAccessKey)) {
+    throw new Error(
+      "[FATAL_R2_CONFIG] R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY are required in production."
+    );
+  }
   return new AwsClient({
-    accessKeyId: env.R2_ACCESS_KEY_ID || "mock-access-key",
-    secretAccessKey: env.R2_SECRET_ACCESS_KEY || "mock-secret-key",
+    accessKeyId: accessKeyId || "mock-access-key",
+    secretAccessKey: secretAccessKey || "mock-secret-key",
     service: "s3",
     region: "auto"
   });
@@ -20,7 +27,11 @@ function getClient(env: Env) {
  * Resolves the Cloudflare Account ID from environment bindings.
  */
 export function getCloudflareAccountId(env: Env): string {
-  return env.Cloudflare_Account_ID || (env as any).CLOUDFLARE_ACCOUNT_ID || "";
+  const accountId = env.Cloudflare_Account_ID || (env as any).CLOUDFLARE_ACCOUNT_ID || "";
+  if (env.ENVIRONMENT === "production" && !accountId) {
+    throw new Error("[FATAL_R2_CONFIG] Cloudflare_Account_ID is required in production.");
+  }
+  return accountId;
 }
 
 /**
