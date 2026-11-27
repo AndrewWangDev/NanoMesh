@@ -4759,9 +4759,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       head_commit_id: b.headCommitId || null
     }));
 
-    const effectiveUserText = (reRouteOptions.isSwitch && window._currentRoundFrozenInput)
+    const rawEffectiveUserText = (reRouteOptions.isSwitch && window._currentRoundFrozenInput)
       ? window._currentRoundFrozenInput.userText
       : userText;
+    const effectiveUserText = rawEffectiveUserText || (currentAssets.length > 0 ? (isEn ? 'Please analyze and process the attached materials.' : '请解析附带材料并输出核心结论') : '');
     const effectiveBaseSummary = (effectiveSwitchIsReRun && window._currentRoundFrozenInput)
       ? ''
       : (window.currentDagBaseSummary || '');
@@ -5653,7 +5654,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                       status: 'candidate_failed',
                       failed_model_id: data.model_id,
                       error_reason: err.message || 'Worker thread execution error',
-                      upstream_context: data.user_prompt || '',
+                      upstream_context: data.raw_upstream_output || '',
                       capabilities: { webgpu_handover_v3: true },
                       envelope: window._lastChatEnvelope,
                       orchestration_options: window._lastOrchestrationOptions
@@ -6075,7 +6076,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                         status: 'candidate_failed',
                         failed_model_id: data.model_id,
                         error_reason: msg.error || 'Local execution failed',
-                        upstream_context: data.user_prompt || '',
+                        upstream_context: data.raw_upstream_output || '',
                         capabilities: { webgpu_handover_v3: true },
                         envelope: window._lastChatEnvelope,
                         orchestration_options: window._lastOrchestrationOptions

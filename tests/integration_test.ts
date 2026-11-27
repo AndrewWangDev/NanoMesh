@@ -9378,6 +9378,1044 @@ async function runIntegrationTests() {
     "  ✓ Scenario 24 (switch_model Strict Execution Lock Preserving UI Candidate Options): PASSED"
   );
 
+  // -----------------------------------------------------------------------
+  // SCENARIO 25: Multimodal Artifact Routing Across Light (WebGPU), Medium (Workers AI), Heavy (VPS/External) & DAG Positions
+  // -----------------------------------------------------------------------
+  console.log(
+    "\n[Scenario 25] Multimodal Artifacts Across Light/Medium/Heavy Tiers & Arbitrary DAG Positions"
+  );
+  const { signJWT: signJwtS25 } = await import("../src/auth/jwt");
+  const { buildDownstreamMessages: buildMsgsS25 } = await import("../src/orchestration/dispatcher");
+  const { handleCommitSessionTurn: handleCommitS25 } = await import("../src/api/session");
+  const { handleChatContinue: handleContinueS25 } = await import("../src/api/chat");
+
+  const scen25UserId = "usr_scen25_mm";
+  const scen25User2Id = "usr_scen25_mm_2";
+  store.users.push(
+    {
+      user_id: scen25UserId,
+      username: "scen25_mm",
+      email: "scen25@nanomesh.local",
+      password_hash: "unused",
+      role: "user",
+      credits: 200,
+      token_version: 1
+    },
+    {
+      user_id: scen25User2Id,
+      username: "scen25_mm_2",
+      email: "scen25_2@nanomesh.local",
+      password_hash: "unused",
+      role: "user",
+      credits: 200,
+      token_version: 1
+    }
+  );
+  const scen25Token = await signJwtS25(
+    { userId: scen25UserId, role: "user", tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
+  const scen25Token2 = await signJwtS25(
+    { userId: scen25User2Id, role: "user", tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
+
+  store.dag_roles.push(
+    {
+      role_id: "role_s25_text_head",
+      name_zh: "文本首节点拆解",
+      name_en: "Text Head Extractor",
+      in_modalities: JSON.stringify(["text"]),
+      out_modalities: JSON.stringify(["text"]),
+      requisition_tags: JSON.stringify(["#chat", "#text_generation", "#general"])
+    },
+    {
+      role_id: "role_s25_browser_mid",
+      name_zh: "端侧过渡整理",
+      name_en: "Browser Mid Synth",
+      in_modalities: JSON.stringify(["text"]),
+      out_modalities: JSON.stringify(["text"]),
+      requisition_tags: JSON.stringify(["#chat", "#general"])
+    },
+    {
+      role_id: "role_s25_heavy_vlm_tail",
+      name_zh: "重节点视觉终审",
+      name_en: "Heavy VLM Tail",
+      in_modalities: JSON.stringify(["image", "text"]),
+      out_modalities: JSON.stringify(["text"]),
+      requisition_tags: JSON.stringify(["#multimodal_vision", "#general_vlm"])
+    },
+    {
+      role_id: "role_s25_heavy_gem_img",
+      name_zh: "重节点Gemini生图",
+      name_en: "Heavy Gemini ImageGen",
+      in_modalities: JSON.stringify(["text"]),
+      out_modalities: JSON.stringify(["image"]),
+      requisition_tags: JSON.stringify(["#image_generation"])
+    }
+  );
+  store.models.push(
+    {
+      model_id: "browser-s25-text",
+      display_name: "WebGPU S25",
+      provider: "WebGPU",
+      endpoint: "onnx-community/SmolLM2-135M-Instruct-ONNX",
+      modalities: '["text"]',
+      in_modalities: '["text"]',
+      out_modalities: '["text"]',
+      tags: '["#chat","#general"]',
+      context_window: 1024,
+      max_concurrency: 100,
+      active_connections: 0,
+      precision: 0.85,
+      user_rating: 4.9,
+      usage_count: 10,
+      cost_per_1k_tokens: 0,
+      cost_per_invocation: 0,
+      status: "active",
+      is_generalist: 1,
+      prior_score: 0.25,
+      scenario_anchors: "[]",
+      inference_target: "browser",
+      auth_mode: "none",
+      api_format: "workers_ai"
+    },
+    {
+      model_id: "heavy-vlm-s25",
+      display_name: "Heavy VLM S25",
+      provider: "ExternalVLM",
+      endpoint: "https://api.mock-s25-heavy.com/v1/chat/completions",
+      modalities: '["image","text"]',
+      in_modalities: '["image","text"]',
+      out_modalities: '["text"]',
+      tags: '["#multimodal_vision","#general_vlm","#analysis","#chat"]',
+      context_window: 32768,
+      max_concurrency: 50,
+      active_connections: 0,
+      precision: 0.96,
+      user_rating: 4.9,
+      usage_count: 10,
+      cost_per_1k_tokens: 1,
+      cost_per_invocation: 0,
+      status: "active",
+      is_generalist: 0,
+      prior_score: 0,
+      scenario_anchors: "[]",
+      inference_target: "heavy",
+      auth_mode: "bearer_static",
+      auth_secret: "sk-s25-test",
+      api_format: "openai_compat"
+    },
+    {
+      model_id: "heavy-gemini-img-s25",
+      display_name: "Gemini Image S25",
+      provider: "Google",
+      endpoint: "https://api.mock-s25-gemini.com/v1beta/models",
+      modalities: '["text","image"]',
+      in_modalities: '["text"]',
+      out_modalities: '["image"]',
+      tags: '["#image_generation"]',
+      context_window: 32768,
+      max_concurrency: 50,
+      active_connections: 0,
+      precision: 0.96,
+      user_rating: 4.9,
+      usage_count: 10,
+      cost_per_1k_tokens: 1,
+      cost_per_invocation: 0,
+      status: "active",
+      is_generalist: 0,
+      prior_score: 0,
+      scenario_anchors: "[]",
+      inference_target: "heavy",
+      auth_mode: "bearer_static",
+      auth_secret: "sk-gem-s25",
+      api_format: "google_ai"
+    }
+  );
+  store.dag_templates.push(
+    {
+      template_id: "tpl_s25_flux_browser_heavyvlm",
+      name_zh: "中生图→轻过渡→重识图",
+      name_en: "Flux->Browser->HeavyVLM",
+      desc_zh:
+        "Medium Flux generates image, Browser runs mid step, Heavy VLM inspects generated image",
+      desc_en: "Medium->Light->Heavy multimodal",
+      role_sequence: JSON.stringify([
+        "role_flux_draw",
+        "role_s25_browser_mid",
+        "role_s25_heavy_vlm_tail"
+      ]),
+      edges: JSON.stringify([]),
+      head_modalities: JSON.stringify(["text"]),
+      tail_modalities: JSON.stringify(["text"]),
+      status: "active",
+      priority: 5
+    },
+    {
+      template_id: "tpl_s25_gemimg_browser_tail",
+      name_zh: "重Gemini生图→轻端侧总结",
+      name_en: "GeminiImg->BrowserTail",
+      desc_zh: "Heavy Gemini generates image before Browser tail",
+      desc_en: "Heavy->Light multimodal",
+      role_sequence: JSON.stringify(["role_s25_heavy_gem_img", "role_s25_browser_mid"]),
+      edges: JSON.stringify([]),
+      head_modalities: JSON.stringify(["text"]),
+      tail_modalities: JSON.stringify(["image"]),
+      status: "active",
+      priority: 5
+    },
+    {
+      template_id: "tpl_s25_text_head_browser",
+      name_zh: "纯文本多节点流水线",
+      name_en: "MultiNode Text Pipeline",
+      desc_zh: "Multi-node pure text pipeline",
+      desc_en: "Multi-node pure text",
+      role_sequence: JSON.stringify(["role_s25_text_head", "role_s25_browser_mid"]),
+      edges: JSON.stringify([]),
+      head_modalities: JSON.stringify(["text"]),
+      tail_modalities: JSON.stringify(["text"]),
+      status: "active",
+      priority: 5
+    }
+  );
+
+  // 25.1 Medium Flux [Head] -> Light WebGPU [Intermediate] -> Heavy VLM [Tail]
+  const s25TinPngB64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+  let s25HeavyVlmSawImageUrl = false;
+  let s25HeavyVlmSawBrowserMidText = false;
+  let s25HeavyVlmImageAttachedToCurrentTurn = false;
+  let s25TextHeadSawDoc = false;
+  let s25TextHeadSawVisionMask = false;
+  const prevAiRun25 = env.AI.run;
+  const origFetch25 = globalThis.fetch;
+
+  (env.AI as any).run = async (ep: string, payload: any) => {
+    if (ep.includes("flux")) {
+      return { image: s25TinPngB64 };
+    }
+    if (ep.includes("bge-m3")) {
+      return { data: [[0.1, 0.2, 0.3]] };
+    }
+    if (ep.includes("llama-3.1-8b") && typeof payload?.messages?.[0]?.content === "string") {
+      const msgBlob = JSON.stringify(payload.messages);
+      if (msgBlob.includes("Extract KPI summary")) {
+        s25TextHeadSawDoc = msgBlob.includes("ROW_DATA_");
+        s25TextHeadSawVisionMask = msgBlob.includes("请对输入的图像进行全要素解析");
+        return { response: "KPI extracted cleanly: revenue +20%." };
+      }
+      return { response: "SAFE" };
+    }
+    return { response: "Edge response" };
+  };
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url =
+      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes("api.mock-s25-heavy.com")) {
+      const bodyObj = JSON.parse((init?.body as string) || "{}");
+      const msgs = bodyObj.messages || [];
+      const lastMsg = msgs[msgs.length - 1];
+      s25HeavyVlmSawBrowserMidText = JSON.stringify(msgs).includes("Browser mid prompt for VLM");
+      if (Array.isArray(lastMsg?.content)) {
+        const hasImg = lastMsg.content.some(
+          (p: any) =>
+            p.type === "image_url" &&
+            String(p.image_url?.url || "").startsWith("data:image/png;base64,")
+        );
+        s25HeavyVlmSawImageUrl = hasImg;
+        s25HeavyVlmImageAttachedToCurrentTurn = hasImg;
+      }
+      return new Response(
+        'data: {"choices":[{"delta":{"content":"重节点VLM已成功校验端侧中间产物与Phase1生图"}}]}\n\ndata: [DONE]\n\n',
+        { status: 200, headers: { "Content-Type": "text/event-stream" } }
+      );
+    }
+    if (url.includes("api.mock-s25-gemini.com")) {
+      return new Response(
+        JSON.stringify({
+          candidates: [
+            { content: { parts: [{ inlineData: { mimeType: "image/png", data: s25TinPngB64 } }] } }
+          ]
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    return origFetch25(input, init);
+  };
+
+  try {
+    const sess25a = "sess_s25_flux_mid_heavy";
+    const env25a: UnifiedProtocolEnvelope = {
+      envelope_id: "env_s25a",
+      session_id: sess25a,
+      user_id: scen25UserId,
+      round_index: 1,
+      instruction_payload: "Draw a badge then analyze it",
+      assets_manifest: [],
+      constraint_context: { target_language: "zh", output_style: "concise" },
+      metadata: { client_timestamp: Date.now(), char_count_total: 30, estimated_input_tokens: 30 }
+    };
+    const res25a = await handleChat(
+      new Request("https://nanomesh.local/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: `session=${scen25Token}` },
+        body: JSON.stringify({
+          clientOpId: "op_s25a_phase1",
+          reRouteMode: "switch_model",
+          chosenTemplateId: "tpl_s25_flux_browser_heavyvlm",
+          chosenRoleModels: {
+            role_flux_draw: "cf_flux_node",
+            role_s25_browser_mid: "browser-s25-text",
+            role_s25_heavy_vlm_tail: "heavy-vlm-s25"
+          },
+          envelope: env25a,
+          capabilities: { webgpu_handover_v3: true }
+        })
+      }),
+      env
+    );
+    assert.equal(res25a.status, 200);
+    const sse25a = await res25a.text();
+    assert.ok(sse25a.includes("event: asset_chunk"), "Phase 1 Flux must emit asset_chunk");
+    const handoverMatch = sse25a.match(/event: dag_handover\ndata: ([^\n]+)/);
+    assert.ok(handoverMatch, "Browser mid node must emit dag_handover");
+    const handoverPayload = JSON.parse(handoverMatch![1]);
+    assert.ok(
+      typeof handoverPayload.raw_upstream_output === "string" &&
+        handoverPayload.raw_upstream_output.includes(".png"),
+      "dag_handover must expose raw_upstream_output separately from wrapped user_prompt"
+    );
+
+    // Phase 2: locked switch_model failure on browser mid must fail-closed with 409 locked_model_failed
+    const lockedFailRes = await handleContinueS25(
+      new Request("https://nanomesh.local/api/chat/continue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: `session=${scen25Token}` },
+        body: JSON.stringify({
+          continuation_token: handoverPayload.continuation_token,
+          status: "candidate_failed",
+          failed_model_id: "browser-s25-text",
+          upstream_context: handoverPayload.raw_upstream_output,
+          envelope: env25a
+        })
+      }),
+      env
+    );
+    assert.equal(
+      lockedFailRes.status,
+      409,
+      "switch_model browser failover via /api/chat/continue must reject standby takeover with 409"
+    );
+
+    // Re-issue a normal-mode run for full continuation success check
+    const env25b = { ...env25a, envelope_id: "env_s25b", session_id: "sess_s25_cont_ok" };
+    const res25b = await handleChat(
+      new Request("https://nanomesh.local/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: `session=${scen25Token}` },
+        body: JSON.stringify({
+          clientOpId: "op_s25b_phase1",
+          reRouteMode: "switch_template",
+          chosenTemplateId: "tpl_s25_flux_browser_heavyvlm",
+          chosenRoleModels: {
+            role_flux_draw: "cf_flux_node",
+            role_s25_browser_mid: "browser-s25-text",
+            role_s25_heavy_vlm_tail: "heavy-vlm-s25"
+          },
+          envelope: env25b,
+          capabilities: { webgpu_handover_v3: true }
+        })
+      }),
+      env
+    );
+    const sse25b = await res25b.text();
+    const ho25b = JSON.parse(sse25b.match(/event: dag_handover\ndata: ([^\n]+)/)![1]);
+    const res25bCont = await handleContinueS25(
+      new Request("https://nanomesh.local/api/chat/continue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: `session=${scen25Token}` },
+        body: JSON.stringify({
+          continuation_token: ho25b.continuation_token,
+          status: "success",
+          client_step_output: "Browser mid prompt for VLM",
+          envelope: env25b
+        })
+      }),
+      env
+    );
+    assert.equal(res25bCont.status, 200);
+    const sse25bCont = await res25bCont.text();
+    assert.ok(sse25bCont.includes("event: dag_complete"), "Continuation DAG must complete");
+    assert.ok(
+      s25HeavyVlmSawBrowserMidText &&
+        s25HeavyVlmSawImageUrl &&
+        s25HeavyVlmImageAttachedToCurrentTurn,
+      "Heavy VLM Tail after Browser mid handover must receive both Browser output AND Phase 1 Flux generated image on the active turn"
+    );
+    const committed25bMedia = (store.session_assets || []).filter(
+      (a: any) =>
+        a.session_id === "sess_s25_cont_ok" && a.origin === "generated" && a.status === "COMMITTED"
+    );
+    assert.ok(
+      committed25bMedia.length >= 1,
+      "Phase 1 Flux generated image must survive Browser handover and be promoted to COMMITTED"
+    );
+
+    // 25.2 Heavy Gemini ImageGen [Head] -> Light WebGPU [Tail] commit preserves server-trusted Phase 1 generated image
+    const env25c: UnifiedProtocolEnvelope = {
+      envelope_id: "env_s25c",
+      session_id: "sess_s25_gem_browsertail",
+      user_id: scen25UserId,
+      round_index: 1,
+      instruction_payload: "Generate via Gemini then summarize on WebGPU",
+      assets_manifest: [],
+      constraint_context: { target_language: "zh", output_style: "concise" },
+      metadata: { client_timestamp: Date.now(), char_count_total: 40, estimated_input_tokens: 40 }
+    };
+    const res25c = await handleChat(
+      new Request("https://nanomesh.local/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: `session=${scen25Token}` },
+        body: JSON.stringify({
+          clientOpId: "op_s25c_gem_tail",
+          reRouteMode: "switch_template",
+          chosenTemplateId: "tpl_s25_gemimg_browser_tail",
+          chosenRoleModels: {
+            role_s25_heavy_gem_img: "heavy-gemini-img-s25",
+            role_s25_browser_mid: "browser-s25-text"
+          },
+          envelope: env25c,
+          capabilities: { webgpu_handover_v3: true }
+        })
+      }),
+      env
+    );
+    assert.equal(res25c.status, 200);
+    const sse25c = await res25c.text();
+    assert.ok(sse25c.includes("event: asset_chunk"), "Gemini image gen must emit asset_chunk");
+    const req25cMatch = sse25c.match(/event: client_exec_request\ndata: ([^\n]+)/);
+    assert.ok(req25cMatch, "Browser tail after Gemini image gen must emit client_exec_request");
+    const req25c = JSON.parse(req25cMatch![1]);
+    const commit25cRes = await handleCommitS25(
+      new Request("https://nanomesh.local/api/session/sess_s25_gem_browsertail/commit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: `session=${scen25Token}` },
+        body: JSON.stringify({
+          run_id: req25c.run_id,
+          client_commit_token: req25c.client_commit_token,
+          final_output: "WebGPU summary of Gemini image"
+        })
+      }),
+      env,
+      "sess_s25_gem_browsertail"
+    );
+    assert.equal(commit25cRes.status, 200);
+    const committed25cMedia = (store.session_assets || []).filter(
+      (a: any) =>
+        a.session_id === "sess_s25_gem_browsertail" &&
+        a.origin === "generated" &&
+        a.status === "COMMITTED"
+    );
+    assert.ok(
+      committed25cMedia.length >= 1,
+      "Phase 1 Heavy Gemini generated image must be promoted to COMMITTED when Browser tail commits"
+    );
+
+    // 25.3 Heavy Multi-Image + Audio + CROSS_FUSION refinementBackground serialization + Text Multi-Node Head
+    const heavyBuilt = buildMsgsS25(
+      {
+        systemPrompt: "sys",
+        initialUserDirective: "Analyze audio and 2 images",
+        sanitizedIntermediateOutput: "Upstream step notes",
+        currentTaskDirective: "Synthesize final decision",
+        flatPromptContent: "flat",
+        attachedDocsContent: "doc",
+        refinementBackground: "Cross-branch red badge identifier NM-427",
+        imageB64: "data:image/png;base64,AAA",
+        imageMimeType: "image/png",
+        extraImages: [{ b64: "data:image/jpeg;base64,BBB", mimeType: "image/jpeg" }],
+        audioB64: "data:audio/wav;base64,CCC",
+        audioMimeType: "audio/wav",
+        mediaFromUpstreamGeneration: false
+      },
+      {
+        model_id: "heavy-test",
+        display_name: "Heavy",
+        provider: "Test",
+        endpoint: "https://example.com",
+        modalities: ["image", "audio", "text"],
+        tags: [],
+        context_window: 32768,
+        max_concurrency: 10,
+        active_connections: 0,
+        precision: 0.9,
+        user_rating: 5,
+        usage_count: 1,
+        cost_per_1k_tokens: 1,
+        status: "active",
+        is_generalist: 0,
+        prior_score: 0,
+        scenario_anchors: [],
+        inference_target: "heavy"
+      }
+    );
+    assert.ok(
+      JSON.stringify(heavyBuilt.openaiMessages[1]).includes(
+        "Cross-branch red badge identifier NM-427"
+      ) &&
+        JSON.stringify(heavyBuilt.openaiMessages[1]).includes("input_audio") &&
+        JSON.stringify(heavyBuilt.geminiContents[0].parts).includes("audio/wav") &&
+        heavyBuilt.geminiContents[0].parts.filter((p: any) => p.inlineData).length === 3,
+      "Heavy downstream buildDownstreamMessages must preserve refinementBackground, multi-image, and audio parts"
+    );
+
+    // 25.4 Pure-Text Multi-Node Head with text_doc + context window guard on Browser
+    const hugeDocText = "ROW_DATA_".repeat(800);
+    const res25d = await handleChat(
+      new Request("https://nanomesh.local/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: `session=${scen25Token2}` },
+        body: JSON.stringify({
+          clientOpId: "op_s25d_text_head",
+          reRouteMode: "switch_template",
+          chosenTemplateId: "tpl_s25_text_head_browser",
+          chosenRoleModels: {
+            role_s25_text_head: "cf-fast-s24",
+            role_s25_browser_mid: "browser-s25-text"
+          },
+          envelope: {
+            envelope_id: "env_s25d",
+            session_id: "sess_s25_text_head",
+            user_id: scen25User2Id,
+            round_index: 1,
+            instruction_payload: "Extract KPI summary",
+            assets_manifest: [
+              {
+                asset_id: "doc_s25_csv",
+                modality: "text_doc",
+                mime_type: "text/csv",
+                file_size: hugeDocText.length,
+                in_memory_text: hugeDocText,
+                consumed: false,
+                source_digest: "digest_s25_csv",
+                is_new: true,
+                filename: "kpi.csv"
+              }
+            ],
+            constraint_context: { target_language: "zh", output_style: "concise" },
+            metadata: {
+              client_timestamp: Date.now(),
+              char_count_total: 100,
+              estimated_input_tokens: 100
+            }
+          },
+          capabilities: { webgpu_handover_v3: true }
+        })
+      }),
+      env
+    );
+    assert.equal(res25d.status, 200);
+    const sse25d = await res25d.text();
+    const req25dMatch = sse25d.match(/event: client_exec_request\ndata: ([^\n]+)/);
+    assert.ok(
+      req25dMatch,
+      `Text Head -> Browser Tail must emit client_exec_request (events=${sse25d
+        .split("\n")
+        .filter((l) => l.startsWith("event:") || l.includes("error"))
+        .join(" | ")}; tail=${sse25d.slice(-400)})`
+    );
+    const req25d = JSON.parse(req25dMatch![1]);
+    assert.ok(
+      s25TextHeadSawDoc && !s25TextHeadSawVisionMask,
+      "Pure-text multi-node head must receive text_doc and NOT receive vision extraction prompt"
+    );
+    assert.ok(
+      req25d.user_prompt.length <= 2600,
+      `Browser tail user_prompt must be bounded by context_window=1024 guard (got len=${req25d.user_prompt.length})`
+    );
+
+    // 25.5 Multimodal-capable model (["image","text"]) serving text-only role with zero images runs in text mode cleanly
+    const res25e = await handleChat(
+      new Request("https://nanomesh.local/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: `session=${scen25Token2}` },
+        body: JSON.stringify({
+          clientOpId: "op_s25e_vlm_text_mode",
+          reRouteMode: "switch_model",
+          chosenTemplateId: "tpl-direct-chat",
+          chosenRoleModels: { "role-direct-chat": "heavy-vlm-s25" },
+          envelope: {
+            envelope_id: "env_s25e",
+            session_id: "sess_s25_vlm_text_mode",
+            user_id: scen25User2Id,
+            round_index: 1,
+            instruction_payload: "Pure text query on multimodal heavy model",
+            assets_manifest: [],
+            constraint_context: { target_language: "zh", output_style: "concise" },
+            metadata: {
+              client_timestamp: Date.now(),
+              char_count_total: 40,
+              estimated_input_tokens: 40
+            }
+          }
+        })
+      }),
+      env
+    );
+    assert.equal(res25e.status, 200);
+    const sse25e = await res25e.text();
+    assert.ok(
+      sse25e.includes("event: dag_complete") && !sse25e.includes("强依赖图像资产输入"),
+      "Multimodal model serving a text-only role with no claimed media must execute cleanly in text mode"
+    );
+
+    // 25.6 Path A Compositional with Image + Audio + CSV must NOT duplicate CSV text into synthesis tail
+    const scen25User3Id = "usr_scen25_mm_3";
+    store.users.push({
+      user_id: scen25User3Id,
+      username: "scen25_mm_3",
+      email: "scen25_3@nanomesh.local",
+      password_hash: "unused",
+      role: "user",
+      credits: 300,
+      token_version: 1
+    });
+    const scen25Token3 = await signJwtS25(
+      { userId: scen25User3Id, role: "user", tokenVersion: 1 },
+      env.JWT_SECRET,
+      3600
+    );
+    const s25Img1Key = `tmp/${scen25User3Id}/sess_s25_mt/img1.png`;
+    const s25Img2Key = `tmp/${scen25User3Id}/sess_s25_mt/img2.png`;
+    const s25Aud1Key = `tmp/${scen25User3Id}/sess_s25_mt/aud1.wav`;
+    await env.R2.put(s25Img1Key, Uint8Array.from([137, 80, 78, 71, 1, 2, 3, 4]));
+    await env.R2.put(s25Img2Key, Uint8Array.from([137, 80, 78, 71, 5, 6, 7, 8]));
+    await env.R2.put(s25Aud1Key, Uint8Array.from([82, 73, 70, 70, 1, 2, 3, 4]));
+    store.session_assets!.push(
+      {
+        asset_id: "s25_mt_img1",
+        session_id: "__UNBOUND__",
+        user_id: scen25User3Id,
+        filename: "poster1.png",
+        modality: "image",
+        mime_type: "image/png",
+        file_size: 8,
+        r2_key: s25Img1Key,
+        source_digest: "digest_s25_mt_img1",
+        origin: "upload",
+        introduced_round: 1,
+        status: "STAGING"
+      },
+      {
+        asset_id: "s25_mt_img2",
+        session_id: "__UNBOUND__",
+        user_id: scen25User3Id,
+        filename: "poster2.png",
+        modality: "image",
+        mime_type: "image/png",
+        file_size: 8,
+        r2_key: s25Img2Key,
+        source_digest: "digest_s25_mt_img2",
+        origin: "upload",
+        introduced_round: 4,
+        status: "STAGING"
+      },
+      {
+        asset_id: "s25_mt_aud1",
+        session_id: "__UNBOUND__",
+        user_id: scen25User3Id,
+        filename: "voice1.wav",
+        modality: "audio",
+        mime_type: "audio/wav",
+        file_size: 8,
+        r2_key: s25Aud1Key,
+        source_digest: "digest_s25_mt_aud1",
+        origin: "upload",
+        introduced_round: 1,
+        status: "STAGING"
+      }
+    );
+
+    let s25SynthPromptsSeen: string[] = [];
+    let s25VisionCallCount = 0;
+    let s25AudioCallCount = 0;
+    let s25MockIntentOp: "ANCHOR_TAIL" | "REBIND_ROOT" | "CROSS_FUSION" = "ANCHOR_TAIL";
+    let s25MockBindings: Array<{ asset_id: string; bind_mode: string }> = [];
+
+    (env.AI as any).run = async (ep: string, payload: any) => {
+      if (ep.includes("clef-flash")) {
+        const qKeys = Object.keys(payload?.questions || {});
+        if (qKeys.includes("intent_op")) {
+          const answers: Record<string, any> = {
+            intent_op: { choice: s25MockIntentOp },
+            target_branch: { choice: "main" }
+          };
+          for (const qk of qKeys) {
+            if (qk.startsWith("bind_")) {
+              const aid = qk.slice(5);
+              const found = s25MockBindings.find((b) => b.asset_id === aid);
+              answers[qk] = { choice: found ? found.bind_mode : "DROP" };
+            }
+          }
+          return { answers };
+        }
+        const tplAnswers: Record<string, any> = {};
+        for (const qk of qKeys) {
+          tplAnswers[qk] = {
+            score: qk === "tpl-direct-chat" || qk === "tpl-multimodal-fusion" ? 2.0 : 1.0
+          };
+        }
+        return { answers: tplAnswers };
+      }
+      if (ep.includes("bge-m3")) return { data: [[0.1, 0.2, 0.3]] };
+      if (ep.includes("whisper")) {
+        s25AudioCallCount++;
+        return { text: "Audio transcript: priority task deadline Friday." };
+      }
+      if (ep.includes("vision") || ep.includes("moondream") || ep.includes("llava")) {
+        s25VisionCallCount++;
+        return { response: `Visual inspection #${s25VisionCallCount}: red badge NM-427.` };
+      }
+      if (ep.includes("llama-3.1-8b")) {
+        const msgStr = JSON.stringify(payload?.messages || []);
+        if (
+          msgStr.includes("Gateway Safety") ||
+          payload?.max_tokens === 5 ||
+          payload?.max_tokens === 60
+        ) {
+          return { response: msgStr.includes("JSON") ? '["tpl-direct-chat"]' : "SAFE" };
+        }
+        s25SynthPromptsSeen.push(msgStr);
+        return { response: "Synthesized multimodal deliverable with NM-427." };
+      }
+      if (Array.isArray(payload?.messages)) {
+        s25SynthPromptsSeen.push(JSON.stringify(payload.messages));
+      }
+      return { response: "Edge response" };
+    };
+
+    // 25.6 Turn 1: Compositional (1 image + 1 audio + 1 CSV) -> CSV must NOT be duplicated in synth-0
+    const res25fTurn1 = await handleChat(
+      new Request("https://nanomesh.local/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: `session=${scen25Token3}` },
+        body: JSON.stringify({
+          clientOpId: "op_s25f_t1",
+          disableBrowserInference: true,
+          envelope: {
+            envelope_id: "env_s25f_t1",
+            session_id: "sess_s25_mt",
+            user_id: scen25User3Id,
+            round_index: 1,
+            instruction_payload: "Combine poster, audio, and budget csv",
+            assets_manifest: [
+              {
+                asset_id: "s25_mt_img1",
+                modality: "image",
+                mime_type: "image/png",
+                file_size: 8,
+                r2_key: s25Img1Key,
+                source_digest: "digest_s25_mt_img1",
+                consumed: false,
+                is_new: true,
+                filename: "poster1.png"
+              },
+              {
+                asset_id: "s25_mt_aud1",
+                modality: "audio",
+                mime_type: "audio/wav",
+                file_size: 8,
+                r2_key: s25Aud1Key,
+                source_digest: "digest_s25_mt_aud1",
+                consumed: false,
+                is_new: true,
+                filename: "voice1.wav"
+              },
+              {
+                asset_id: "s25_mt_csv1",
+                modality: "text_doc",
+                mime_type: "text/csv",
+                file_size: 40,
+                in_memory_text: "UNIQUE_CSV_MARKER_991,budget=5000",
+                source_digest: "digest_s25_mt_csv1",
+                consumed: false,
+                is_new: true,
+                filename: "budget.csv"
+              }
+            ],
+            constraint_context: { target_language: "zh", output_style: "concise" },
+            metadata: {
+              client_timestamp: Date.now(),
+              char_count_total: 40,
+              estimated_input_tokens: 40
+            }
+          }
+        })
+      }),
+      env
+    );
+    assert.equal(res25fTurn1.status, 200);
+    const sse25fT1 = await res25fTurn1.text();
+    assert.ok(sse25fT1.includes("event: dag_complete"), "Turn 1 compositional must complete");
+    assert.equal(s25VisionCallCount, 1);
+    assert.equal(s25AudioCallCount, 1);
+    const lastSynthT1 = s25SynthPromptsSeen[s25SynthPromptsSeen.length - 1] || "";
+    const csvMatchesT1 = lastSynthT1.match(/UNIQUE_CSV_MARKER_991/g) || [];
+    assert.equal(
+      csvMatchesT1.length,
+      1,
+      `Path A Compositional synth-0 must include CSV exactly once via reducer-merge (got count=${csvMatchesT1.length})`
+    );
+
+    // 25.7 Multi-turn continuation:
+    // Turn 2 (ANCHOR_TAIL): follow-up without re-reading raw image/audio (0 new vision/audio calls)
+    s25MockIntentOp = "ANCHOR_TAIL";
+    s25MockBindings = [
+      { asset_id: "s25_mt_img1", bind_mode: "CACHED_TEXT" },
+      { asset_id: "s25_mt_aud1", bind_mode: "DROP" },
+      { asset_id: "s25_mt_csv1", bind_mode: "DROP" }
+    ];
+    const visionBeforeT2 = s25VisionCallCount;
+    const audioBeforeT2 = s25AudioCallCount;
+    const res25fTurn2 = await handleChat(
+      new Request("https://nanomesh.local/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: `session=${scen25Token3}` },
+        body: JSON.stringify({
+          clientOpId: "op_s25f_t2",
+          disableBrowserInference: true,
+          envelope: {
+            envelope_id: "env_s25f_t2",
+            session_id: "sess_s25_mt",
+            user_id: scen25User3Id,
+            round_index: 2,
+            instruction_payload: "Translate the summary into English",
+            assets_manifest: [],
+            constraint_context: { target_language: "en", output_style: "concise" },
+            metadata: {
+              client_timestamp: Date.now(),
+              char_count_total: 35,
+              estimated_input_tokens: 35
+            }
+          }
+        })
+      }),
+      env
+    );
+    assert.equal(res25fTurn2.status, 200);
+    const sse25fT2 = await res25fTurn2.text();
+    assert.ok(sse25fT2.includes("event: dag_complete"), "Turn 2 ANCHOR_TAIL must complete");
+    assert.equal(
+      s25VisionCallCount,
+      visionBeforeT2,
+      "ANCHOR_TAIL must reuse L1 cache with 0 VLM calls"
+    );
+    assert.equal(s25AudioCallCount, audioBeforeT2, "ANCHOR_TAIL must NOT re-call Whisper ASR");
+
+    // Turn 3 (REBIND_ROOT): selectively re-read raw image only (vision++ , audio unchanged)
+    s25MockIntentOp = "REBIND_ROOT";
+    s25MockBindings = [
+      { asset_id: "s25_mt_img1", bind_mode: "RAW_MEDIA" },
+      { asset_id: "s25_mt_aud1", bind_mode: "DROP" },
+      { asset_id: "s25_mt_csv1", bind_mode: "DROP" }
+    ];
+    const visionBeforeT3 = s25VisionCallCount;
+    const audioBeforeT3 = s25AudioCallCount;
+    const res25fTurn3 = await handleChat(
+      new Request("https://nanomesh.local/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: `session=${scen25Token3}` },
+        body: JSON.stringify({
+          clientOpId: "op_s25f_t3",
+          disableBrowserInference: true,
+          envelope: {
+            envelope_id: "env_s25f_t3",
+            session_id: "sess_s25_mt",
+            user_id: scen25User3Id,
+            round_index: 3,
+            instruction_payload: "Re-check the exact letters inside poster1",
+            assets_manifest: [],
+            constraint_context: { target_language: "zh", output_style: "concise" },
+            metadata: {
+              client_timestamp: Date.now(),
+              char_count_total: 40,
+              estimated_input_tokens: 40
+            }
+          }
+        })
+      }),
+      env
+    );
+    assert.equal(res25fTurn3.status, 200);
+    const sse25fT3 = await res25fTurn3.text();
+    assert.ok(sse25fT3.includes("event: dag_complete"), "Turn 3 REBIND_ROOT must complete");
+    assert.equal(
+      s25VisionCallCount,
+      visionBeforeT3 + 1,
+      "REBIND_ROOT must re-read raw img1 from R2 via vision node"
+    );
+    assert.equal(
+      s25AudioCallCount,
+      audioBeforeT3,
+      "REBIND_ROOT must NOT touch dropped audio asset"
+    );
+
+    // Turn 4 (CROSS_FUSION + new upload img2): fuses newly uploaded img2 with historical img1 as RAW_MEDIA
+    // Use separate token scen25Token2 to stay under per-user burst rate limit of 3
+    const scen25User4Id = "usr_scen25_mm_4";
+    store.users.push({
+      user_id: scen25User4Id,
+      username: "scen25_mm_4",
+      email: "scen25_4@nanomesh.local",
+      password_hash: "unused",
+      role: "user",
+      credits: 300,
+      token_version: 1
+    });
+    const scen25Token4 = await signJwtS25(
+      { userId: scen25User4Id, role: "user", tokenVersion: 1 },
+      env.JWT_SECRET,
+      3600
+    );
+    const s25T4Img1 = `tmp/${scen25User4Id}/sess_s25_cf/img1.png`;
+    const s25T4Img2 = `tmp/${scen25User4Id}/sess_s25_cf/img2.png`;
+    await env.R2.put(s25T4Img1, Uint8Array.from([137, 80, 78, 71, 9, 9, 9, 9]));
+    await env.R2.put(s25T4Img2, Uint8Array.from([137, 80, 78, 71, 7, 7, 7, 7]));
+    store.session_assets!.push(
+      {
+        asset_id: "s25_cf_img1",
+        session_id: "__UNBOUND__",
+        user_id: scen25User4Id,
+        filename: "cf_img1.png",
+        modality: "image",
+        mime_type: "image/png",
+        file_size: 8,
+        r2_key: s25T4Img1,
+        source_digest: "digest_s25_cf_img1",
+        origin: "upload",
+        introduced_round: 1,
+        status: "STAGING"
+      },
+      {
+        asset_id: "s25_cf_img2",
+        session_id: "__UNBOUND__",
+        user_id: scen25User4Id,
+        filename: "cf_img2.png",
+        modality: "image",
+        mime_type: "image/png",
+        file_size: 8,
+        r2_key: s25T4Img2,
+        source_digest: "digest_s25_cf_img2",
+        origin: "upload",
+        introduced_round: 2,
+        status: "STAGING"
+      }
+    );
+    const cfT1 = await handleChat(
+      new Request("https://nanomesh.local/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: `session=${scen25Token4}` },
+        body: JSON.stringify({
+          clientOpId: "op_s25_cf_t1",
+          disableBrowserInference: true,
+          envelope: {
+            envelope_id: "env_s25_cf_t1",
+            session_id: "sess_s25_cf",
+            user_id: scen25User4Id,
+            round_index: 1,
+            instruction_payload: "Inspect cf_img1",
+            assets_manifest: [
+              {
+                asset_id: "s25_cf_img1",
+                modality: "image",
+                mime_type: "image/png",
+                file_size: 8,
+                r2_key: s25T4Img1,
+                source_digest: "digest_s25_cf_img1",
+                consumed: false,
+                is_new: true,
+                filename: "cf_img1.png"
+              }
+            ],
+            constraint_context: { target_language: "zh", output_style: "concise" },
+            metadata: {
+              client_timestamp: Date.now(),
+              char_count_total: 16,
+              estimated_input_tokens: 20
+            }
+          }
+        })
+      }),
+      env
+    );
+    assert.equal(cfT1.status, 200);
+    await cfT1.text();
+
+    s25MockIntentOp = "CROSS_FUSION";
+    s25MockBindings = [{ asset_id: "s25_cf_img1", bind_mode: "RAW_MEDIA" }];
+    const visionBeforeCfT2 = s25VisionCallCount;
+    const cfT2 = await handleChat(
+      new Request("https://nanomesh.local/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: `session=${scen25Token4}` },
+        body: JSON.stringify({
+          clientOpId: "op_s25_cf_t2",
+          disableBrowserInference: true,
+          envelope: {
+            envelope_id: "env_s25_cf_t2",
+            session_id: "sess_s25_cf",
+            user_id: scen25User4Id,
+            round_index: 2,
+            instruction_payload: "Compare cf_img2 with cf_img1",
+            assets_manifest: [
+              {
+                asset_id: "s25_cf_img2",
+                modality: "image",
+                mime_type: "image/png",
+                file_size: 8,
+                r2_key: s25T4Img2,
+                source_digest: "digest_s25_cf_img2",
+                consumed: false,
+                is_new: true,
+                filename: "cf_img2.png"
+              }
+            ],
+            constraint_context: { target_language: "zh", output_style: "concise" },
+            metadata: {
+              client_timestamp: Date.now(),
+              char_count_total: 26,
+              estimated_input_tokens: 26,
+              has_new_upload: true,
+              new_upload_modalities: ["image"]
+            }
+          }
+        })
+      }),
+      env
+    );
+    assert.equal(cfT2.status, 200);
+    const sseCfT2 = await cfT2.text();
+    assert.ok(
+      sseCfT2.includes("event: dag_complete"),
+      "Turn 2 CROSS_FUSION with new image must complete"
+    );
+    assert.equal(
+      s25VisionCallCount,
+      visionBeforeCfT2 + 2,
+      "CROSS_FUSION comparing new img2 with historical img1 (RAW_MEDIA) must invoke vision node for BOTH images"
+    );
+  } finally {
+    (env.AI as any).run = prevAiRun25;
+    globalThis.fetch = origFetch25;
+  }
+
+  console.log(
+    "  ✓ Scenario 25 (Multimodal Artifacts Across Light/Medium/Heavy Tiers & Arbitrary DAG Positions): PASSED"
+  );
+
   console.log("\n==================================================");
   console.log("   🎉 ALL 24 INTEGRATION SCENARIOS PASSED (100%)! ");
   console.log("==================================================");

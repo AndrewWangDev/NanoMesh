@@ -8,6 +8,7 @@ import {
   sanitizeClientStepOutput,
   calculateExpectedNodeCost
 } from "../orchestration/dispatcher";
+import { extractHandoverBundleFromStepOutputs } from "../orchestration/slicing";
 import {
   AssetOrigin,
   Modality,
@@ -1290,6 +1291,9 @@ export async function handleChatContinue(
 
   let startStepIndex = Number(claims.nxt);
   let injectedUpstreamText = "";
+  const phase1Bundle = extractHandoverBundleFromStepOutputs(storedStepOutputs);
+  const allowStandbyFailover =
+    phase1Bundle.allowStandbyFailover !== undefined ? phase1Bundle.allowStandbyFailover : true;
 
   if (body.status === "candidate_failed") {
     // Standby Failover: The node that failed was step (claims.nxt - 1)
@@ -1299,6 +1303,31 @@ export async function handleChatContinue(
       return new Response(
         JSON.stringify({ error: "invalid_step_index", message: "续接步骤索引越界" }),
         { status: 400 }
+      );
+    }
+
+    if (!allowStandbyFailover) {
+      const lockedFailMsg = `岗位【${targetNode.role.name_zh}】当前处于锁定模型重跑模式且端侧执行失败，禁止越权切换备用模型。`;
+      if (planRunId) {
+        await finishRunWithoutCommit(env, {
+          userId: session.userId,
+          sessionId: effectiveEnvelope.session_id,
+          runId: planRunId,
+          outcome: "FAILED",
+          failureStatus: 409,
+          failureCode: "locked_model_failed",
+          failureMessage: lockedFailMsg
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          error: "locked_model_failed",
+          message: lockedFailMsg
+        }),
+        {
+          status: 409,
+          headers: { "Content-Type": "application/json" }
+        }
       );
     }
 
@@ -1337,10 +1366,20 @@ export async function handleChatContinue(
     targetNode.standby_models = availableStandbys.slice(1);
     targetNode.downgraded = true;
     startStepIndex = failedStepIdx;
-    injectedUpstreamText = sanitizeClientStepOutput(body.upstream_context || "");
+    const prevNode = failedStepIdx > 0 ? dag.nodes[failedStepIdx - 1] : undefined;
+    const prevNodeId = prevNode ? prevNode.node_id || prevNode.role.role_id : "";
+    const serverPrevOutput = prevNodeId ? phase1Bundle.nodeTextOutputs[prevNodeId] : undefined;
+    injectedUpstreamText =
+      serverPrevOutput || sanitizeClientStepOutput(body.upstream_context || "");
   } else {
-    // Success path: Sanitize client step output before feeding downstream
+    // Success path: Sanitize client step output before feeding downstream and record it in stepOutputs for reducer_merge
     injectedUpstreamText = sanitizeClientStepOutput(body.client_step_output || "");
+    const completedIdx = startStepIndex - 1;
+    if (completedIdx >= 0 && dag.nodes[completedIdx]) {
+      const completedNodeId =
+        dag.nodes[completedIdx].node_id || dag.nodes[completedIdx].role.role_id;
+      storedStepOutputs[completedNodeId] = injectedUpstreamText;
+    }
   }
 
   if (startStepIndex >= dag.nodes.length) {
@@ -1462,9 +1501,13 @@ export async function handleChatContinue(
       startStepIndex,
       injectedUpstreamText,
       continuationHandshakeId: claims.jti,
+      allowStandbyFailover,
       runId: planRunId,
       planHash,
       stepOutputs: storedStepOutputs,
+      initialGeneratedMedia: phase1Bundle.generatedMedia,
+      consumedAssetIds: phase1Bundle.consumedAssetIds,
+      initialPerceptualUpdates: phase1Bundle.perceptualUpdates,
       verifyAssetAccess: (asset) =>
         verifySessionAssetR2Access(env, session.userId, effectiveEnvelope.session_id, asset),
       onStepOutputsPersist: planRunId

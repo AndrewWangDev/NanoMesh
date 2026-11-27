@@ -12,6 +12,7 @@ import {
   SourceRefEntry,
   UnifiedProtocolEnvelope
 } from "../orchestration/types";
+import { extractHandoverBundleFromStepOutputs } from "../orchestration/slicing";
 
 export class StorageUnavailableError extends Error {
   constructor(message = "权威状态存储服务暂时不可用，请稍后重试。") {
@@ -1779,6 +1780,8 @@ export async function commitAuthoritativeSessionTurn(
     perceptualCacheUpdates: PerceptualCacheEntry[];
     authMode: "cloud" | "browser_tail";
     clientCommitToken?: string;
+    serverTrustedGeneratedMedia?: MediaArtifact[];
+    serverTrustedPerceptualUpdates?: PerceptualCacheEntry[];
     isReRun?: boolean;
     baseCommitId?: string;
     expectedParentCommitId?: string | null;
@@ -2023,8 +2026,11 @@ export async function commitAuthoritativeSessionTurn(
       WHERE s.user_id = ? AND s.session_id = ? AND s.last_tx_attempt_id = ? AND s.deleted_at IS NULL
     )`;
 
-    // Stmt 1..k: Scoped L1 Perceptual Cache (server-derived SHA-256 percept_key ONLY; ignored when authMode='browser_tail')
-    const cacheEntries = params.authMode === "cloud" ? params.perceptualCacheUpdates || [] : [];
+    // Stmt 1..k: Scoped L1 Perceptual Cache (server-derived ONLY; browser_tail uses server-persisted Phase 1 entries)
+    const cacheEntries =
+      params.authMode === "cloud"
+        ? params.perceptualCacheUpdates || []
+        : params.serverTrustedPerceptualUpdates || [];
     for (const entry of cacheEntries) {
       const scope = entry.task_scope || "objective_full";
       const promptDigest = entry.prompt_digest || "default";
@@ -2067,8 +2073,11 @@ export async function commitAuthoritativeSessionTurn(
       );
     }
 
-    // Promote generated media from STAGING -> COMMITTED (cloud only)
-    const generatedMedia = params.authMode === "cloud" ? params.generatedMedia || [] : [];
+    // Promote generated media from STAGING -> COMMITTED (cloud or server-persisted Phase 1 media before browser_tail)
+    const generatedMedia =
+      params.authMode === "cloud"
+        ? params.generatedMedia || []
+        : params.serverTrustedGeneratedMedia || [];
     const generatedAssetIds: string[] = [];
     for (const gm of generatedMedia) {
       generatedAssetIds.push(gm.asset_id);
@@ -2702,7 +2711,9 @@ export async function handleCommitSessionTurn(
       });
     }
 
-    // Browser tail commits strictly use frozen plan metadata & reject client-forged media/cache entries
+    // Browser tail commits strictly use frozen plan metadata & reject client-forged media/cache entries;
+    // promote ONLY server-persisted Phase 1 cloud generated media & perceptual cache from plan.stepOutputs.
+    const phase1Bundle = extractHandoverBundleFromStepOutputs(plan.stepOutputs);
     const result = await commitAuthoritativeSessionTurn(env, {
       userId: session.userId,
       sessionId: cleanId,
@@ -2712,6 +2723,8 @@ export async function handleCommitSessionTurn(
       finalOutput,
       generatedMedia: [],
       perceptualCacheUpdates: [],
+      serverTrustedGeneratedMedia: phase1Bundle.generatedMedia,
+      serverTrustedPerceptualUpdates: phase1Bundle.perceptualUpdates,
       authMode: "browser_tail",
       clientCommitToken,
       isReRun: plan.isReRun,

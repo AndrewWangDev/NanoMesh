@@ -168,10 +168,18 @@ self.onmessage = async (e) => {
       // Brief pause to allow WebGPU compile flash to be visible to user
       await new Promise(r => setTimeout(r, 80));
 
-      // Sanitize system prompt for lightweight in-browser model (avoid confusing 135M model with dense 70B-style prompt rules)
+      // Sanitize verbose system prompt for lightweight in-browser model while preserving explicit language constraints
       let cleanSystemPrompt = (system_prompt || '').trim();
       if (cleanSystemPrompt.includes('【核心执行守则】') || cleanSystemPrompt.length > 200) {
-        cleanSystemPrompt = 'You are a helpful, direct, and concise AI assistant. Directly fulfill the user request with clear code or answers without repeating the prompt or adding conversational fluff.';
+        let langHint = '';
+        if (cleanSystemPrompt.includes('始终使用规范清晰的中文回复')) {
+          langHint = ' Always reply in clear, concise Chinese.';
+        } else if (cleanSystemPrompt.includes('Always reply in fluent, natural English')) {
+          langHint = ' Always reply in fluent, natural English.';
+        } else if (cleanSystemPrompt.includes('必须严格使用该语言回复')) {
+          langHint = ' Follow the exact output language requested by the user.';
+        }
+        cleanSystemPrompt = `You are a helpful, direct, and concise AI assistant. Directly fulfill the user request without repeating the prompt or adding conversational fluff.${langHint}`;
       }
 
       // Prepare conversation messages

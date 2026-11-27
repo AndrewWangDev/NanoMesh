@@ -1,6 +1,10 @@
 // src/orchestration/dispatcher.ts
 import { Env } from "../types";
-import { sliceEnvelopeForNode } from "./slicing";
+import {
+  extractHandoverBundleFromStepOutputs,
+  serializeHandoverBundleToStepOutputs,
+  sliceEnvelopeForNode
+} from "./slicing";
 import {
   computeDeterministicSignature,
   lookupDeterministicCache,
@@ -34,6 +38,9 @@ export interface ExecutionOptions {
   runId?: string;
   planHash?: string;
   stepOutputs?: Record<string, string>;
+  initialGeneratedMedia?: MediaArtifact[];
+  consumedAssetIds?: string[];
+  initialPerceptualUpdates?: PerceptualCacheEntry[];
   verifyAssetAccess?: (asset: AssetDescriptor) => Promise<boolean | VerifyAssetAccessResult>;
   onStepOutputsPersist?: (outputs: Record<string, string>) => Promise<void>;
   onIssueBrowserTailToken?: () => Promise<string>;
@@ -390,8 +397,23 @@ export interface DownstreamPromptParts {
   currentTaskDirective: string;
   flatPromptContent: string;
   attachedDocsContent?: string;
+  refinementBackground?: string;
   imageB64?: string;
   imageMimeType?: string;
+  extraImages?: Array<{ b64: string; mimeType: string }>;
+  audioB64?: string;
+  audioMimeType?: string;
+  mediaFromUpstreamGeneration?: boolean;
+}
+
+function getAudioFormatFromMime(mimeType?: string): "wav" | "mp3" {
+  const lower = String(mimeType || "").toLowerCase();
+  if (lower.includes("mpeg") || lower.includes("mp3")) return "mp3";
+  return "wav";
+}
+
+function stripDataUrlPrefix(raw: string): string {
+  return raw.includes("base64,") ? raw.split("base64,")[1] : raw;
 }
 
 /**
@@ -410,70 +432,97 @@ export function buildDownstreamMessages(
   const hasUpstream =
     !!parts.sanitizedIntermediateOutput && parts.sanitizedIntermediateOutput.trim().length > 0;
 
-  let imagePartForGemini: any = null;
+  const allImages: Array<{ b64: string; mimeType: string }> = [];
   if (parts.imageB64) {
-    const cleanB64 = parts.imageB64.includes("base64,")
-      ? parts.imageB64.split("base64,")[1]
-      : parts.imageB64;
-    imagePartForGemini = {
-      inlineData: {
-        mimeType: parts.imageMimeType || "image/jpeg",
-        data: cleanB64
+    allImages.push({ b64: parts.imageB64, mimeType: parts.imageMimeType || "image/jpeg" });
+  }
+  if (Array.isArray(parts.extraImages)) {
+    for (const img of parts.extraImages) {
+      if (img?.b64) allImages.push({ b64: img.b64, mimeType: img.mimeType || "image/jpeg" });
+    }
+  }
+
+  const openaiMediaParts: any[] = allImages.map((img) => ({
+    type: "image_url",
+    image_url: { url: img.b64 }
+  }));
+  const geminiMediaParts: any[] = allImages.map((img) => ({
+    inlineData: {
+      mimeType: img.mimeType,
+      data: stripDataUrlPrefix(img.b64)
+    }
+  }));
+
+  if (parts.audioB64) {
+    const audioClean = stripDataUrlPrefix(parts.audioB64);
+    openaiMediaParts.push({
+      type: "input_audio",
+      input_audio: {
+        data: audioClean,
+        format: getAudioFormatFromMime(parts.audioMimeType)
       }
-    };
+    });
+    geminiMediaParts.push({
+      inlineData: {
+        mimeType: parts.audioMimeType || "audio/wav",
+        data: audioClean
+      }
+    });
   }
 
   if (isHeavy && hasUpstream) {
+    const bgBlock =
+      parts.refinementBackground &&
+      !parts.sanitizedIntermediateOutput.includes(parts.refinementBackground)
+        ? `【跨轮/跨分支历史背景补充】\n${parts.refinementBackground}`
+        : "";
     const userPromptWithDocs = [
       parts.initialUserDirective || "请处理以下输入材料",
-      parts.attachedDocsContent
+      parts.attachedDocsContent,
+      bgBlock
     ]
       .filter(Boolean)
       .join("\n\n");
-    const userContentOpenAI = parts.imageB64
-      ? [
-          { type: "text", text: userPromptWithDocs },
-          { type: "image_url", image_url: { url: parts.imageB64 } }
-        ]
-      : userPromptWithDocs;
+
+    const currentTurnText = parts.currentTaskDirective || "请基于前置产出完成当前岗位的执行任务";
+    const attachToCurrentTurn = !!parts.mediaFromUpstreamGeneration && openaiMediaParts.length > 0;
+
+    const userContentOpenAI =
+      !attachToCurrentTurn && openaiMediaParts.length > 0
+        ? [{ type: "text", text: userPromptWithDocs }, ...openaiMediaParts]
+        : userPromptWithDocs;
+    const currentContentOpenAI =
+      attachToCurrentTurn && openaiMediaParts.length > 0
+        ? [{ type: "text", text: currentTurnText }, ...openaiMediaParts]
+        : currentTurnText;
 
     const userGeminiParts: any[] = [{ text: userPromptWithDocs }];
-    if (imagePartForGemini) {
-      userGeminiParts.push(imagePartForGemini);
-    }
+    if (!attachToCurrentTurn) userGeminiParts.push(...geminiMediaParts);
+
+    const currentGeminiParts: any[] = [{ text: currentTurnText }];
+    if (attachToCurrentTurn) currentGeminiParts.push(...geminiMediaParts);
 
     return {
       openaiMessages: [
         { role: "system", content: parts.systemPrompt },
         { role: "user", content: userContentOpenAI },
         { role: "assistant", content: parts.sanitizedIntermediateOutput },
-        {
-          role: "user",
-          content: parts.currentTaskDirective || "请基于前置产出完成当前岗位的执行任务"
-        }
+        { role: "user", content: currentContentOpenAI }
       ],
       geminiContents: [
         { role: "user", parts: userGeminiParts },
         { role: "model", parts: [{ text: parts.sanitizedIntermediateOutput }] },
-        {
-          role: "user",
-          parts: [{ text: parts.currentTaskDirective || "请基于前置产出完成当前岗位的执行任务" }]
-        }
+        { role: "user", parts: currentGeminiParts }
       ]
     };
   }
 
-  const flatUserContentOpenAI = parts.imageB64
-    ? [
-        { type: "text", text: parts.flatPromptContent },
-        { type: "image_url", image_url: { url: parts.imageB64 } }
-      ]
-    : parts.flatPromptContent;
+  const flatUserContentOpenAI =
+    openaiMediaParts.length > 0
+      ? [{ type: "text", text: parts.flatPromptContent }, ...openaiMediaParts]
+      : parts.flatPromptContent;
 
-  const flatGeminiParts: any[] = [{ text: parts.flatPromptContent }];
-  if (imagePartForGemini) {
-    flatGeminiParts.push(imagePartForGemini);
-  }
+  const flatGeminiParts: any[] = [{ text: parts.flatPromptContent }, ...geminiMediaParts];
 
   return {
     openaiMessages: [
@@ -1127,14 +1176,20 @@ export async function executeDAGStream(
         }
 
         // Deep clone assets manifest for this DAG run so that node-level consumption is isolated
+        const consumedIdSet = new Set(options.consumedAssetIds || []);
         const runEnvelope: UnifiedProtocolEnvelope = {
           ...envelope,
-          assets_manifest: envelope.assets_manifest.map((a) => ({ ...a }))
+          assets_manifest: envelope.assets_manifest.map((a) => ({
+            ...a,
+            consumed: a.consumed || consumedIdSet.has(a.asset_id)
+          }))
         };
 
         const currentBundle: ArtifactBundle = {
           text_context: upstreamOutput || "",
-          generated_media: [],
+          generated_media: Array.isArray(options.initialGeneratedMedia)
+            ? options.initialGeneratedMedia.map((m) => ({ ...m }))
+            : [],
           inherited_assets: [...runEnvelope.assets_manifest]
         };
 
@@ -1142,21 +1197,22 @@ export async function executeDAGStream(
           string,
           { text: string; node: InstantiatedDAGNode; model: ModelMetadata }
         >();
-        if (options.stepOutputs) {
-          for (const [storedNodeId, storedText] of Object.entries(options.stepOutputs)) {
-            const matchedNode = dag.nodes.find(
-              (n) => (n.node_id || n.role.role_id) === storedNodeId
-            );
-            if (matchedNode && typeof storedText === "string" && storedText.trim()) {
-              nodeOutputs.set(storedNodeId, {
-                text: storedText,
-                node: matchedNode,
-                model: matchedNode.selected_model
-              });
-            }
+        const initialBundle = extractHandoverBundleFromStepOutputs(options.stepOutputs);
+        for (const [storedNodeId, storedText] of Object.entries(initialBundle.nodeTextOutputs)) {
+          const matchedNode = dag.nodes.find((n) => (n.node_id || n.role.role_id) === storedNodeId);
+          if (matchedNode && typeof storedText === "string" && storedText.trim()) {
+            nodeOutputs.set(storedNodeId, {
+              text: storedText,
+              node: matchedNode,
+              model: matchedNode.selected_model
+            });
           }
         }
-        const perceptualCacheUpdates: PerceptualCacheEntry[] = [];
+        const perceptualCacheUpdates: PerceptualCacheEntry[] = Array.isArray(
+          options.initialPerceptualUpdates
+        )
+          ? [...options.initialPerceptualUpdates]
+          : [];
 
         let tailDispatchedToBrowser = false;
         async function settlePhaseCreditsBeforeHandover(stepIdx: number) {
@@ -1213,17 +1269,30 @@ export async function executeDAGStream(
           triggerLowBalanceCheckAsync(env, options.userId, options.ctx);
         }
 
+        async function persistHandoverBundleState(): Promise<void> {
+          if (!options.onStepOutputsPersist) return;
+          const nodeTextOutputs: Record<string, string> = {};
+          for (const [k, v] of nodeOutputs.entries()) {
+            nodeTextOutputs[k] = v.text;
+          }
+          const consumedIds = runEnvelope.assets_manifest
+            .filter((a) => a.consumed)
+            .map((a) => a.asset_id);
+          const serialized = serializeHandoverBundleToStepOutputs({
+            nodeTextOutputs,
+            generatedMedia: currentBundle.generated_media,
+            consumedAssetIds: consumedIds,
+            perceptualUpdates: perceptualCacheUpdates,
+            allowStandbyFailover: options.allowStandbyFailover !== false
+          });
+          await options.onStepOutputsPersist(serialized);
+        }
+
         async function issueHandoverCredentials(nextStepIdx: number): Promise<{
           handshakeId: string;
           continuationToken: string;
         }> {
-          if (options.onStepOutputsPersist) {
-            const serialized: Record<string, string> = {};
-            for (const [k, v] of nodeOutputs.entries()) {
-              serialized[k] = v.text;
-            }
-            await options.onStepOutputsPersist(serialized);
-          }
+          await persistHandoverBundleState();
 
           const handshakeId = crypto.randomUUID();
           const expiresAt = new Date(Date.now() + 300 * 1000).toISOString();
@@ -1339,8 +1408,19 @@ export async function executeDAGStream(
           const parentRoleName = parentNode ? parentNode.role.name_zh : undefined;
           const nodeStartTime = Date.now();
 
+          const markClaimedAssetsConsumed = (claimed?: AssetDescriptor[]) => {
+            if (!Array.isArray(claimed) || claimed.length === 0) return;
+            const ids = new Set(claimed.map((a) => a.asset_id));
+            for (const envAsset of runEnvelope.assets_manifest) {
+              if (ids.has(envAsset.asset_id)) {
+                envAsset.consumed = true;
+              }
+            }
+          };
+
           // Fast path A: L1 Perceptual Cache Hit / Deterministic Document Reader in Evidence Prep
           if (node.perceptual_cache_hit && !node.is_reducer) {
+            markClaimedAssetsConsumed(node.claimed_assets);
             const cachedStr = node.cached_output || "";
             sendEvent("node_start", {
               node_id: nodeId,
@@ -1371,6 +1451,7 @@ export async function executeDAGStream(
 
           // Fast path B: Deterministic Evidence Reducer / Doc Reader node
           if (node.is_reducer) {
+            markClaimedAssetsConsumed(node.claimed_assets);
             sendEvent("node_start", {
               node_id: nodeId,
               role_id: node.role.role_id,
@@ -1485,19 +1566,39 @@ export async function executeDAGStream(
 
           if (nodeCtx.is_head_masked) {
             // Case A: Head Node (in_degree === 0 && out_degree > 0)
-            // Strictly MASK user prompt! Pure physical/perceptual feature extraction!
-            const assetModality = nodeCtx.claimed_assets[0]?.modality || "image";
-            systemPrompt =
-              `You are NanoMesh Worker Role: ${node.role.name_zh}.\n` +
-              (nodeCtx.compensation_prompt ||
-                `请对输入的图像或多模态数据进行全要素解析与无损特征提取：逐字逐行提取所有可见文字内容（包括标题、正文、微小注释、Logo文字），客观分析画面排版布局、构图与设计风格。保持客观，严禁进行翻译、二次创作或格式删减。`);
+            const hasSensoryHead =
+              nodeCtx.claimed_assets.some(
+                (a) => a.modality === "image" || a.modality === "audio"
+              ) ||
+              node.role.in_modalities.includes("image") ||
+              node.role.in_modalities.includes("audio");
+            if (hasSensoryHead) {
+              // Strictly MASK user prompt for sensory perception head! Pure physical/perceptual feature extraction!
+              const assetModality = nodeCtx.claimed_assets[0]?.modality || "image";
+              systemPrompt =
+                `You are NanoMesh Worker Role: ${node.role.name_zh}.\n` +
+                (nodeCtx.compensation_prompt ||
+                  `请对输入的图像或多模态数据进行全要素解析与无损特征提取：逐字逐行提取所有可见文字内容（包括标题、正文、微小注释、Logo文字），客观分析画面排版布局、构图与设计风格。保持客观，严禁进行翻译、二次创作或格式删减。`);
 
-            promptContent =
-              assetModality === "audio"
-                ? `请对输入的音频进行精准无损语音转写，保留全部关键信息、说话人偏好与细节事实。`
-                : `请对输入的图像进行全要素解析与无损特征提取：逐字逐行提取所有文字内容与排版风格细节。\nDescribe all text, visual elements, layout, and details in this image in detail.`;
-            if (nodeCtx.custom_prompt) {
-              promptContent += `\n\n[User Custom Directive]:\n${nodeCtx.custom_prompt}`;
+              promptContent =
+                assetModality === "audio"
+                  ? `请对输入的音频进行精准无损语音转写，保留全部关键信息、说话人偏好与细节事实。`
+                  : `请对输入的图像进行全要素解析与无损特征提取：逐字逐行提取所有文字内容与排版风格细节。\nDescribe all text, visual elements, layout, and details in this image in detail.`;
+              if (nodeCtx.custom_prompt) {
+                promptContent += `\n\n[User Custom Directive]:\n${nodeCtx.custom_prompt}`;
+              }
+            } else {
+              // Text / Document Head in a multi-node DAG: preserve user directive & documents without injecting vision instructions
+              systemPrompt =
+                `You are NanoMesh Worker Role: ${node.role.name_zh}.\n` +
+                `你当前处于多节点协作工作流的起始解析节点，请结合输入材料客观完成本岗位的前置提炼与结构化拆解，供下游节点继续加工。` +
+                (nodeCtx.compensation_prompt ? `\n${nodeCtx.compensation_prompt}` : "");
+              promptContent = attachedDocsSection
+                ? `${attachedDocsSection}\n\n【用户指令】\n${envelope.instruction_payload}`
+                : envelope.instruction_payload;
+              if (nodeCtx.custom_prompt) {
+                promptContent += `\n\n[User Custom Directive]:\n${nodeCtx.custom_prompt}`;
+              }
             }
           } else if (nodeCtx.is_downstream) {
             // Case B: Downstream Node (in_degree > 0)
@@ -1639,22 +1740,98 @@ export async function executeDAGStream(
             claimed_assets_count: nodeCtx.claimed_assets.length
           });
 
-          if (node.selected_model.inference_target === "browser") {
+          async function persistAndEmitGeneratedImage(
+            imageBuffer: ArrayBuffer,
+            sourceLabel: string,
+            usedPrompt: string
+          ): Promise<string> {
+            const generatedAssetId = crypto.randomUUID();
+            const safeUserId = options.userId || envelope.user_id || "anonymous";
+            const cleanSessionId = (envelope.session_id || "session")
+              .replace(/[^a-zA-Z0-9_-]/g, "_")
+              .slice(0, 64);
+            const newAssetKey = `tmp/${safeUserId}/${cleanSessionId}/${generatedAssetId}.png`;
+            if (options.onRegisterStagingAsset) {
+              await options.onRegisterStagingAsset({
+                assetId: generatedAssetId,
+                modality: "image",
+                mimeType: "image/png",
+                r2Key: newAssetKey,
+                fileSize: imageBuffer.byteLength
+              });
+            }
+            if (env.R2) {
+              await env.R2.put(newAssetKey, imageBuffer, {
+                httpMetadata: { contentType: "image/png" },
+                customMetadata: {
+                  userId: safeUserId,
+                  sessionId: envelope.session_id,
+                  assetId: generatedAssetId,
+                  roleId: node.role.role_id
+                }
+              });
+            }
+
+            const imgDigestHex = await computeSha256BytesHex(imageBuffer);
+            const mediaArtifact: MediaArtifact = {
+              asset_id: generatedAssetId,
+              modality: "image",
+              mime_type: "image/png",
+              file_size: imageBuffer.byteLength,
+              r2_key: newAssetKey,
+              source_digest: imgDigestHex
+            };
+            currentBundle.generated_media.push(mediaArtifact);
+
+            sendEvent("asset_chunk", {
+              role_id: node.role.role_id,
+              role_name: node.role.name_zh,
+              asset_id: generatedAssetId,
+              modality: "image",
+              mime_type: "image/png",
+              file_size: imageBuffer.byteLength,
+              r2_key: newAssetKey,
+              preview_url: `/api/assets/${generatedAssetId}?key=${encodeURIComponent(newAssetKey)}`
+            });
+
+            return `[${sourceLabel}: ${generatedAssetId}.png (体积: ${(imageBuffer.byteLength / 1024).toFixed(1)} KB)]\n提示词: ${usedPrompt}`;
+          }
+
+          async function dispatchBrowserNodeExecution(
+            browserModel: ModelMetadata,
+            isFailoverDispatch: boolean,
+            remainingStandbyCount: number
+          ): Promise<{ handedOver: boolean }> {
+            const { systemPrompt: guardedBrowserSysPrompt, promptContent: guardedBrowserPrompt } =
+              applyContextWindowGuard(
+                systemPrompt,
+                promptContent,
+                browserModel.context_window || 4096,
+                512
+              );
+            const serializedClaimed = nodeCtx.claimed_assets.map((a) => ({
+              asset_id: a.asset_id,
+              modality: a.modality,
+              mime_type: a.mime_type,
+              file_size: a.file_size,
+              r2_key: a.r2_key,
+              source_digest: a.source_digest
+            }));
+
             if (isTailNode) {
               await settlePhaseCreditsBeforeHandover(idx);
               let continuationToken: string | undefined = undefined;
               let handshakeId: string | undefined = undefined;
-
-              // Tail node failover credential delegation:
-              // If the tail WebGPU node has available cloud standby models, generate a continuation handshake record
-              // so that if the client crashes or times out on the tail node, it can failover via /api/chat/continue.
-              const hasCloudStandby = (node.standby_models || []).some(
-                (m) => m.inference_target !== "browser"
-              );
-              if (hasCloudStandby) {
+              if (remainingStandbyCount > 0) {
                 const creds = await issueHandoverCredentials(idx + 1);
                 handshakeId = creds.handshakeId;
                 continuationToken = creds.continuationToken;
+              } else if (
+                currentBundle.generated_media.length > 0 ||
+                perceptualCacheUpdates.length > 0 ||
+                nodeOutputs.size > 0
+              ) {
+                await persistHandoverBundleState();
               }
               const clientCommitToken = options.onIssueBrowserTailToken
                 ? await options.onIssueBrowserTailToken()
@@ -1666,36 +1843,69 @@ export async function executeDAGStream(
                 role_id: node.role.role_id,
                 role_name: node.role.name_zh,
                 role_name_en: node.role.name_en,
-                model_id: node.selected_model.model_id,
-                model_name: node.selected_model.display_name,
-                endpoint: node.selected_model.endpoint,
-                system_prompt: systemPrompt,
-                user_prompt: promptContent,
+                model_id: browserModel.model_id,
+                model_name: browserModel.display_name,
+                endpoint: browserModel.endpoint,
+                system_prompt: guardedBrowserSysPrompt,
+                user_prompt: guardedBrowserPrompt,
+                raw_upstream_output: nodeCtx.upstream_text,
                 is_tail_node: true,
+                ...(isFailoverDispatch ? { was_failover: true } : {}),
                 run_id: options.runId,
                 client_commit_token: clientCommitToken,
                 handshake_id: handshakeId,
                 continuation_token: continuationToken,
-                claimed_assets: nodeCtx.claimed_assets.map((a) => ({
-                  asset_id: a.asset_id,
-                  modality: a.modality,
-                  mime_type: a.mime_type,
-                  file_size: a.file_size,
-                  r2_key: a.r2_key,
-                  source_digest: a.source_digest
-                }))
+                claimed_assets: serializedClaimed
               });
+              return { handedOver: false };
+            }
+
+            await settlePhaseCreditsBeforeHandover(idx);
+            const { handshakeId, continuationToken } = await issueHandoverCredentials(idx + 1);
+            sendEvent("dag_handover", {
+              handshake_id: handshakeId,
+              continuation_token: continuationToken,
+              current_step: idx,
+              next_step: idx + 1,
+              node_id: nodeId,
+              role_id: node.role.role_id,
+              role_name: node.role.name_zh,
+              role_name_en: node.role.name_en,
+              model_id: browserModel.model_id,
+              model_name: browserModel.display_name,
+              endpoint: browserModel.endpoint,
+              system_prompt: guardedBrowserSysPrompt,
+              user_prompt: guardedBrowserPrompt,
+              raw_upstream_output: nodeCtx.upstream_text,
+              is_tail_node: false,
+              ...(isFailoverDispatch ? { was_failover: true } : {}),
+              expires_in: 300,
+              claimed_assets: serializedClaimed
+            });
+            return { handedOver: true };
+          }
+
+          if (node.selected_model.inference_target === "browser") {
+            if (isTailNode) {
+              const hasCloudStandby =
+                options.allowStandbyFailover !== false &&
+                (node.standby_models || []).some((m) => m.inference_target !== "browser");
+              await dispatchBrowserNodeExecution(
+                node.selected_model,
+                false,
+                hasCloudStandby ? 1 : 0
+              );
               return { output: "", handedOver: false };
             } else {
               // Intermediate Browser Node!
               const supportsHandover = options.clientCapabilities?.webgpu_handover_v3 ?? true;
               if (!supportsHandover) {
                 // AC-08: Legacy client without webgpu_handover_v3 fallback
-                const cloudStandby = node.standby_models.find(
-                  (m) => m.inference_target !== "browser"
-                );
+                const cloudStandby =
+                  options.allowStandbyFailover !== false
+                    ? node.standby_models.find((m) => m.inference_target !== "browser")
+                    : undefined;
                 if (cloudStandby) {
-                  // Reserve exact standby cloud model cost atomically prior to dispatch (whether or not earlier nodes reserved)
                   const standbyCost = calculateExpectedNodeCost(cloudStandby);
                   if (standbyCost > 0) {
                     const reserveResult = await env.DB.prepare(
@@ -1718,7 +1928,6 @@ export async function executeDAGStream(
                   }
 
                   node.selected_model = cloudStandby;
-                  // Recompute deterministic cacheKey under the cloud standby model signature
                   cacheKey = await computeDeterministicSignature(
                     node.role.role_id,
                     node.selected_model.model_id,
@@ -1727,7 +1936,6 @@ export async function executeDAGStream(
                     scopedUserId,
                     scopedSessionId
                   );
-                  // fall through to cloud execution logic!
                 } else {
                   sendEvent("error", {
                     message: `客户端未支持 WebGPU 中间握手协议，且未找到可用的云端备用模型。`
@@ -1738,37 +1946,7 @@ export async function executeDAGStream(
                   return { output: "", handedOver: true };
                 }
               } else {
-                // Settle Phase 1 cloud cost if any cloud models executed prior to this step
-                await settlePhaseCreditsBeforeHandover(idx);
-                const { handshakeId, continuationToken } = await issueHandoverCredentials(idx + 1);
-
-                sendEvent("dag_handover", {
-                  handshake_id: handshakeId,
-                  continuation_token: continuationToken,
-                  current_step: idx,
-                  next_step: idx + 1,
-                  node_id: nodeId,
-                  role_id: node.role.role_id,
-                  role_name: node.role.name_zh,
-                  role_name_en: node.role.name_en,
-                  model_id: node.selected_model.model_id,
-                  model_name: node.selected_model.display_name,
-                  endpoint: node.selected_model.endpoint,
-                  system_prompt: systemPrompt,
-                  user_prompt: promptContent,
-                  is_tail_node: false,
-                  expires_in: 300,
-                  claimed_assets: nodeCtx.claimed_assets.map((a) => ({
-                    asset_id: a.asset_id,
-                    modality: a.modality,
-                    mime_type: a.mime_type,
-                    file_size: a.file_size,
-                    r2_key: a.r2_key,
-                    source_digest: a.source_digest
-                  }))
-                });
-
-                // End stream gracefully immediately to release Edge Worker connection & compute
+                await dispatchBrowserNodeExecution(node.selected_model, false, 1);
                 return { output: "", handedOver: true };
               }
             }
@@ -1810,18 +1988,31 @@ export async function executeDAGStream(
             // Cache Miss: Perform Execution
             // 2. Fetch authorized image / audio assets from R2 bucket if required
             let imageB64: string | null = null;
-            let imageBytes: Uint8Array | number[] | null = null;
-            const imageAsset = nodeCtx.claimed_assets.find((a) => a.modality === "image");
+            let imageBytes: Uint8Array | null = null;
+            const imageAssets = nodeCtx.claimed_assets.filter((a) => a.modality === "image");
+            const imageAsset = imageAssets[0];
+            const extraImages: Array<{ b64: string; mimeType: string }> = [];
+            let totalImageBytes = 0;
 
-            if (imageAsset) {
+            for (let imgIdx = 0; imgIdx < imageAssets.length; imgIdx++) {
+              const curImgAsset = imageAssets[imgIdx];
               const fetchedImg = await fetchAuthorizedR2MediaBytes(
-                imageAsset,
+                curImgAsset,
                 "图像",
                 15 * 1024 * 1024
               );
               if (fetchedImg) {
-                imageBytes = fetchedImg;
-                imageB64 = `data:${imageAsset.mime_type || "image/jpeg"};base64,${arrayBufferToBase64(fetchedImg.buffer as ArrayBuffer)}`;
+                totalImageBytes += fetchedImg.byteLength;
+                const b64Str = `data:${curImgAsset.mime_type || "image/jpeg"};base64,${arrayBufferToBase64(fetchedImg.buffer as ArrayBuffer)}`;
+                if (!imageB64) {
+                  imageBytes = fetchedImg;
+                  imageB64 = b64Str;
+                } else {
+                  extraImages.push({
+                    b64: b64Str,
+                    mimeType: curImgAsset.mime_type || "image/jpeg"
+                  });
+                }
               }
             }
 
@@ -1830,32 +2021,40 @@ export async function executeDAGStream(
             const audioBytes = audioAsset
               ? await fetchAuthorizedR2MediaBytes(audioAsset, "音频", 25 * 1024 * 1024)
               : null;
+            const audioB64 = audioBytes
+              ? `data:${audioAsset?.mime_type || "audio/wav"};base64,${arrayBufferToBase64(audioBytes.buffer as ArrayBuffer)}`
+              : null;
 
             // 2c. Worker heap safety guard: Combined multimodal payload limit
-            const combinedAssetsBytes =
-              (imageBytes ? imageBytes.byteLength : 0) + (audioBytes ? audioBytes.byteLength : 0);
+            const combinedAssetsBytes = totalImageBytes + (audioBytes ? audioBytes.byteLength : 0);
             if (combinedAssetsBytes > 25 * 1024 * 1024) {
               throw new Error(
                 "当前节点认领的多模态资产合并体积超过 25MB 内存安全上限，已拒绝加载以防止 Worker 内存溢出。"
               );
             }
 
-            // 3. Fail-fast check: if node requires image modality, valid image asset descriptor must be present
+            // 3. Fail-fast check: only require image/audio when the role requires it, media was claimed,
+            // or the selected model is purely sensory (cannot accept text). Multimodal ["image","text"] models
+            // serving a text-only role with no claimed media must execute in text mode without throwing.
+            const selectedModelIn =
+              node.selected_model.in_modalities ?? node.selected_model.modalities;
+            const modelSupportsText =
+              selectedModelIn.includes("text") || selectedModelIn.includes("text_doc");
             const isImageNode =
               node.role.in_modalities.includes("image") ||
-              (node.selected_model.in_modalities?.includes("image") ??
-                node.selected_model.modalities.includes("image"));
+              !!imageAsset ||
+              (selectedModelIn.includes("image") && !modelSupportsText);
             if (isImageNode && !imageB64 && !imageBytes) {
               throw new Error(
                 `工作流执行中断：岗位【${node.role.name_zh}】强依赖图像资产输入，但未能检索到图片实体（R2 Key: ${imageAsset?.r2_key || "未指定"}）。严禁越权降级或跳过执行。`
               );
             }
 
-            // 3b. Fail-fast check: if node requires audio modality, valid audio asset descriptor must be present
+            // 3b. Fail-fast check: same sensory-necessity rule for audio assets
             const isAudioNode =
               node.role.in_modalities.includes("audio") ||
-              (node.selected_model.in_modalities?.includes("audio") ??
-                node.selected_model.modalities.includes("audio"));
+              !!audioAsset ||
+              (selectedModelIn.includes("audio") && !modelSupportsText);
             if (isAudioNode && !audioBytes) {
               throw new Error(
                 `工作流执行中断：岗位【${node.role.name_zh}】强依赖音频资产输入，但未能检索到音频实体（R2 Key: ${audioAsset?.r2_key || "未指定"}）。严禁越权降级或跳过执行。`
@@ -1938,88 +2137,18 @@ export async function executeDAGStream(
                   reason_en: `Primary cloud node [${previousCandidate.display_name}] failed, symmetric failover to client WebGPU standby model [${currentCandidate.display_name}]`
                 });
 
+                const dispatchRes = await dispatchBrowserNodeExecution(
+                  currentCandidate,
+                  true,
+                  candidateModels.slice(attemptIdx + 1).length
+                );
                 if (isTailNode) {
-                  // Tail Node WebGPU Handover
-                  // Conservation of Credits: Refund or settle Phase 1 cloud pre-deduction
-                  await settlePhaseCreditsBeforeHandover(idx);
-
-                  let continuationToken: string | undefined = undefined;
-                  let handshakeId: string | undefined = undefined;
-                  const remainingStandbys = candidateModels.slice(attemptIdx + 1);
-                  if (remainingStandbys.length > 0) {
-                    const creds = await issueHandoverCredentials(idx + 1);
-                    handshakeId = creds.handshakeId;
-                    continuationToken = creds.continuationToken;
-                  }
-                  const clientCommitToken = options.onIssueBrowserTailToken
-                    ? await options.onIssueBrowserTailToken()
-                    : undefined;
-                  tailDispatchedToBrowser = true;
-
-                  sendEvent("client_exec_request", {
-                    node_id: nodeId,
-                    role_id: node.role.role_id,
-                    role_name: node.role.name_zh,
-                    role_name_en: node.role.name_en,
-                    model_id: currentCandidate.model_id,
-                    model_name: currentCandidate.display_name,
-                    endpoint: currentCandidate.endpoint,
-                    system_prompt: systemPrompt,
-                    user_prompt: promptContent,
-                    is_tail_node: true,
-                    was_failover: true,
-                    run_id: options.runId,
-                    client_commit_token: clientCommitToken,
-                    handshake_id: handshakeId,
-                    continuation_token: continuationToken,
-                    claimed_assets: nodeCtx.claimed_assets.map((a) => ({
-                      asset_id: a.asset_id,
-                      modality: a.modality,
-                      mime_type: a.mime_type,
-                      file_size: a.file_size,
-                      r2_key: a.r2_key,
-                      source_digest: a.source_digest
-                    }))
-                  });
-
                   actualExecutingModel = currentCandidate;
                   node.selected_model = currentCandidate;
                   isExecutionSuccess = true;
                   break;
-                } else {
-                  // Intermediate Node WebGPU Handover
-                  await settlePhaseCreditsBeforeHandover(idx);
-                  const { handshakeId, continuationToken } = await issueHandoverCredentials(
-                    idx + 1
-                  );
-
-                  sendEvent("dag_handover", {
-                    handshake_id: handshakeId,
-                    continuation_token: continuationToken,
-                    current_step: idx,
-                    next_step: idx + 1,
-                    node_id: nodeId,
-                    role_id: node.role.role_id,
-                    role_name: node.role.name_zh,
-                    role_name_en: node.role.name_en,
-                    model_id: currentCandidate.model_id,
-                    model_name: currentCandidate.display_name,
-                    endpoint: currentCandidate.endpoint,
-                    system_prompt: systemPrompt,
-                    user_prompt: promptContent,
-                    is_tail_node: false,
-                    was_failover: true,
-                    expires_in: 300,
-                    claimed_assets: nodeCtx.claimed_assets.map((a) => ({
-                      asset_id: a.asset_id,
-                      modality: a.modality,
-                      mime_type: a.mime_type,
-                      file_size: a.file_size,
-                      r2_key: a.r2_key,
-                      source_digest: a.source_digest
-                    }))
-                  });
-
+                }
+                if (dispatchRes.handedOver) {
                   return { output: "", handedOver: true }; // Gracefully yield worker execution immediately!
                 }
               }
@@ -2063,6 +2192,10 @@ export async function executeDAGStream(
                   Math.min(2000, Math.floor(candidateContextWindow * 1.5))
                 );
 
+                const claimedMediaGenerated =
+                  !!imageAsset &&
+                  currentBundle.generated_media.some((gm) => gm.asset_id === imageAsset.asset_id);
+
                 const downstreamParts: DownstreamPromptParts = {
                   systemPrompt: guardedSysPrompt,
                   initialUserDirective,
@@ -2070,8 +2203,16 @@ export async function executeDAGStream(
                   currentTaskDirective: currentStepDirective,
                   flatPromptContent: guardedPromptContent,
                   attachedDocsContent: attachedDocsSection || "",
+                  refinementBackground:
+                    isIncrementalRefinement && refinementBackground
+                      ? refinementBackground
+                      : undefined,
                   imageB64: imageB64 || undefined,
-                  imageMimeType: imageAsset?.mime_type || "image/jpeg"
+                  imageMimeType: imageAsset?.mime_type || "image/jpeg",
+                  extraImages: extraImages.length > 0 ? extraImages : undefined,
+                  audioB64: audioB64 || undefined,
+                  audioMimeType: audioAsset?.mime_type || "audio/wav",
+                  mediaFromUpstreamGeneration: claimedMediaGenerated
                 };
 
                 const builtMessages = buildDownstreamMessages(downstreamParts, currentCandidate);
@@ -2093,7 +2234,8 @@ export async function executeDAGStream(
                   let requestPayload: any;
 
                   if (apiFormat === "google_ai") {
-                    const isStream = isTailNode;
+                    const isStream =
+                      isTailNode && !currentCandidate.out_modalities?.includes("image");
                     if (
                       !targetUrl.includes(":generateContent") &&
                       !targetUrl.includes(":streamGenerateContent")
@@ -2197,7 +2339,7 @@ export async function executeDAGStream(
                       },
                       {
                         signal: abortController.signal,
-                        idleTimeoutMs: 30000,
+                        idleTimeoutMs: 45000,
                         maxTotalMs: 150000
                       }
                     );
@@ -2206,7 +2348,13 @@ export async function executeDAGStream(
                       async () => {
                         const jsonRes: any = await fRes.json().catch(() => ({}));
                         if (currentCandidate.out_modalities?.includes("image")) {
-                          let b64Str = jsonRes.data?.[0]?.b64_json;
+                          const geminiInlinePart = Array.isArray(jsonRes.candidates)
+                            ? (jsonRes.candidates[0]?.content?.parts || []).find(
+                                (p: any) => p?.inlineData?.data
+                              )
+                            : null;
+                          let b64Str =
+                            jsonRes.data?.[0]?.b64_json || geminiInlinePart?.inlineData?.data;
                           let imgBuffer: ArrayBuffer | null = null;
                           if (b64Str) {
                             imgBuffer = decodeBase64ImageWithGuard(b64Str);
@@ -2279,56 +2427,11 @@ export async function executeDAGStream(
                           }
 
                           if (imgBuffer && imgBuffer.byteLength > 0) {
-                            const generatedAssetId = crypto.randomUUID();
-                            const safeUserId = options.userId || envelope.user_id || "anonymous";
-                            const cleanSessionId = (envelope.session_id || "session")
-                              .replace(/[^a-zA-Z0-9_-]/g, "_")
-                              .slice(0, 64);
-                            const newAssetKey = `tmp/${safeUserId}/${cleanSessionId}/${generatedAssetId}.png`;
-                            if (options.onRegisterStagingAsset) {
-                              await options.onRegisterStagingAsset({
-                                assetId: generatedAssetId,
-                                modality: "image",
-                                mimeType: "image/png",
-                                r2Key: newAssetKey,
-                                fileSize: imgBuffer.byteLength
-                              });
-                            }
-                            if (env.R2) {
-                              await env.R2.put(newAssetKey, imgBuffer, {
-                                httpMetadata: { contentType: "image/png" },
-                                customMetadata: {
-                                  userId: safeUserId,
-                                  sessionId: envelope.session_id,
-                                  assetId: generatedAssetId,
-                                  roleId: node.role.role_id
-                                }
-                              });
-                            }
-
-                            const imgDigestHex = await computeSha256BytesHex(imgBuffer);
-                            const mediaArtifact: MediaArtifact = {
-                              asset_id: generatedAssetId,
-                              modality: "image",
-                              mime_type: "image/png",
-                              file_size: imgBuffer.byteLength,
-                              r2_key: newAssetKey,
-                              source_digest: imgDigestHex
-                            };
-                            currentBundle.generated_media.push(mediaArtifact);
-
-                            sendEvent("asset_chunk", {
-                              role_id: node.role.role_id,
-                              role_name: node.role.name_zh,
-                              asset_id: generatedAssetId,
-                              modality: "image",
-                              mime_type: "image/png",
-                              file_size: imgBuffer.byteLength,
-                              r2_key: newAssetKey,
-                              preview_url: `/api/assets/${generatedAssetId}?key=${encodeURIComponent(newAssetKey)}`
-                            });
-
-                            return `[外部商业生图模型已存入账本: ${generatedAssetId}.png (体积: ${(imgBuffer.byteLength / 1024).toFixed(1)} KB)]\n提示词: ${guardedPromptContent}`;
+                            return await persistAndEmitGeneratedImage(
+                              imgBuffer,
+                              "外部商业生图模型已存入账本",
+                              guardedPromptContent
+                            );
                           }
                         }
                         return await parseAIResponse(jsonRes);
@@ -2373,8 +2476,8 @@ export async function executeDAGStream(
                   );
                   const parsed = await parseAIResponse(aiRes, undefined, {
                     signal: abortController.signal,
-                    idleTimeoutMs: 25000,
-                    maxTotalMs: 45000
+                    idleTimeoutMs: 35000,
+                    maxTotalMs: 55000
                   });
                   if (parsed && parsed.length > 5) {
                     nodeOutput = parsed;
@@ -2471,12 +2574,6 @@ export async function executeDAGStream(
                     abortController.signal
                   );
                   if (aiRes) {
-                    const generatedAssetId = crypto.randomUUID();
-                    const safeUserId = options.userId || envelope.user_id || "anonymous";
-                    const cleanSessionId = (envelope.session_id || "session")
-                      .replace(/[^a-zA-Z0-9_-]/g, "_")
-                      .slice(0, 64);
-                    const newAssetKey = `tmp/${safeUserId}/${cleanSessionId}/${generatedAssetId}.png`;
                     let imageBuffer: ArrayBuffer | null = null;
                     if (aiRes instanceof ReadableStream || typeof aiRes.getReader === "function") {
                       const resp = new Response(aiRes);
@@ -2497,51 +2594,11 @@ export async function executeDAGStream(
                     }
 
                     if (imageBuffer && imageBuffer.byteLength > 0) {
-                      if (options.onRegisterStagingAsset) {
-                        await options.onRegisterStagingAsset({
-                          assetId: generatedAssetId,
-                          modality: "image",
-                          mimeType: "image/png",
-                          r2Key: newAssetKey,
-                          fileSize: imageBuffer.byteLength
-                        });
-                      }
-                      if (env.R2) {
-                        await env.R2.put(newAssetKey, imageBuffer, {
-                          httpMetadata: { contentType: "image/png" },
-                          customMetadata: {
-                            userId: safeUserId,
-                            sessionId: envelope.session_id,
-                            assetId: generatedAssetId,
-                            roleId: node.role.role_id
-                          }
-                        });
-                      }
-
-                      const imgDigestHex = await computeSha256BytesHex(imageBuffer);
-                      const mediaArtifact: MediaArtifact = {
-                        asset_id: generatedAssetId,
-                        modality: "image",
-                        mime_type: "image/png",
-                        file_size: imageBuffer.byteLength,
-                        r2_key: newAssetKey,
-                        source_digest: imgDigestHex
-                      };
-
-                      currentBundle.generated_media.push(mediaArtifact);
-
-                      sendEvent("asset_chunk", {
-                        role_id: node.role.role_id,
-                        role_name: node.role.name_zh,
-                        asset_id: generatedAssetId,
-                        modality: "image",
-                        mime_type: "image/png",
-                        file_size: imageBuffer.byteLength,
-                        r2_key: newAssetKey,
-                        preview_url: `/api/assets/${generatedAssetId}?key=${encodeURIComponent(newAssetKey)}`
-                      });
-
-                      nodeOutput = `[系统生成图像资产已存入会话账本: ${generatedAssetId}.png (体积: ${(imageBuffer.byteLength / 1024).toFixed(1)} KB)]\n提示词: ${guardedPromptContent}`;
+                      nodeOutput = await persistAndEmitGeneratedImage(
+                        imageBuffer,
+                        "系统生成图像资产已存入会话账本",
+                        guardedPromptContent
+                      );
                       actualExecutingModel = currentCandidate;
                       isExecutionSuccess = true;
                       break;
@@ -2559,6 +2616,7 @@ export async function executeDAGStream(
                   !isImageNode &&
                   !isAudioNode &&
                   !currentCandidate.out_modalities?.includes("image") &&
+                  !currentCandidate.out_modalities?.includes("audio") &&
                   endpoint.startsWith("@cf/")
                 ) {
                   // Text Model Execution with token-by-token streaming on tail node (guarded against context window overflow)

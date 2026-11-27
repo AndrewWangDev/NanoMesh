@@ -392,7 +392,7 @@ async function runJointJevPass(
         "【当前分支摘要延续】：属于当前活跃分支且上下文已自洽包含在当前分支最新产物摘要中，仅需文本层面加工或直接使用缓存摘要。";
       if (hasHistoricalMedia || scopedCandidates.length > 0) {
         intentCriteria.REBIND_ROOT =
-          "【穿透回溯底层资产】：属于当前活跃分支（或指定资产），但产物摘要缺失细节，必须穿透重新读取底层原始图片/音频/文档。";
+          "【穿透回溯底层资产】：属于当前活跃分支（或指定资产），但产物摘要缺失细节，或该资产为来源=AI生成产物且L1文本缓存=无而用户要求查看/描述/核对图像画面细节，必须穿透读取底层原始图片/音频/文档。";
       }
     }
     if (otherBranches.length > 0 && !hasNewUploads) {
@@ -726,16 +726,26 @@ export function applyIntentInvariantGuard(
     intent = activeHasRaw ? "REBIND_ROOT" : "ANCHOR_TAIL";
   }
 
-  // Invariant 3: Ensure ANCHOR_TAIL does not leak RAW_MEDIA heavy assets
+  // Invariant 3: Ensure ANCHOR_TAIL does not leak RAW_MEDIA heavy assets,
+  // except unperceived AI-generated media explicitly bound as RAW_MEDIA promotes to REBIND_ROOT.
   if (intent === "ANCHOR_TAIL") {
-    for (const [id, mode] of bindingMap.entries()) {
+    const hasUnperceivedGeneratedRaw = Array.from(bindingMap.entries()).some(([id, mode]) => {
+      if (mode !== "RAW_MEDIA") return false;
       const asset = historicalMap.get(id);
-      if (
-        asset &&
-        (asset.modality === "image" || asset.modality === "audio") &&
-        mode === "RAW_MEDIA"
-      ) {
-        bindingMap.set(id, asset.has_cached_text ? "CACHED_TEXT" : "DROP");
+      return !!asset && asset.origin === "generated" && !asset.has_cached_text;
+    });
+    if (hasUnperceivedGeneratedRaw) {
+      intent = "REBIND_ROOT";
+    } else {
+      for (const [id, mode] of bindingMap.entries()) {
+        const asset = historicalMap.get(id);
+        if (
+          asset &&
+          (asset.modality === "image" || asset.modality === "audio") &&
+          mode === "RAW_MEDIA"
+        ) {
+          bindingMap.set(id, asset.has_cached_text ? "CACHED_TEXT" : "DROP");
+        }
       }
     }
   }

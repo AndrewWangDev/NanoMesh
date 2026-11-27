@@ -3,8 +3,107 @@ import {
   ArtifactBundle,
   AssetDescriptor,
   InstantiatedDAGNode,
+  MediaArtifact,
+  PerceptualCacheEntry,
   UnifiedProtocolEnvelope
 } from "./types";
+
+const HANDOVER_KEY_MEDIA = "__nm_generated_media";
+const HANDOVER_KEY_CONSUMED = "__nm_consumed_assets";
+const HANDOVER_KEY_PERCEPTUAL = "__nm_perceptual_updates";
+const HANDOVER_KEY_ALLOW_FAILOVER = "__nm_allow_standby_failover";
+
+export interface ExtractedHandoverBundle {
+  nodeTextOutputs: Record<string, string>;
+  generatedMedia: MediaArtifact[];
+  consumedAssetIds: string[];
+  perceptualUpdates: PerceptualCacheEntry[];
+  allowStandbyFailover?: boolean;
+}
+
+/**
+ * Serializes node text outputs together with Phase 1 generated media, consumed asset IDs,
+ * perceptual cache updates, and standby failover policy into step_outputs_json.
+ */
+export function serializeHandoverBundleToStepOutputs(params: {
+  nodeTextOutputs: Record<string, string>;
+  generatedMedia: MediaArtifact[];
+  consumedAssetIds: string[];
+  perceptualUpdates: PerceptualCacheEntry[];
+  allowStandbyFailover: boolean;
+}): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(params.nodeTextOutputs || {})) {
+    if (!k.startsWith("__nm_") && typeof v === "string") {
+      out[k] = v;
+    }
+  }
+  if (params.generatedMedia.length > 0) {
+    out[HANDOVER_KEY_MEDIA] = JSON.stringify(params.generatedMedia);
+  }
+  if (params.consumedAssetIds.length > 0) {
+    out[HANDOVER_KEY_CONSUMED] = JSON.stringify(params.consumedAssetIds);
+  }
+  if (params.perceptualUpdates.length > 0) {
+    out[HANDOVER_KEY_PERCEPTUAL] = JSON.stringify(params.perceptualUpdates);
+  }
+  out[HANDOVER_KEY_ALLOW_FAILOVER] = params.allowStandbyFailover ? "true" : "false";
+  return out;
+}
+
+/**
+ * Extracts node text outputs and Phase 1 server-trusted multimodal bundle state from step_outputs_json.
+ */
+export function extractHandoverBundleFromStepOutputs(
+  stepOutputs?: Record<string, string>
+): ExtractedHandoverBundle {
+  const nodeTextOutputs: Record<string, string> = {};
+  let generatedMedia: MediaArtifact[] = [];
+  let consumedAssetIds: string[] = [];
+  let perceptualUpdates: PerceptualCacheEntry[] = [];
+  let allowStandbyFailover: boolean | undefined = undefined;
+
+  if (!stepOutputs || typeof stepOutputs !== "object") {
+    return {
+      nodeTextOutputs,
+      generatedMedia,
+      consumedAssetIds,
+      perceptualUpdates,
+      allowStandbyFailover
+    };
+  }
+
+  for (const [k, v] of Object.entries(stepOutputs)) {
+    if (k === HANDOVER_KEY_MEDIA) {
+      try {
+        const parsed = JSON.parse(v);
+        if (Array.isArray(parsed)) generatedMedia = parsed;
+      } catch {}
+    } else if (k === HANDOVER_KEY_CONSUMED) {
+      try {
+        const parsed = JSON.parse(v);
+        if (Array.isArray(parsed)) consumedAssetIds = parsed.map(String);
+      } catch {}
+    } else if (k === HANDOVER_KEY_PERCEPTUAL) {
+      try {
+        const parsed = JSON.parse(v);
+        if (Array.isArray(parsed)) perceptualUpdates = parsed;
+      } catch {}
+    } else if (k === HANDOVER_KEY_ALLOW_FAILOVER) {
+      allowStandbyFailover = v !== "false";
+    } else if (!k.startsWith("__nm_") && typeof v === "string") {
+      nodeTextOutputs[k] = v;
+    }
+  }
+
+  return {
+    nodeTextOutputs,
+    generatedMedia,
+    consumedAssetIds,
+    perceptualUpdates,
+    allowStandbyFailover
+  };
+}
 
 export interface NodeExecutionContext {
   claimed_assets: AssetDescriptor[];
@@ -79,6 +178,8 @@ export function sliceEnvelopeForNode(
   const isHeadNode = node.role.in_degree === 0;
   const isTailNode = node.role.out_degree === 0;
   const isMaskedHeadNode = isHeadNode && !isTailNode;
+  const isSensoryHeadRole =
+    node.role.in_modalities.includes("image") || node.role.in_modalities.includes("audio");
 
   if (Array.isArray(node.claimed_assets) && node.claimed_assets.length > 0) {
     for (const preBound of node.claimed_assets) {
@@ -96,9 +197,9 @@ export function sliceEnvelopeForNode(
 
       const isSensoryModality = asset.modality === "image" || asset.modality === "audio";
 
-      // Masked head nodes focus purely on sensory feature extraction
-      // and do not consume cognitive documents (text, text_doc).
-      if (isMaskedHeadNode && !isSensoryModality) {
+      // Sensory masked head nodes focus purely on image/audio extraction
+      // and leave cognitive documents (text, text_doc) for downstream synthesis nodes.
+      if (isMaskedHeadNode && isSensoryHeadRole && !isSensoryModality) {
         continue;
       }
 
