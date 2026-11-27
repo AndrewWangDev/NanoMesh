@@ -788,6 +788,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       
       // Quota
       window.currentUser = user;
+      window.historyAccountId = user.user_id;
       document.getElementById('dropdown-points').textContent = (user.credits || 0);
       const settingsPoints = document.getElementById('settings-points-display');
       if (settingsPoints) settingsPoints.textContent = (user.credits || 0);
@@ -804,6 +805,12 @@ document.addEventListener('DOMContentLoaded', async () => {
           const res = await fetch('/api/auth/me');
           if (res.ok) {
             const data = await res.json();
+            if (window.historyAccountId !== data.user_id) {
+              window.historyAccountId = null;
+              renderHistoryList();
+              window.location.reload();
+              return;
+            }
             window.currentUser = data;
             user = data;
             const cd = document.getElementById('credits-display');
@@ -857,6 +864,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   document.getElementById('logout-btn')?.addEventListener('click', async () => {
+    window.historyAccountId = null;
+    renderHistoryList();
     await fetch('/api/auth/logout', { method: 'POST' });
     window.location.href = '/login.html';
   });
@@ -2217,7 +2226,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     currentMenuTraceId = traceId;
-    const history = JSON.parse(localStorage.getItem('nanomesh_trace_history') || '[]');
+    const history = readLocalHistory();
     const item = history.find(x => x.id === traceId);
     if (!item) return;
 
@@ -2266,92 +2275,94 @@ document.addEventListener('DOMContentLoaded', async () => {
     ).trim();
   }
 
+  function readLocalHistory(accountId = window.historyAccountId) {
+    if (!accountId) return [];
+    return JSON.parse(localStorage.getItem('nanomesh_trace_history:' + accountId) || '[]');
+  }
+
+  function writeLocalHistory(history, accountId = window.historyAccountId) {
+    if (!accountId || window.historyAccountId !== accountId) return;
+    // Keep unsynced copies even when older synced conversations are evicted.
+    const retained = history.filter((item, index) => index < 50 || item.pendingHistoryVersion);
+    localStorage.setItem('nanomesh_trace_history:' + accountId, JSON.stringify(retained));
+  }
+
   async function fetchCloudHistory() {
+    const accountId = window.historyAccountId;
+    if (!accountId) return;
     try {
-      const res = await fetch('/api/history');
+      const res = await fetch('/api/history', { headers: { 'X-History-Account': accountId } });
       if (!res.ok) return;
       const data = await res.json();
-      if (data && Array.isArray(data.sessions)) {
-        let localHistory = JSON.parse(localStorage.getItem('nanomesh_trace_history') || '[]');
-        const cloudSessionIds = new Set(data.sessions.map(s => s.sessionId));
-        const merged = [...data.sessions];
-        for (const localItem of localHistory) {
-          if (localItem.sessionId && !cloudSessionIds.has(localItem.sessionId)) {
-            merged.push(localItem);
-            syncSaveHistoryToCloud(localItem);
-          }
+      if (accountId !== window.historyAccountId || !Array.isArray(data?.sessions)) return;
+
+      const localHistory = readLocalHistory(accountId);
+      const merged = new Map(data.sessions.map(item => [item.sessionId, item]));
+      for (const item of localHistory) {
+        if (!merged.has(item.sessionId) || item.pendingHistoryVersion) {
+          merged.set(item.sessionId, item);
         }
-        merged.sort((a, b) => {
-          if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
-          return (b.timestamp || 0) - (a.timestamp || 0);
-        });
-        localStorage.setItem('nanomesh_trace_history', JSON.stringify(merged.slice(0, 50)));
-        renderHistoryList();
       }
+      const sorted = [...merged.values()].sort((a, b) => {
+        if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
+        return (b.timestamp || 0) - (a.timestamp || 0);
+      });
+      writeLocalHistory(sorted, accountId);
+      renderHistoryList();
     } catch (e) {
       console.warn('Failed to sync cloud history:', e);
     }
   }
 
   async function syncSaveHistoryToCloud(record) {
-    if (!record || !record.sessionId) return { ok: false, status: 0 };
-    try {
-      const compactRounds = Array.isArray(record.rounds)
-        ? record.rounds.map(r => {
-            if (!r || typeof r !== 'object') return r;
-            const { gitStateSnapshot: _dropSnap, ...restRound } = r;
-            return restRound;
-          })
-        : [];
-      let payloadRecord = { ...record, rounds: compactRounds };
-      let res = await fetch('/api/history', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payloadRecord)
+    const accountId = window.historyAccountId;
+    if (!accountId || !record?.sessionId) return;
+    const { pendingHistoryVersion, gitStateSnapshot: _localSnapshot, ...payload } = record;
+    if (Array.isArray(payload.rounds)) {
+      payload.rounds = payload.rounds.map(round => {
+        if (!round || typeof round !== 'object') return round;
+        const { gitStateSnapshot: _roundSnapshot, ...fields } = round;
+        return fields;
       });
+    }
+    const isEn = getLocale() === 'en';
+    try {
+      const res = await fetch('/api/history', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-History-Account': accountId },
+        body: JSON.stringify(payload)
+      });
+      if (accountId !== window.historyAccountId) return;
+      const history = readLocalHistory(accountId);
+      const saved = history.find(item => item.sessionId === record.sessionId);
+      if (!saved || saved.pendingHistoryVersion !== pendingHistoryVersion) return;
 
-      // PLAN-06: Progressively prune older rounds on 413 Payload Too Large (keep newest rounds)
-      if (res.status === 413 && compactRounds.length > 1) {
-        const pruneSteps = [
-          Math.max(1, Math.floor(compactRounds.length / 2)),
-          Math.max(1, Math.min(5, compactRounds.length - 1)),
-          1
-        ];
-        for (const keepCount of pruneSteps) {
-          payloadRecord = { ...record, rounds: compactRounds.slice(-keepCount) };
-          res = await fetch('/api/history', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payloadRecord)
-          });
-          if (res.status !== 413) break;
-        }
+      if (res.ok) {
+        delete saved.pendingHistoryVersion;
+        writeLocalHistory(history, accountId);
+      } else {
+        localToast(isEn
+          ? 'This conversation could not sync. The full copy is saved on this device.'
+          : '本次未同步，完整对话已保留在此设备。', 'warning');
       }
-
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => ({}));
-        const errMsg = res.status === 413
-          ? '云端历史同步失败（会话快照体积超出 512KB 上限），建议开启新对话或清理冗余附件。'
-          : `云端历史同步异常 (HTTP ${res.status}): ${errBody.message || errBody.error || '请稍后重试'}`;
-        console.warn('[HistorySync]', errMsg);
-        if (typeof window !== 'undefined' && typeof window.onCloudHistorySyncError === 'function') {
-          window.onCloudHistorySyncError(res.status, errMsg);
-        }
-        return { ok: false, status: res.status, error: errMsg };
-      }
-      return { ok: true, status: res.status };
+      renderHistoryList();
     } catch (e) {
       console.warn('Failed to persist history to cloud:', e);
-      return { ok: false, status: 0, error: e?.message || 'network_error' };
+      if (accountId === window.historyAccountId) {
+        localToast(isEn
+          ? 'This conversation could not sync. The full copy is saved on this device.'
+          : '本次未同步，完整对话已保留在此设备。', 'warning');
+      }
     }
   }
 
   async function syncHistoryItemUpdate(sessionId, patchData) {
-    if (!sessionId) return;
+    const accountId = window.historyAccountId;
+    if (!sessionId || !accountId) return;
     try {
       await fetch('/api/history/' + encodeURIComponent(sessionId), {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-History-Account': accountId },
         body: JSON.stringify(patchData)
       });
     } catch (e) {
@@ -2360,11 +2371,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   async function syncHistoryItemDelete(sessionId) {
-    if (!sessionId) return { ok: true, status: 200 };
+    const accountId = window.historyAccountId;
+    if (!sessionId || !accountId) return { ok: false, status: 401 };
     try {
       const res = await fetch('/api/history/' + encodeURIComponent(sessionId), {
-        method: 'DELETE'
+        method: 'DELETE',
+        headers: { 'X-History-Account': accountId }
       });
+      if (accountId !== window.historyAccountId) return { ok: false, status: 409 };
       if (res.ok || res.status === 404) {
         return { ok: true, status: res.status };
       }
@@ -2393,11 +2407,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       const traceId = currentMenuTraceId;
       closeFixedTraceMenu();
       if (!traceId) return;
-      const history = JSON.parse(localStorage.getItem('nanomesh_trace_history') || '[]');
+      const history = readLocalHistory();
       const target = history.find(x => x.id === traceId);
       if (target) {
         target.pinned = !target.pinned;
-        localStorage.setItem('nanomesh_trace_history', JSON.stringify(history));
+        writeLocalHistory(history);
         renderHistoryList();
         syncHistoryItemUpdate(target.sessionId || target.id, { pinned: target.pinned });
       }
@@ -2409,14 +2423,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       const traceId = currentMenuTraceId;
       closeFixedTraceMenu();
       if (!traceId) return;
-      const history = JSON.parse(localStorage.getItem('nanomesh_trace_history') || '[]');
+      const history = readLocalHistory();
       const target = history.find(x => x.id === traceId);
       if (target) {
         const promptMsg = (typeof t === 'function' && t('history.renamePrompt')) || '重命名此条记录:';
         const newTitle = window.prompt(promptMsg, target.title || '');
         if (newTitle !== null && newTitle.trim() && newTitle.trim() !== target.title) {
           target.title = newTitle.trim();
-          localStorage.setItem('nanomesh_trace_history', JSON.stringify(history));
+          writeLocalHistory(history);
           renderHistoryList();
           syncHistoryItemUpdate(target.sessionId || target.id, { title: target.title });
         }
@@ -2429,7 +2443,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const traceId = currentMenuTraceId;
       closeFixedTraceMenu();
       if (!traceId) return;
-      const history = JSON.parse(localStorage.getItem('nanomesh_trace_history') || '[]');
+      const history = readLocalHistory();
       const itemToDelete = history.find(x => x.id === traceId);
       if (!itemToDelete) return;
       const deleteRes = await syncHistoryItemDelete(itemToDelete.sessionId || itemToDelete.id);
@@ -2437,9 +2451,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         localToast(deleteRes.message || '当前会话正在运行中，请完成后再删除。', 'warning');
         return;
       }
-      const nextHistory = JSON.parse(localStorage.getItem('nanomesh_trace_history') || '[]')
+      const nextHistory = readLocalHistory()
         .filter(x => x.id !== traceId);
-      localStorage.setItem('nanomesh_trace_history', JSON.stringify(nextHistory));
+      writeLocalHistory(nextHistory);
       if (itemToDelete.sessionId === window.chatSessionId || itemToDelete.id === window.chatSessionId) {
         resetToRootInterface();
       }
@@ -2522,8 +2536,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function saveTraceToHistory(record) {
+    if (!window.historyAccountId) return;
     try {
-      let history = JSON.parse(localStorage.getItem('nanomesh_trace_history') || '[]');
+      let history = readLocalHistory();
       const sessId = record.sessionId || window.chatSessionId || ('session-' + Date.now());
       let existingIndex = history.findIndex(x => (x.sessionId && x.sessionId === sessId) || x.id === record.id);
 
@@ -2570,6 +2585,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         };
       }
 
+      targetRecord.pendingHistoryVersion = crypto.randomUUID();
       history.unshift(targetRecord);
 
       // Sort pinned first, then timestamp descending
@@ -2579,11 +2595,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
 
       // Maintain up to 50 conversations in history
-      localStorage.setItem('nanomesh_trace_history', JSON.stringify(history.slice(0, 50)));
+      writeLocalHistory(history);
       renderHistoryList();
       syncSaveHistoryToCloud(targetRecord);
     } catch (e) {
       console.warn('Failed to save trace to history:', e);
+      localToast(getLocale() === 'en' ? 'Could not save conversation history on this device.' : '本设备无法保存对话历史。', 'warning');
     }
   }
 
@@ -3075,7 +3092,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const listEl = document.getElementById('history-drawer-list');
     if (!listEl) return;
     try {
-      let history = JSON.parse(localStorage.getItem('nanomesh_trace_history') || '[]');
+      let history = readLocalHistory();
       let updated = false;
       history.forEach((item, idx) => {
         if (!item.id) {
@@ -3084,7 +3101,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
       });
       if (updated) {
-        localStorage.setItem('nanomesh_trace_history', JSON.stringify(history));
+        writeLocalHistory(history);
       }
 
       // Sort pinned items to the very top, then descending by timestamp
@@ -3145,7 +3162,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Clicking card restores entire conversation into chat view and DAG canvas
         card.onclick = (e) => {
           if (e.target.closest('.trace-actions') || e.target.closest('.trace-more-btn')) return;
-          const hList = JSON.parse(localStorage.getItem('nanomesh_trace_history') || '[]');
+          const hList = readLocalHistory();
           const target = hList.find(x => x.id === traceId);
           if (target) {
             restoreConversationFromHistory(target);
@@ -3995,6 +4012,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     if (window._currentRoundFrozenInput) {
       window._currentRoundFrozenInput.candidateRevision = null;
+      const baseId = window._currentRoundFrozenInput.baseRunId;
+      if (baseId && !window.gitState?.commits?.[baseId]) {
+        window._currentRoundFrozenInput.baseRunId = null;
+        window._currentRoundFrozenInput.frozenResolvedPlan = null;
+      }
     }
   }
 
@@ -4288,6 +4310,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     if (window._currentRoundFrozenInput) {
       window._currentRoundFrozenInput.candidateRevision = null;
+      const baseId = window._currentRoundFrozenInput.baseRunId;
+      if (baseId && !window.gitState?.commits?.[baseId]) {
+        window._currentRoundFrozenInput.baseRunId = null;
+        window._currentRoundFrozenInput.frozenResolvedPlan = null;
+      }
     }
     window._currentStagedNewFiles = [];
     window._currentRoundGeneratedAssets = [];
@@ -4375,6 +4402,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     window._activeServerRunId = null;
     window._pendingClientTailCommit = null;
 
+    const gsAtPreflight = window.gitState || createEmptyGitState();
+    const activeBranchHeadAtPreflight = gsAtPreflight.branches?.[gsAtPreflight.activeBranchId || 'main']?.headCommitId || null;
+    const currentRoundBaseId = window._currentRoundFrozenInput?.baseRunId || null;
+    const resolvedSwitchBaseCommitId =
+      currentRoundBaseId && gsAtPreflight.commits?.[currentRoundBaseId]
+        ? currentRoundBaseId
+        : (!currentRoundBaseId && activeBranchHeadAtPreflight && gsAtPreflight.commits?.[activeBranchHeadAtPreflight] && !window._isCurrentTurnRolledBack)
+          ? activeBranchHeadAtPreflight
+          : undefined;
+    const effectiveSwitchIsReRun = !!(reRouteOptions.isSwitch && resolvedSwitchBaseCommitId);
+
     if (!reRouteOptions.isSwitch) {
       window._stagedCanvasDraft = null;
       window.originalNodeConfigs = {};
@@ -4400,9 +4438,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         revision: 1
       };
     } else if (window._currentRoundFrozenInput) {
-      // In-flight candidate revision (NOT committed yet until execution completes successfully)
-      const nextRev = (window._currentRoundFrozenInput.committedRevision || window._currentRoundFrozenInput.revision || 1) + 1;
-      window._currentRoundFrozenInput.candidateRevision = nextRev;
+      if (effectiveSwitchIsReRun) {
+        // In-flight candidate revision (NOT committed yet until execution completes successfully)
+        const nextRev = (window._currentRoundFrozenInput.committedRevision || window._currentRoundFrozenInput.revision || 1) + 1;
+        window._currentRoundFrozenInput.candidateRevision = nextRev;
+      } else {
+        window._currentRoundFrozenInput.baseRunId = null;
+        window._currentRoundFrozenInput.candidateRevision = null;
+        window._currentRoundFrozenInput.committedRevision = 1;
+        window._currentRoundFrozenInput.revision = 1;
+      }
     }
 
     // Trigger Stage 2: The "Panic" Split Transition
@@ -4410,11 +4455,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     setWorkflowExecutionLocked(true);
 
     // Local UI Run ID for scoping DOM rows before server mints authoritative run_id
-    const candidateRev = (reRouteOptions.isSwitch && window._currentRoundFrozenInput)
+    const candidateRev = (effectiveSwitchIsReRun && window._currentRoundFrozenInput)
       ? (window._currentRoundFrozenInput.candidateRevision || (window._currentRoundFrozenInput.revision || 1) + 1)
       : 1;
-    const runId = (reRouteOptions.isSwitch && window._currentRoundFrozenInput?.baseRunId)
-      ? `${window._currentRoundFrozenInput.baseRunId}-rev${candidateRev}`
+    const runId = (effectiveSwitchIsReRun && resolvedSwitchBaseCommitId)
+      ? `${resolvedSwitchBaseCommitId}-rev${candidateRev}`
       : 'run-' + Date.now();
     currentActiveRunId = runId;
 
@@ -4604,10 +4649,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (reRouteOptions.isSwitch && window._currentRoundFrozenInput && Array.isArray(window._currentRoundFrozenInput.frozenAssets)) {
       currentAssets = JSON.parse(JSON.stringify(window._currentRoundFrozenInput.frozenAssets)).map(f => ({
         ...f,
-        isNew: false
+        isNew: effectiveSwitchIsReRun ? false : !!f.isNew
       }));
     } else if (reRouteOptions.isSwitch && Array.isArray(window.currentRoundAssets)) {
-      currentAssets = window.currentRoundAssets.map(f => ({ ...f, isNew: false, modality: resolveModality(f) }));
+      currentAssets = window.currentRoundAssets.map(f => ({
+        ...f,
+        isNew: effectiveSwitchIsReRun ? false : !!f.isNew,
+        modality: resolveModality(f)
+      }));
     } else if (hasCommittedHistory) {
       currentAssets = [...window._currentStagedNewFiles];
     } else {
@@ -4630,7 +4679,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       r2Key: f.r2Key || f.r2_key,
       previewUrl: f.previewUrl || f.url || '',
       inMemoryText: f.inMemoryText,
-      isNew: reRouteOptions.isSwitch ? false : !!f.isNew
+      isNew: effectiveSwitchIsReRun ? false : !!f.isNew
     }));
 
     // Seal frozen assets baseline for new round
@@ -4673,7 +4722,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Build Branch Catalog from Git Branches (no hardcoded media overrides)
     const activeBranchId = gs.activeBranchId || window.activeBranchId || 'main';
     const activeBranch = gs.branches[activeBranchId] || window.sessionBranches?.[activeBranchId];
-    const activeBranchSummary = reRouteOptions.isSwitch
+    const activeBranchSummary = effectiveSwitchIsReRun
       ? undefined
       : ((activeBranch && activeBranch.lastValidSummary)
           || window.currentDagBaseSummary
@@ -4693,7 +4742,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const effectiveUserText = (reRouteOptions.isSwitch && window._currentRoundFrozenInput)
       ? window._currentRoundFrozenInput.userText
       : userText;
-    const effectiveBaseSummary = (reRouteOptions.isSwitch && window._currentRoundFrozenInput)
+    const effectiveBaseSummary = (effectiveSwitchIsReRun && window._currentRoundFrozenInput)
       ? ''
       : (window.currentDagBaseSummary || '');
     const effectiveTargetLang = (reRouteOptions.isSwitch && window._currentRoundFrozenInput?.targetLanguage)
@@ -4755,8 +4804,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         signal: window.activeChatAbortController.signal,
         body: JSON.stringify({
           clientOpId,
-          isReRun: !!reRouteOptions.isSwitch,
-          baseCommitId: reRouteOptions.isSwitch ? (window._currentRoundFrozenInput?.baseRunId || window.gitState?.branches?.[window.gitState?.activeBranchId || 'main']?.headCommitId || undefined) : undefined,
+          isReRun: effectiveSwitchIsReRun,
+          baseCommitId: effectiveSwitchIsReRun ? resolvedSwitchBaseCommitId : undefined,
           envelope,
           disableBrowserInference: !!window.disableLocalInference,
           reRouteMode: reRouteOptions.reRouteMode || 'normal',
@@ -4768,7 +4817,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             ? undefined 
             : (reRouteOptions.customRolePrompts || (reRouteOptions.isSwitch ? window.activeCustomRolePrompts : undefined)),
           customNodePrompt: reRouteOptions.customNodePrompt,
-          hasPreviousRound: reRouteOptions.isSwitch
+          hasPreviousRound: effectiveSwitchIsReRun
             ? false
             : ((gs.commitOrder || []).length > 0 || !!effectiveBaseSummary),
           previousRoundSummary: effectiveBaseSummary || undefined,
@@ -4784,7 +4833,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           branchCatalog,
           perceptualCache: gs.perceptualCacheIndex || {},
           resolvedClarificationTargetBranchId: resolvedClarificationTargetBranchId || undefined,
-          frozenResolvedPlan: reRouteOptions.isSwitch ? (window._currentRoundFrozenInput?.frozenResolvedPlan || undefined) : undefined,
+          frozenResolvedPlan: effectiveSwitchIsReRun ? (window._currentRoundFrozenInput?.frozenResolvedPlan || undefined) : undefined,
           capabilities: {
             webgpu_handover_v3: true
           }
@@ -4950,7 +4999,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         return streamedOutput;
       }
 
-      let fullOutput = await pumpSSEStream(res.body, assistantId, userText, { isSwitch: !!reRouteOptions.isSwitch });
+      let fullOutput = await pumpSSEStream(res.body, assistantId, userText, { isSwitch: !!reRouteOptions.isSwitch, isReRun: effectiveSwitchIsReRun });
 
       // Await in-browser local execution if dispatched
       if (window._activeLocalRunnerPromise) {
@@ -4959,7 +5008,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (clientOutput) fullOutput = clientOutput;
         } catch (clientErr) {
           console.error('Local runner execution error:', clientErr);
-          rollbackStagedCanvasDraft();
+          rollbackTurnToPreFlight();
         } finally {
           window._activeLocalRunnerPromise = null;
         }
@@ -5125,7 +5174,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       if (data.run_id) {
         window._activeServerRunId = data.run_id;
-        if (!streamOptions?.isSwitch && window._currentRoundFrozenInput && !data.is_clarification_required) {
+        if (!streamOptions?.isReRun && window._currentRoundFrozenInput && !data.is_clarification_required) {
           window._currentRoundFrozenInput.baseRunId = data.run_id;
         }
       }
@@ -5183,7 +5232,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const isMultiRound = Boolean(data.reasoning_trace?.is_multi_round && data.reasoning_trace?.intent_state);
       const intentState = data.reasoning_trace?.intent_state;
       window._pendingRoundTrace = data.reasoning_trace || null;
-      if (!streamOptions?.isSwitch && window._currentRoundFrozenInput && !data.is_clarification_required) {
+      if (!streamOptions?.isReRun && window._currentRoundFrozenInput && !data.is_clarification_required) {
         window._currentRoundFrozenInput.frozenResolvedPlan = {
           intent_state: intentState || null,
           target_branch_id: data.reasoning_trace?.target_branch_id,
@@ -5385,6 +5434,12 @@ document.addEventListener('DOMContentLoaded', async () => {
           };
         });
       }
+    } else if (event === 'billing_status') {
+      const isEn = getLocale() === 'en';
+      const pending = data.status === 'pending';
+      localToast(pending
+        ? (isEn ? 'Billing is pending. The server will retry it.' : '积分待结算，服务端会重试。')
+        : (isEn ? 'Billing could not be confirmed for this run.' : '本次积分结算暂无法确认。'), 'warning');
     } else if (event === 'node_status') {
       const isEn = getLocale() === 'en';
       const targetNodeId = data.node_id || data.role_id;
@@ -5482,13 +5537,15 @@ document.addEventListener('DOMContentLoaded', async () => {
           diagEl.id = 'preflight-diag-' + currentActiveAssistantId;
           diagEl.className = 'system-preflight-diagnostics';
           diagEl.innerHTML = `
-            <div class="preflight-title">⚡ [NanoMesh Client-Side Dispatcher]</div>
-            <div class="preflight-line">✓ ${isEn ? 'Cloud JEV Arbitration Passed: Template & Safety Verified' : '云端 JEV 意图仲裁通过: 模板与安全核准'}</div>
-            <div class="preflight-line">✓ ${isEn ? 'Assigned In-Browser Compute' : '指派端侧本地算力'}: ${escapeHtml(modelName)}</div>
+            <div class="preflight-title">⚡ [NanoMesh Dispatcher]</div>
+            <div class="preflight-line">✓ ${isEn ? 'Routing and safety checks passed' : '已通过编排与安全校验'}</div>
+            <div class="preflight-line">${isEn ? 'Attempting in-browser inference' : '正在尝试端侧推理'}: ${escapeHtml(modelName)}</div>
+            <div class="preflight-line" id="diag-actual-executor-${currentActiveAssistantId}" hidden></div>
             <div class="preflight-line" id="diag-worker-status-${currentActiveAssistantId}">⚙️ ${isEn ? 'Initializing WebGPU sandbox (Transformers.js)...' : '初始化 WebGPU 推理沙箱 (Transformers.js)...'}</div>
           `;
           stepsContainer.parentNode.insertBefore(diagEl, stepsContainer);
         }
+        diagEl.dataset.browserNodeId = targetNodeId;
       }
 
       // 2. Step Badge in right chat flow
@@ -5525,7 +5582,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       window._activeLocalRunnerPromise = new Promise((resolve, reject) => {
         try {
           if (!window._localWorker) {
-            window._localWorker = new Worker('/local-runner.js?v=1791660000000', { type: 'module' });
+            window._localWorker = new Worker('/local-runner.js?v=20261127-runtime', { type: 'module' });
           }
           const worker = window._localWorker;
 
@@ -5547,8 +5604,15 @@ document.addEventListener('DOMContentLoaded', async () => {
           };
           resetWatchdog();
 
+          let workerCrashed = false;
           worker.onerror = (err) => {
+            if (workerCrashed) return;
+            workerCrashed = true;
             if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+            if (window._localWorker === worker) {
+              worker.terminate();
+              window._localWorker = null;
+            }
             console.error('[LocalRunner] Worker thread error:', err);
             const meta = document.getElementById('node-meta-' + targetNodeId);
             if (meta) meta.textContent = '❌ 本地推理异常';
@@ -5573,7 +5637,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     })
                   });
                   if (failoverRes.ok && pumpSSEStream) {
-                    const failoverOutput = await pumpSSEStream(failoverRes.body, assistantId, userPrompt, { isContinuation: true, isSwitch: !!streamOptions.isSwitch });
+                    const failoverOutput = await pumpSSEStream(failoverRes.body, assistantId, userPrompt, { isContinuation: true, isSwitch: !!streamOptions.isSwitch, isReRun: !!streamOptions.isReRun });
                     resolve(failoverOutput);
                     return;
                   }
@@ -5713,7 +5777,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     }
 
                     if (pumpSSEStream) {
-                      const contOutput = await pumpSSEStream(continueRes.body, assistantId, userPrompt, { isContinuation: true, isSwitch: !!streamOptions.isSwitch });
+                      const contOutput = await pumpSSEStream(continueRes.body, assistantId, userPrompt, { isContinuation: true, isSwitch: !!streamOptions.isSwitch, isReRun: !!streamOptions.isReRun });
                       resolve(contOutput);
                     } else {
                       resolve(msg.output || '');
@@ -5841,7 +5905,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                         })
                       });
                     };
-                    const showTailRetryAbandonBanner = (rawMsg, allowAbandon = true) => {
+                    const showTailRetryAbandonBanner = (rawMsg, allowAbandon) => {
                       window._isCurrentTurnRolledBack = true;
                       setAwaitingCommitResolutionState(true, {
                         run_id: serverRunId,
@@ -5855,7 +5919,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                         const banner = document.createElement('div');
                         banner.className = 'dag-execution-error-banner';
                         banner.style.cssText = 'color:#f59e0b; background:rgba(245,158,11,0.1); border:1px solid rgba(245,158,11,0.35); padding:10px 14px; border-radius:8px; margin-top:10px; font-size:0.86rem;';
-                        banner.innerHTML = `<div>⚠️ 状态暂存冲突或存储暂时繁忙（本地状态未提交）：${escapeHtml(rawMsg || '请点击重试保存或放弃此结果')}</div>`;
+                        banner.innerHTML = `<div>⚠️ 状态暂存冲突或存储暂时繁忙（本地状态未提交）：${escapeHtml(rawMsg || (allowAbandon ? '请点击重试保存或放弃此结果' : '请点击重试保存'))}</div>`;
                         const btnRow = document.createElement('div');
                         btnRow.style.cssText = 'display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;';
                         const retryBtn = document.createElement('button');
@@ -5900,8 +5964,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                               finalizeCommittedClientTail(s2);
                             } else {
                               const e2 = await r2.json().catch(() => ({}));
-                              if (r2.status >= 500 || e2.can_retry_commit || e2.awaiting_commit) {
-                                showTailRetryAbandonBanner(e2.message || '服务端确认状态已挂起，可点击重试保存或放弃此结果', true);
+                              if (r2.status >= 500 || r2.status === 408 || r2.status === 429 || e2.can_retry_commit || e2.awaiting_commit) {
+                                showTailRetryAbandonBanner(e2.message, e2.awaiting_commit === true);
                               } else {
                                 banner.remove();
                                 setAwaitingCommitResolutionState(false);
@@ -5937,7 +6001,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                       const errJson = await commitRes.json().catch(() => ({}));
                       const isRetryableStatus = commitRes.status >= 500 || commitRes.status === 408 || commitRes.status === 429;
                       if ((errJson.can_retry_commit || isRetryableStatus) && tailCreds.clientCommitToken) {
-                        showTailRetryAbandonBanner(errJson.message || '状态暂存冲突或存储暂时繁忙，请点击重试保存或放弃此结果', true);
+                        showTailRetryAbandonBanner(errJson.message, errJson.awaiting_commit === true);
                         resolve('');
                         return;
                       }
@@ -5996,7 +6060,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     });
 
                     if (failoverRes.ok && pumpSSEStream) {
-                      const failoverOutput = await pumpSSEStream(failoverRes.body, assistantId, userPrompt, { isContinuation: true, isSwitch: !!streamOptions.isSwitch });
+                      const failoverOutput = await pumpSSEStream(failoverRes.body, assistantId, userPrompt, { isContinuation: true, isSwitch: !!streamOptions.isSwitch, isReRun: !!streamOptions.isReRun });
                       resolve(failoverOutput);
                       return;
                     }
@@ -6135,6 +6199,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     } else if (event === 'node_complete') {
       const isEn = getLocale() === 'en';
       const targetNodeId = data.node_id || data.role_id;
+      const diag = document.getElementById('preflight-diag-' + currentActiveAssistantId);
+      const actualExecutor = document.getElementById('diag-actual-executor-' + currentActiveAssistantId);
+      if (diag?.dataset.browserNodeId === targetNodeId && actualExecutor && !data.cache_hit && data.execution_backend) {
+        const backend = data.execution_backend === 'workers_ai'
+          ? 'Workers AI'
+          : (isEn ? 'External inference endpoint' : '外部推理节点');
+        actualExecutor.textContent = `✓ ${isEn ? 'Fallback completed on' : '备用算力已完成'} ${backend}: ${data.model_name || data.model_id}`;
+        actualExecutor.hidden = false;
+      }
       const nodeCard = document.getElementById('dag-node-' + targetNodeId);
       const meta = document.getElementById('node-meta-' + targetNodeId);
       if (nodeCard) {
@@ -6518,8 +6591,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                   round: buildRoundRecord(revAfter, data.run_id, bRun)
                 });
               } else {
+                const retryError = await r.json().catch(() => ({}));
                 retryBtn.disabled = false;
                 abandonBtn.disabled = false;
+                if (retryError.awaiting_commit === true) banner.appendChild(abandonBtn);
+                else abandonBtn.remove();
               }
             } catch {
               retryBtn.disabled = false;
@@ -6609,7 +6685,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         round: currentRoundData
       });
     } else if (event === 'dag_error') {
-      rollbackStagedCanvasDraft();
+      rollbackTurnToPreFlight();
       setWorkflowExecutionLocked(false);
       requestAnimationFrame(() => renderDagSvgConnectors());
       if (streamingRafMap.has(assistantId)) {

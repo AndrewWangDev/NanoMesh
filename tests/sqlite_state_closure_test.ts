@@ -5,6 +5,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { signJWT } from "../src/auth/jwt";
 import { handleChat, handleChatContinue } from "../src/api/chat";
+import worker from "../src/index";
 import {
   acquireBrowserTailCredential,
   acquireSessionExecutionLock,
@@ -24,6 +25,8 @@ import {
   registerStagingGeneratedAsset,
   saveCloudTailResult,
   settleRunBillingPhase,
+  settleOrQueueBillingPhase,
+  retryPendingBillingSettlements,
   sweepPendingR2Cleanups,
   tombstoneAndPurgeSession,
   verifySessionAssetR2Access
@@ -784,33 +787,59 @@ async function runRealSqliteClosureSuite() {
   const creditsBeforePhase = (
     db.prepare("SELECT credits FROM users WHERE user_id = ?").get(userA) as any
   ).credits;
-  assert.equal(
-    await settleRunBillingPhase(env, {
-      userId: userA,
-      runId: "run_billing_idemp",
-      phase: "initial_stream",
-      actualCost: 3,
-      reservedCredits: 5,
-      templateNameZh: "计费测试"
-    }),
-    true
-  );
-  const creditsAfterFirstSettle = (
-    db.prepare("SELECT credits FROM users WHERE user_id = ?").get(userA) as any
-  ).credits;
-  assert.equal(creditsAfterFirstSettle, creditsBeforePhase + 2);
-  // Replay exact same phase -> idempotent no-op!
-  await settleRunBillingPhase(env, {
+  const phase = {
     userId: userA,
     runId: "run_billing_idemp",
     phase: "initial_stream",
     actualCost: 3,
     reservedCredits: 5,
     templateNameZh: "计费测试"
-  });
+  };
+  const count = (table: "credit_ledger" | "run_billing_settlements") =>
+    Number(
+      (db.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE user_id = ?`).get(userA) as any)
+        .count
+    );
+  const ledgerBefore = count("credit_ledger");
+  const markersBefore = count("run_billing_settlements");
+  assert.deepEqual(
+    await Promise.all([settleRunBillingPhase(env, phase), settleRunBillingPhase(env, phase)]),
+    [true, true]
+  );
   assert.equal(
     (db.prepare("SELECT credits FROM users WHERE user_id = ?").get(userA) as any).credits,
-    creditsAfterFirstSettle
+    creditsBeforePhase + 2
+  );
+  assert.equal(count("credit_ledger"), ledgerBefore + 1);
+  assert.equal(count("run_billing_settlements"), markersBefore + 1);
+
+  const retryPhase = {
+    ...phase,
+    phase: "resume_failed_settlement",
+    actualCost: 5,
+    reservedCredits: 3
+  };
+  const failBillingEnv = {
+    ...env,
+    DB: {
+      prepare: env.DB.prepare.bind(env.DB),
+      batch: async () => {
+        throw new Error("Simulated billing batch failure");
+      }
+    } as unknown as D1Database
+  };
+  assert.equal(await settleOrQueueBillingPhase(failBillingEnv, retryPhase), "pending");
+  assert.equal(count("credit_ledger"), ledgerBefore + 1);
+  await Promise.all([retryPendingBillingSettlements(env), retryPendingBillingSettlements(env)]);
+  assert.equal(count("credit_ledger"), ledgerBefore + 2);
+  assert.equal(count("run_billing_settlements"), markersBefore + 2);
+  assert.equal(
+    (db.prepare("SELECT credits FROM users WHERE user_id = ?").get(userA) as any).credits,
+    creditsBeforePhase
+  );
+  assert.equal(
+    (db.prepare("SELECT COUNT(*) AS count FROM pending_billing_settlements").get() as any).count,
+    0
   );
 
   // REV-05: Cloud tail save + transient failure + /commit-retry
@@ -940,6 +969,67 @@ async function runRealSqliteClosureSuite() {
   await hydrateDocumentTextBodies(env, userA, largeDocSess, docRecallList);
   assert.equal((docRecallList[0] as any).in_memory_text, largeDocText);
 
+  // Cron keeps old assets linked to a committed round or an active execution.
+  const cronSessionId = "sess_cron_asset_retention";
+  const cronImage = `tmp/${userA}/preflight/attached.png`;
+  const cronStaging = `tmp/${userA}/preflight/staging.png`;
+  const cronOrphan = `tmp/${userA}/preflight/orphan.png`;
+  const cronFresh = `tmp/${userA}/preflight/fresh.png`;
+  for (const key of [cronImage, cronStaging, cronOrphan, cronFresh]) {
+    await env.R2.put(key, "fixture");
+  }
+  db.prepare(
+    `INSERT INTO session_assets (user_id, session_id, asset_id, modality, r2_key, status)
+     VALUES (?, ?, ?, 'image', ?, ?)`
+  ).run(userA, cronSessionId, "cron-image", cronImage, "COMMITTED");
+  await acquireSessionExecutionLock(env, {
+    userId: userA,
+    sessionId: cronSessionId,
+    runId: "cron-active",
+    clientOpId: "cron-active"
+  });
+  db.prepare(
+    `INSERT INTO session_assets (user_id, session_id, asset_id, modality, r2_key, status)
+     VALUES (?, ?, ?, 'image', ?, ?)`
+  ).run(userA, cronSessionId, "cron-staging", cronStaging, "STAGING");
+  const old = new Date(Date.now() - 25 * 3600 * 1000);
+  const cronObjects = [cronImage, cronStaging, cronOrphan, storedAssetRow.text_r2_key].map(
+    (key) => ({ key, uploaded: old })
+  );
+  cronObjects.push({ key: cronFresh, uploaded: new Date() });
+  const cronEnv = {
+    ...env,
+    R2: {
+      ...r2,
+      list: async () => ({ objects: cronObjects, truncated: false })
+    } as unknown as R2Bucket
+  };
+  const cronFaultEnv = {
+    ...cronEnv,
+    DB: {
+      prepare(sql: string) {
+        if (sql.includes("SELECT a.r2_key")) throw new Error("Simulated asset ledger outage");
+        return env.DB.prepare(sql);
+      }
+    } as unknown as D1Database
+  };
+  await worker.scheduled({} as ScheduledEvent, cronFaultEnv, {} as ExecutionContext);
+  assert.ok(await env.R2.get(cronOrphan), "Cron must leave objects intact if the ledger fails");
+  await worker.scheduled({} as ScheduledEvent, cronEnv, {} as ExecutionContext);
+  for (const key of [cronImage, cronStaging, cronFresh, storedAssetRow.text_r2_key]) {
+    assert.ok(await env.R2.get(key), `Cron must retain ${key}`);
+  }
+  assert.equal(await env.R2.get(cronOrphan), null);
+  const recalledAfterCleanup = [{ ...docRecallList[0], in_memory_text: undefined }];
+  await hydrateDocumentTextBodies(env, userA, largeDocSess, recalledAfterCleanup);
+  assert.equal(recalledAfterCleanup[0].in_memory_text, largeDocText);
+  await finishRunWithoutCommit(env, {
+    userId: userA,
+    sessionId: cronSessionId,
+    runId: "cron-active",
+    outcome: "ABORTED"
+  });
+
   // Pre-cache access denial check (PLAN-03): unowned R2 key must throw BEFORE lookupDeterministicCache!
   const unownedEnv = buildEnvelope("sess_victim_attacker", userA, "Read unowned R2");
   const preCachedKey = await computeDeterministicSignature(
@@ -1020,7 +1110,11 @@ async function runRealSqliteClosureSuite() {
       await handleSaveHistory(
         new Request("https://nanomesh.local/api/history", {
           method: "POST",
-          headers: { "Content-Type": "application/json", Cookie: `session=${tokenA}` },
+          headers: {
+            "X-History-Account": userA,
+            "Content-Type": "application/json",
+            Cookie: `session=${tokenA}`
+          },
           body: JSON.stringify({ sessionId: largeDocSess, rounds: [{ runId: "x" }] })
         }),
         env
@@ -1035,12 +1129,35 @@ async function runRealSqliteClosureSuite() {
   assert.equal(r2.objects.has(storedAssetRow.text_r2_key), false);
   assert.equal(r2.objects.has(stagingKey), false);
 
+  const staleAccountSave = await handleSaveHistory(
+    new Request("https://nanomesh.local/api/history", {
+      method: "POST",
+      headers: { "X-History-Account": userA, Cookie: `session=${tokenB}` },
+      body: JSON.stringify({
+        sessionId: "stale-account-history",
+        rounds: [{ userText: "A's history" }]
+      })
+    }),
+    env
+  );
+  assert.equal(staleAccountSave.status, 409);
+  assert.equal(
+    db
+      .prepare("SELECT 1 FROM user_chat_sessions WHERE user_id = ? AND session_id = ?")
+      .get(userB, "stale-account-history"),
+    undefined
+  );
+
   // PLAN-06: History .slice(-100) retains newest 100 rounds
   const manyRounds = Array.from({ length: 120 }, (_, idx) => ({ round: idx + 1 }));
   const saveManyRes = await handleSaveHistory(
     new Request("https://nanomesh.local/api/history", {
       method: "POST",
-      headers: { "Content-Type": "application/json", Cookie: `session=${tokenA}` },
+      headers: {
+        "X-History-Account": userA,
+        "Content-Type": "application/json",
+        Cookie: `session=${tokenA}`
+      },
       body: JSON.stringify({ sessionId: "sess_many_rounds", rounds: manyRounds })
     }),
     env
@@ -1056,6 +1173,23 @@ async function runRealSqliteClosureSuite() {
     ).rounds_json
   );
   assert.equal(savedRoundsRow.length, 100);
+  const rejectedHistory = await handleSaveHistory(
+    new Request("https://nanomesh.local/api/history", {
+      method: "POST",
+      headers: { "X-History-Account": userA, Cookie: `session=${tokenA}` },
+      body: JSON.stringify({
+        sessionId: "sess_many_rounds",
+        rounds: Array.from({ length: 100 }, () => ({ output: "x".repeat(6000) }))
+      })
+    }),
+    env
+  );
+  assert.equal(rejectedHistory.status, 413);
+  const preservedHistory = db
+    .prepare("SELECT rounds_json FROM user_chat_sessions WHERE user_id = ? AND session_id = ?")
+    .get(userA, "sess_many_rounds") as { rounds_json: string };
+  assert.deepEqual(JSON.parse(preservedHistory.rounds_json), savedRoundsRow);
+
   assert.equal(savedRoundsRow[0].round, 21);
   assert.equal(savedRoundsRow[99].round, 120);
 
@@ -1354,7 +1488,7 @@ async function runRealSqliteClosureSuite() {
   const delBusyExecRes = await handleDeleteHistoryItem(
     new Request(`https://nanomesh.local/api/history/${pathASess}`, {
       method: "DELETE",
-      headers: { Cookie: `session=${tokenR}` }
+      headers: { "X-History-Account": userR, Cookie: `session=${tokenR}` }
     }),
     env,
     pathASess
@@ -1372,7 +1506,32 @@ async function runRealSqliteClosureSuite() {
   );
 
   // Transition into AWAITING_COMMIT -> concurrent delete AND concurrent send still rejected 409; GET /state exposes awaiting_commit!
-  await markSessionAwaitingCommit(env, userR, pathASess, "run_pa_inflight");
+  assert.equal(await markSessionAwaitingCommit(env, userR, pathASess, "run_pa_inflight"), false);
+  await registerAndFreezeDagRunPlan(env, {
+    userId: userR,
+    sessionId: pathASess,
+    runId: "run_pa_inflight",
+    clientOpId: "op_pa_inflight",
+    requestDigest: "pa_inflight",
+    planHash: "ph_pa_inflight",
+    dag: buildSampleDag(),
+    originalEnvelope: buildEnvelope(pathASess, userR, "inflight"),
+    resolvedEnvelope: buildEnvelope(pathASess, userR, "inflight"),
+    isReRun: false,
+    expectedParentCommitId: null,
+    expectedBaseRevision: null
+  });
+  assert.equal(
+    await markSessionAwaitingCommit(
+      env,
+      userR,
+      pathASess,
+      "run_pa_inflight",
+      "wrong-browser-token"
+    ),
+    false
+  );
+  assert.equal(await markSessionAwaitingCommit(env, userR, pathASess, "run_pa_inflight"), true);
   const awaitingSnapRes = await handleGetSessionState(
     new Request(`https://nanomesh.local/api/session/${pathASess}/state`, {
       headers: { Cookie: `session=${tokenR}` }
@@ -1388,7 +1547,7 @@ async function runRealSqliteClosureSuite() {
   const delBusyAwaitingRes = await handleDeleteHistoryItem(
     new Request(`https://nanomesh.local/api/history/${pathASess}`, {
       method: "DELETE",
-      headers: { Cookie: `session=${tokenR}` }
+      headers: { "X-History-Account": userR, Cookie: `session=${tokenR}` }
     }),
     env,
     pathASess
@@ -1407,7 +1566,7 @@ async function runRealSqliteClosureSuite() {
   const delIdleRes = await handleDeleteHistoryItem(
     new Request(`https://nanomesh.local/api/history/${pathASess}`, {
       method: "DELETE",
-      headers: { Cookie: `session=${tokenR}` }
+      headers: { "X-History-Account": userR, Cookie: `session=${tokenR}` }
     }),
     env,
     pathASess
@@ -1876,6 +2035,21 @@ async function runRealSqliteClosureSuite() {
     assert.equal(sessionStateStillHeld?.occupancy_phase, "AWAITING_COMMIT");
 
     // Abandon the failed/pending micro-tuning with the correct matching run_id -> unlocks session & preserves "乙"
+    // The run may have become terminal after the endpoint's initial read.
+    const changePlan = db.prepare(
+      "UPDATE dag_run_plans SET commit_state = ? WHERE user_id = ? AND run_id = ?"
+    );
+    changePlan.run("COMMITTED", userR, badPendingRunId);
+    const blockedRelease = await finishRunWithoutCommit(env, {
+      userId: userR,
+      sessionId: pathBSess,
+      runId: badPendingRunId,
+      outcome: "ABORTED",
+      expectedOccupancyPhase: "AWAITING_COMMIT"
+    });
+    assert.deepEqual(blockedRelease, { success: false, planChanges: 0, sessionChanges: 0 });
+    changePlan.run("PENDING", userR, badPendingRunId);
+
     const abandonRes = await handleAbandonSessionRun(
       new Request(`https://nanomesh.local/api/session/${pathBSess}/abandon`, {
         method: "POST",
@@ -1923,6 +2097,52 @@ async function runRealSqliteClosureSuite() {
     assert.ok(
       promptSentFollowup.includes("乙_画布微调新摘要结果"),
       `Follow-up downstream prompt after abandon must inherit "乙_画布微调新摘要结果". Got: ${promptSentFollowup}`
+    );
+
+    // Retry an uncommitted new turn using canvas route/model override (isReRun: false, no baseCommitId)
+    // even when prior session history exists: must NOT hit base_commit_not_found and must append a new commit!
+    clockOffsetMs += 6000;
+    const retryNewTurnWithSwitchRes = await handleChat(
+      new Request("https://nanomesh.local/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: `session=${tokenR}` },
+        body: JSON.stringify({
+          clientOpId: "op_pb_retry_new_turn_switch",
+          isReRun: false,
+          reRouteMode: "switch_model",
+          chosenTemplateId: "tpl-sql-chat",
+          chosenRoleModels: { "role-sql-chat": "cf_sql_text" },
+          disableBrowserInference: true,
+          envelope: {
+            envelope_id: "e_pb_retry_new_turn",
+            session_id: pathBSess,
+            round_index: 4,
+            instruction_payload: "基于当前乙方案继续改写第四轮"
+          }
+        })
+      }),
+      pathBEnv
+    );
+    assert.equal(retryNewTurnWithSwitchRes.status, 200);
+    const retryNewTurnSse = await retryNewTurnWithSwitchRes.text();
+    assert.ok(
+      retryNewTurnSse.includes("event: dag_complete") &&
+        retryNewTurnSse.includes('"state_committed":true'),
+      `Canvas retry for uncommitted new turn must commit cleanly. SSE=${retryNewTurnSse}`
+    );
+    const snapAfterRetryNewTurn = (await (
+      await handleGetSessionState(
+        new Request(`https://nanomesh.local/api/session/${pathBSess}/state`, {
+          headers: { Cookie: `session=${tokenR}` }
+        }),
+        env,
+        pathBSess
+      )
+    ).json()) as any;
+    assert.equal(
+      snapAfterRetryNewTurn.commit_order.length,
+      4,
+      "Uncommitted new-turn canvas retry must append a new commit rather than overwriting prior commits"
     );
   } finally {
     Date.now = origDateNow;

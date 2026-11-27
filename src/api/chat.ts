@@ -36,7 +36,7 @@ import {
   restoreFrozenInputsForBaseCommit,
   saveCloudTailResult,
   SessionDeletedError,
-  settleRunBillingPhase,
+  settleOrQueueBillingPhase,
   StorageUnavailableError,
   sweepPendingR2Cleanups,
   verifySessionAssetR2Access
@@ -511,10 +511,14 @@ export async function handleChat(
 
   const hasServerHistory = authoritativeState.commit_order.length > 0;
   const isNormalFlow = !body.reRouteMode || body.reRouteMode === "normal";
+  const explicitNewTurnWithCanvasOverrides = body.isReRun === false && !requestedBaseCommitId;
   const effectiveIsReRun =
     isReRun ||
-    (hasServerHistory &&
+    (!explicitNewTurnWithCanvasOverrides &&
+      hasServerHistory &&
       (body.reRouteMode === "switch_template" || body.reRouteMode === "switch_model"));
+  const useAuthoritativeHistoryFlow =
+    hasServerHistory && (isNormalFlow || explicitNewTurnWithCanvasOverrides);
 
   let resolvedBaseCommitId: string | undefined = undefined;
   let expectedParentCommitId: string | null = null;
@@ -586,7 +590,7 @@ export async function handleChat(
     envelope.constraint_context = restored.constraintContext;
     envelope.assets_manifest = restored.assetsManifest;
     restoredReRunPlan = restored.frozenResolvedPlan;
-  } else if (hasServerHistory && isNormalFlow) {
+  } else if (useAuthoritativeHistoryFlow) {
     envelope.assets_manifest = envelope.assets_manifest.filter(
       (a) =>
         a.is_new === true ||
@@ -610,12 +614,12 @@ export async function handleChat(
   const authActiveBranch = effectiveIsReRun
     ? authoritativeState.commits[resolvedBaseCommitId!]?.branch_id ||
       authoritativeState.active_branch_id
-    : hasServerHistory && isNormalFlow
+    : useAuthoritativeHistoryFlow
       ? authoritativeState.active_branch_id
       : body.activeBranchId;
   const authBranchSummary = effectiveIsReRun
     ? undefined
-    : hasServerHistory && isNormalFlow
+    : useAuthoritativeHistoryFlow
       ? authoritativeState.branches[authActiveBranch || "main"]?.last_summary ||
         body.activeBranchSummary
       : body.activeBranchSummary;
@@ -632,19 +636,19 @@ export async function handleChat(
     customNodePrompt: body.customNodePrompt,
     hasPreviousRound: effectiveIsReRun
       ? false
-      : hasServerHistory && isNormalFlow
+      : useAuthoritativeHistoryFlow
         ? true
         : body.hasPreviousRound,
     previousRoundSummary: effectiveIsReRun
       ? undefined
-      : hasServerHistory && isNormalFlow
+      : useAuthoritativeHistoryFlow
         ? authBranchSummary || body.previousRoundSummary
         : body.previousRoundSummary,
     hadMediaAssets: effectiveIsReRun
       ? authoritativeState.session_asset_ledger.some(
           (a) => a.modality === "image" || a.modality === "audio" || a.modality === "text_doc"
         )
-      : hasServerHistory && isNormalFlow
+      : useAuthoritativeHistoryFlow
         ? authoritativeState.session_asset_ledger.some(
             (a) => a.modality === "image" || a.modality === "audio" || a.modality === "text_doc"
           )
@@ -653,19 +657,19 @@ export async function handleChat(
     newUploadModalities,
     sessionAssetLedger: effectiveIsReRun
       ? authoritativeState.session_asset_ledger
-      : hasServerHistory && isNormalFlow
+      : useAuthoritativeHistoryFlow
         ? authoritativeState.session_asset_ledger
         : body.sessionAssetLedger,
     activeBranchId: authActiveBranch,
     activeBranchSummary: authBranchSummary,
     branchCatalog: effectiveIsReRun
       ? authoritativeState.branch_catalog
-      : hasServerHistory && isNormalFlow
+      : useAuthoritativeHistoryFlow
         ? authoritativeState.branch_catalog
         : body.branchCatalog,
     perceptualCache: effectiveIsReRun
       ? { ...authoritativeState.perceptual_cache }
-      : hasServerHistory && isNormalFlow
+      : useAuthoritativeHistoryFlow
         ? { ...authoritativeState.perceptual_cache }
         : body.perceptualCache,
     resolvedClarificationTargetBranchId: effectiveIsReRun
@@ -929,7 +933,7 @@ export async function handleChat(
           ...info
         }),
       onSettlePhaseBilling: (phaseParams) =>
-        settleRunBillingPhase(env, {
+        settleOrQueueBillingPhase(env, {
           userId: session.userId,
           runId,
           templateNameZh: dag.template.name_zh,
@@ -1482,7 +1486,7 @@ export async function handleChatContinue(
         }),
       onSettlePhaseBilling: planRunId
         ? (phaseParams) =>
-            settleRunBillingPhase(env, {
+            settleOrQueueBillingPhase(env, {
               userId: session.userId,
               runId: planRunId,
               templateNameZh: dag.template.name_zh,

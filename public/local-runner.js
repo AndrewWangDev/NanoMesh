@@ -1,12 +1,6 @@
 // public/local-runner.js
 // Dedicated Web Worker for In-Browser Local Model Inference via Transformers.js (WebGPU/Wasm)
 
-// Polyfill Float16Array if not natively supported or if required by WebGPU/ONNX runtime
-import { Float16Array as PolyfillFloat16Array } from 'https://cdn.jsdelivr.net/npm/@petamoriken/float16@3.8.7/browser/float16.mjs';
-if (typeof globalThis.Float16Array === 'undefined') {
-  globalThis.Float16Array = PolyfillFloat16Array;
-}
-
 let generatorPromise = null;
 let currentLoadedEndpoint = null;
 let currentLoadedDevice = null;
@@ -18,6 +12,11 @@ async function getGenerator(modelEndpoint, onProgress, forceDevice = null) {
 
   currentLoadedEndpoint = modelEndpoint;
   generatorPromise = (async () => {
+    // Load the optional polyfill inside the inference request so errors reach the app.
+    if (typeof globalThis.Float16Array === 'undefined') {
+      const { Float16Array } = await import('https://cdn.jsdelivr.net/npm/@petamoriken/float16@3.8.7/browser/float16.mjs');
+      globalThis.Float16Array = Float16Array;
+    }
     // Import Transformers.js v3.8.1 from jsDelivr CDN
     const { pipeline, env, TextStreamer } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1');
 
@@ -117,7 +116,17 @@ async function getGenerator(modelEndpoint, onProgress, forceDevice = null) {
     return { gen, TextStreamer, usedDevice, pipeline, env };
   })();
 
-  return await generatorPromise;
+  const pending = generatorPromise;
+  try {
+    return await pending;
+  } catch (err) {
+    if (generatorPromise === pending) {
+      generatorPromise = null;
+      currentLoadedEndpoint = null;
+      currentLoadedDevice = null;
+    }
+    throw err;
+  }
 }
 
 self.onmessage = async (e) => {

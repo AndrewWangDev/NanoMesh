@@ -48,7 +48,7 @@ export interface ExecutionOptions {
     actualCost: number;
     reservedCredits: number;
     detailLabel?: string;
-  }) => Promise<boolean>;
+  }) => Promise<"settled" | "pending" | "unconfirmed">;
   onSaveCloudTailResult?: (payload: {
     finalOutput: string;
     generatedMedia: MediaArtifact[];
@@ -60,7 +60,7 @@ export interface ExecutionOptions {
     generatedMedia: MediaArtifact[];
     dag: InstantiatedDAG;
   }) => Promise<any>;
-  onMarkAwaitingCommit?: () => Promise<void>;
+  onMarkAwaitingCommit?: () => Promise<boolean>;
   onFinishWithoutCommit?: (params: {
     outcome: "FAILED" | "ABORTED";
     failureStatus?: number | null;
@@ -831,6 +831,33 @@ export async function executeDAGStream(
   let hasEmittedTokens = false;
   let isLedgerSettled = false;
   let totalCost = 0;
+  const billingPhaseKey =
+    options.billingPhaseLabel ||
+    (options.continuationHandshakeId
+      ? `resume_${options.continuationHandshakeId}`
+      : "initial_stream");
+  let phaseSettlement: Promise<"settled" | "pending" | "unconfirmed"> | undefined;
+
+  function settlePhase(actualCost: number, detailLabel: string) {
+    if (!options.onSettlePhaseBilling) return undefined;
+    if (!phaseSettlement) {
+      const reservedCredits = options.hasPreDeducted ? (options.preDeductedCredits ?? 1) : 0;
+      // Capture the original reservation once before overlapping completion/cancel handlers can run.
+      options.hasPreDeducted = false;
+      phaseSettlement = options
+        .onSettlePhaseBilling({
+          phase: billingPhaseKey,
+          actualCost,
+          reservedCredits,
+          detailLabel
+        })
+        .catch((err) => {
+          console.error("[Dispatcher] Billing confirmation failed:", err);
+          return "unconfirmed" as const;
+        });
+    }
+    return phaseSettlement;
+  }
 
   return new ReadableStream({
     async start(controller) {
@@ -842,8 +869,22 @@ export async function executeDAGStream(
         } catch (e) {}
       }
 
+      async function reportPhaseSettlement(actualCost: number, detailLabel: string) {
+        const status = await settlePhase(actualCost, detailLabel);
+        if (status === "settled") {
+          isLedgerSettled = true;
+          triggerLowBalanceCheckAsync(env, options.userId, options.ctx);
+        } else if (status) {
+          sendEvent("billing_status", { status });
+        }
+      }
+
       async function refundReservedCredit() {
         if (options.hasPreDeducted) {
+          if (options.onSettlePhaseBilling) {
+            await reportPhaseSettlement(0, "退回本阶段预扣积分");
+            return;
+          }
           options.hasPreDeducted = false;
           const reserved = options.preDeductedCredits ?? 1;
           try {
@@ -1072,28 +1113,15 @@ export async function executeDAGStream(
         const perceptualCacheUpdates: PerceptualCacheEntry[] = [];
 
         let tailDispatchedToBrowser = false;
-        const billingPhaseKey =
-          options.billingPhaseLabel ||
-          (options.continuationHandshakeId
-            ? `resume_${options.continuationHandshakeId}`
-            : "initial_stream");
-
         async function settlePhaseCreditsBeforeHandover(stepIdx: number) {
           const reservedCredits = options.hasPreDeducted ? (options.preDeductedCredits ?? 1) : 0;
           if (!options.hasPreDeducted && totalCost === 0) return;
 
           if (options.onSettlePhaseBilling) {
-            const settled = await options.onSettlePhaseBilling({
-              phase: billingPhaseKey,
-              actualCost: totalCost,
-              reservedCredits,
-              detailLabel: `阶段结算: ${dag.template.name_zh} (步骤 ${stepIdx})`
-            });
-            if (settled) {
-              isLedgerSettled = true;
-              options.hasPreDeducted = false;
-              triggerLowBalanceCheckAsync(env, options.userId, options.ctx);
-            }
+            await reportPhaseSettlement(
+              totalCost,
+              `阶段结算: ${dag.template.name_zh} (步骤 ${stepIdx})`
+            );
             return;
           }
 
@@ -2569,6 +2597,9 @@ export async function executeDAGStream(
               role_name_en: node.role.name_en,
               model_id: actualExecutingModel.model_id,
               model_name: actualExecutingModel.display_name,
+              execution_backend: actualExecutingModel.endpoint.startsWith("@cf/")
+                ? "workers_ai"
+                : "external",
               was_failover: actualExecutingModel.model_id !== node.selected_model.model_id,
               node_index: idx,
               duration_ms: Date.now() - nodeStartTime,
@@ -2679,17 +2710,7 @@ export async function executeDAGStream(
 
         // 3. Settle billing atomically (idempotent per-phase via onSettlePhaseBilling when configured)
         if (options.onSettlePhaseBilling && (options.hasPreDeducted || totalCost > 0)) {
-          const settled = await options.onSettlePhaseBilling({
-            phase: billingPhaseKey,
-            actualCost: totalCost,
-            reservedCredits: options.hasPreDeducted ? (options.preDeductedCredits ?? 1) : 0,
-            detailLabel: `执行模板: ${dag.template.name_zh}`
-          });
-          if (settled) {
-            isLedgerSettled = true;
-            options.hasPreDeducted = false;
-            triggerLowBalanceCheckAsync(env, options.userId, options.ctx);
-          }
+          await reportPhaseSettlement(totalCost, `执行模板: ${dag.template.name_zh}`);
         } else if (options.hasPreDeducted) {
           const reserved = options.preDeductedCredits ?? 1;
           const actualCost = totalCost;
@@ -2773,6 +2794,7 @@ export async function executeDAGStream(
         let authoritativeGitState: any = null;
         let stateCommitted = !tailRequiresClientCommit && !options.onCompleteStateCommit;
         let canRetryCommit = false;
+        let awaitingCommit = false;
         let commitErrorCode: string | undefined = undefined;
         let commitErrorMessage: string | undefined = undefined;
 
@@ -2826,7 +2848,7 @@ export async function executeDAGStream(
               commitErrorCode = commitRes.code || "commit_conflict";
               commitErrorMessage = commitRes.message || "状态提交失败";
               if (canRetryCommit && options.onMarkAwaitingCommit) {
-                await options.onMarkAwaitingCommit();
+                awaitingCommit = await options.onMarkAwaitingCommit();
               } else if (
                 !canRetryCommit &&
                 options.onFinishWithoutCommit &&
@@ -2857,7 +2879,7 @@ export async function executeDAGStream(
           perceptual_entries: perceptualCacheUpdates,
           state_committed: stateCommitted,
           can_retry_commit: canRetryCommit,
-          awaiting_commit: !stateCommitted && canRetryCommit,
+          awaiting_commit: awaitingCommit,
           ...(commitErrorCode ? { commit_error_code: commitErrorCode } : {}),
           ...(commitErrorMessage ? { commit_error: commitErrorMessage } : {}),
           ...(authoritativeGitState ? { authoritative_git_state: authoritativeGitState } : {})
@@ -2898,6 +2920,13 @@ export async function executeDAGStream(
       try {
         abortController.abort();
       } catch (e) {}
+      const reservedCredits = options.preDeductedCredits ?? 1;
+      const cancellationSettlement = options.hasPreDeducted
+        ? settlePhase(
+            hasEmittedTokens ? Math.min(totalCost > 0 ? totalCost : 1, reservedCredits) : 0,
+            `中途断开连接算力保底扣费 (工序: ${dag.template.name_zh})`
+          )
+        : phaseSettlement;
       if (!isStreamSettledOrHandedOver && options.onFinishWithoutCommit) {
         await options.onFinishWithoutCommit({
           outcome: "ABORTED",
@@ -2906,7 +2935,10 @@ export async function executeDAGStream(
           failureMessage: "客户端中断了执行流。"
         });
       }
-      const reservedCredits = options.preDeductedCredits ?? 1;
+      if (cancellationSettlement) {
+        await cancellationSettlement;
+        return;
+      }
       // If user aborted before any real tokens were generated, release pre-deducted reservation
       if (options.hasPreDeducted && !hasEmittedTokens) {
         options.hasPreDeducted = false;

@@ -200,6 +200,7 @@ function createMockD1(store: TableStore) {
     prepare(sql: string) {
       let boundArgs: any[] = [];
       const stmt = {
+        requiresPreviousChange: sql.includes("changes() = 1"),
         bind(...args: any[]) {
           boundArgs = args;
           return stmt;
@@ -1370,11 +1371,17 @@ function createMockD1(store: TableStore) {
 
           if (cleanSql.startsWith("INSERT INTO run_billing_settlements")) {
             store.run_billing_settlements = store.run_billing_settlements || [];
-            const [userId, runId, phase, amount] = boundArgs;
+            const [userId, runId, phase, amount, reservedCredits] = boundArgs;
             return {
               meta: checkAndInsertRow(
                 "run_billing_settlements",
-                { user_id: userId, run_id: runId, phase, amount },
+                {
+                  user_id: userId,
+                  run_id: runId,
+                  phase,
+                  amount,
+                  reserved_credits: reservedCredits
+                },
                 cleanSql,
                 store
               )
@@ -2298,9 +2305,14 @@ function createMockD1(store: TableStore) {
       return stmt;
     },
     async batch(statements: any[]) {
-      const results = [];
+      const results: Array<{ meta: { changes: number } }> = [];
       for (const s of statements) {
-        results.push(await s.run());
+        const previous = results[results.length - 1];
+        results.push(
+          s.requiresPreviousChange && previous?.meta.changes !== 1
+            ? { meta: { changes: 0 } }
+            : await s.run()
+        );
       }
       return results;
     }
@@ -3755,6 +3767,11 @@ async function runIntegrationTests() {
     failoverRes.status,
     200,
     "AC-07: candidate_failed must transparently fallback to standby cloud model with restored upstream_context"
+  );
+  const failoverEvents = await failoverRes.text();
+  assert.ok(
+    failoverEvents.includes('"execution_backend":"workers_ai"'),
+    "Cloud standby must report Workers AI as the actual execution backend"
   );
   console.log(
     "  ✓ AC-07 & AC-R4: Standby model failover successfully executes and restores upstream context: PASSED"
@@ -5373,7 +5390,7 @@ async function runIntegrationTests() {
   // 13.4 History Payload Defense Limit (Max 512KB & rounds slice)
   const hugeHistoryReq = new Request("https://nanomesh.local/api/history", {
     method: "POST",
-    headers: user12ReqHeaders,
+    headers: { ...user12ReqHeaders, "X-History-Account": testUser12Id },
     body: JSON.stringify({
       sessionId: "sess_huge_history_01",
       title: "Huge Payload Attack".repeat(20), // 380 chars -> should be sliced to 100
@@ -5393,7 +5410,7 @@ async function runIntegrationTests() {
   // Valid sized history with oversized title and > 100 rounds
   const validHistoryReq = new Request("https://nanomesh.local/api/history", {
     method: "POST",
-    headers: user12ReqHeaders,
+    headers: { ...user12ReqHeaders, "X-History-Account": testUser12Id },
     body: JSON.stringify({
       sessionId: "sess_defense_history_02",
       title: "A".repeat(150), // should be clamped to 100 chars
@@ -5853,7 +5870,11 @@ async function runIntegrationTests() {
   );
   const badSessionIdReq1 = new Request("https://nanomesh.local/api/history", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Cookie: `session=${histToken}` },
+    headers: {
+      "X-History-Account": lowBalanceUserId,
+      "Content-Type": "application/json",
+      Cookie: `session=${histToken}`
+    },
     body: JSON.stringify({ sessionId: { bad: "object" } })
   });
   const badSessionIdRes1 = await worker.fetch(badSessionIdReq1, env, {} as any);
@@ -5861,7 +5882,11 @@ async function runIntegrationTests() {
 
   const badSessionIdReq2 = new Request("https://nanomesh.local/api/history", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Cookie: `session=${histToken}` },
+    headers: {
+      "X-History-Account": lowBalanceUserId,
+      "Content-Type": "application/json",
+      Cookie: `session=${histToken}`
+    },
     body: JSON.stringify({ sessionId: "a".repeat(65) })
   });
   const badSessionIdRes2 = await worker.fetch(badSessionIdReq2, env, {} as any);
@@ -7720,6 +7745,7 @@ async function runIntegrationTests() {
     new Request("https://nanomesh.local/api/history", {
       method: "POST",
       headers: {
+        "X-History-Account": s20UserId,
         Authorization: `Bearer ${freshS20Token}`,
         "Content-Type": "application/json"
       },
@@ -7734,6 +7760,7 @@ async function runIntegrationTests() {
     new Request("https://nanomesh.local/api/history/sess_x", {
       method: "PATCH",
       headers: {
+        "X-History-Account": s20UserId,
         Authorization: `Bearer ${freshS20Token}`,
         "Content-Type": "application/json"
       },

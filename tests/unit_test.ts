@@ -3624,6 +3624,7 @@ async function runUnitTests() {
       getState: () => ({ gitState: window.gitState, lastRoundSummary: window.lastRoundSummary, currentDagBaseSummary: window.currentDagBaseSummary, chatRoundIndex: window.chatRoundIndex, frozen: window._currentRoundFrozenInput, isWorkflowExecuting, pendingModifiedRoleIds: window.pendingModifiedRoleIds, stagedDraft: window._stagedCanvasDraft }),
       hydrateGitStateFromServer,
       syncSaveHistoryToCloud,
+      fetchCloudHistory,
       rollbackTurnToPreFlight,
       sendChatMessage,
       handleSSEMessage,
@@ -3825,35 +3826,40 @@ async function runUnitTests() {
   assert.equal(vmApi.getState().frozen.committedRevision, 2);
   assert.equal(vmApi.getState().frozen.baseRunId, "cmt_srv_1");
 
-  // 24.2 syncSaveHistoryToCloud handles 413 with progressive truncation (keeping newest rounds)
+  // 24.2 A previously shared history record stays out of account B, and a 413 preserves B's full local copy.
   const cloudBodiesSent: any[] = [];
-  customFetchHandler = async (url, init) => {
-    if (url === "/api/history") {
-      const parsed = JSON.parse(init.body);
-      cloudBodiesSent.push(parsed);
-      if (parsed.rounds.length > 3) {
-        return { ok: false, status: 413, json: async () => ({ error: "payload_too_large" }) };
-      }
-      return { ok: true, status: 200, json: async () => ({ success: true }) };
-    }
-    return { ok: true, status: 200, json: async () => ({}) };
-  };
-  const syncRes = await vmApi.syncSaveHistoryToCloud({
-    sessionId: "sess_vm_413",
+  const syncedRecord = { id: "trace-vm-413", sessionId: "sess_vm_413", rounds: [{ round: 1 }] };
+  const localRecord = {
+    ...syncedRecord,
+    pendingHistoryVersion: "v1",
     rounds: Array.from({ length: 10 }, (_, idx) => ({ round: idx + 1 }))
-  });
-  assert.equal(syncRes.ok, true);
-  assert.ok(cloudBodiesSent.length >= 2, "413 must trigger progressive retry with pruned rounds");
-  const lastSyncPayload = cloudBodiesSent[cloudBodiesSent.length - 1];
-  assert.ok(lastSyncPayload.rounds.length <= 3);
-  assert.equal(lastSyncPayload.rounds[lastSyncPayload.rounds.length - 1].round, 10);
+  };
+  const accountStorageKey = "nanomesh_trace_history:u_vm";
+  storageMap.set("nanomesh_trace_history", JSON.stringify([{ sessionId: "other-account" }]));
+  storageMap.set(accountStorageKey, JSON.stringify([localRecord]));
+  vmSandbox.window.historyAccountId = "u_vm";
+  customFetchHandler = async (url, init) => {
+    assert.equal(url, "/api/history");
+    assert.equal(init.headers["X-History-Account"], "u_vm");
+    if (init.method !== "POST") {
+      return { ok: true, status: 200, json: async () => ({ sessions: [syncedRecord] }) };
+    }
+    cloudBodiesSent.push(JSON.parse(init.body));
+    return { ok: false, status: 413 };
+  };
+  await vmApi.syncSaveHistoryToCloud(localRecord);
+  await vmApi.fetchCloudHistory();
+  assert.equal(cloudBodiesSent.length, 1);
+  assert.equal(cloudBodiesSent[0].rounds.length, 10);
+  assert.deepEqual(JSON.parse(storageMap.get(accountStorageKey)!), [localRecord]);
 
   // 24.3 Deferred WebGPU unlock + "甲" -> micro-tune to "乙" -> follow-up inherits "乙" -> failed micro-tune rollback keeps "乙"
   let resolveTailCommit!: (val: any) => void;
   const tailCommitPromise = new Promise((r) => {
     resolveTailCommit = r;
   });
-  let postChatMode: "webgpu_tail" | "followup_ok" | "rerun_fail" = "followup_ok";
+  let postChatMode: "webgpu_tail" | "followup_ok" | "rerun_fail" | "first_round_dag_error" =
+    "followup_ok";
   const makeSseResponse = (chunks: string[]) =>
     new Response(
       new ReadableStream({
@@ -3868,6 +3874,12 @@ async function runUnitTests() {
 
   customFetchHandler = async (url, _init) => {
     if (url === "/api/chat") {
+      if (postChatMode === "first_round_dag_error") {
+        return makeSseResponse([
+          `event: dag_plan\ndata: ${JSON.stringify({ run_id: "run_uncommitted_fail", topology_mode: "standard", template: { template_id: "t1", name_zh: "T1", name_en: "T1" }, nodes: [{ node_id: "n1", role_id: "r1", name_zh: "N1", selected_model: { model_id: "m_webgpu", display_name: "WebGPU", inference_target: "browser" }, standby_models: [] }], reasoning_trace: { target_branch_id: "main", intent_state: null, is_multi_round: false } })}\n\n`,
+          `event: dag_error\ndata: ${JSON.stringify({ error: "Simulated local worker failure" })}\n\n`
+        ]);
+      }
       if (postChatMode === "webgpu_tail") {
         return makeSseResponse([
           `event: dag_plan\ndata: ${JSON.stringify({ run_id: "srv_run_v1", topology_mode: "standard", template: { template_id: "t1", name_zh: "T1", name_en: "T1" }, nodes: [{ node_id: "n1", role_id: "r1", name_zh: "N1", selected_model: { model_id: "m_webgpu", display_name: "WebGPU", inference_target: "browser" }, standby_models: [] }], reasoning_trace: { target_branch_id: "main", intent_state: null, is_multi_round: false } })}\n\n`,
@@ -3975,6 +3987,57 @@ async function runUnitTests() {
   assert.equal(followChatReq.body.activeBranchSummary, "乙");
   assert.equal(followChatReq.body.previousRoundSummary, "乙");
 
+  // Uncommitted failed Round 1 followed by canvas template switch must NOT send isReRun=true or uncommitted baseCommitId (fixes 409 base_commit_not_found)
+  vmSandbox.window.chatSessionId = "sess_uncommitted_switch";
+  vmSandbox.window.gitState = {
+    activeBranchId: "main",
+    branches: {
+      main: {
+        branchId: "main",
+        topic: "默认",
+        headCommitId: null,
+        isMediaBranch: false,
+        lastValidSummary: "",
+        lineageAssetIds: []
+      }
+    },
+    commits: {},
+    commitOrder: [],
+    assetVault: {},
+    perceptualCacheIndex: {}
+  };
+  vmSandbox.window.chatRoundIndex = 0;
+  postChatMode = "first_round_dag_error";
+  sandboxDocument.getElementById("chat-input").value = "初次编排失败测试";
+  await vmApi.sendChatMessage({ isSwitch: false });
+  assert.equal(
+    vmApi.getState().frozen.baseRunId,
+    null,
+    "Uncommitted failed Round 1 rollback must clear tentative baseRunId"
+  );
+
+  capturedFetches.length = 0;
+  postChatMode = "followup_ok";
+  await vmApi.sendChatMessage({
+    isSwitch: true,
+    reRouteMode: "switch_template",
+    chosenTemplateId: "tpl_cloud_fallback"
+  });
+  const switchAfterFailReq = capturedFetches.find((f) => f.url === "/api/chat");
+  assert.ok(switchAfterFailReq);
+  assert.equal(
+    switchAfterFailReq.body.isReRun,
+    false,
+    "Canvas switch after uncommitted failure must send isReRun=false"
+  );
+  assert.equal(
+    switchAfterFailReq.body.baseCommitId,
+    undefined,
+    "Canvas switch after uncommitted failure must not send uncommitted baseCommitId"
+  );
+  assert.equal(switchAfterFailReq.body.reRouteMode, "switch_template");
+  assert.equal(switchAfterFailReq.body.chosenTemplateId, "tpl_cloud_fallback");
+
   // Suite 24b: Phase 4 Closure - Delete 409 keeps local drawer/view & AWAITING_COMMIT lock + abandon (NM-STATE-R01/R03)
   assert.ok(
     freshAppJs.includes("syncHistoryItemDelete(itemToDelete.sessionId || itemToDelete.id)") &&
@@ -3997,15 +4060,57 @@ async function runUnitTests() {
       freshAppJs.includes("isRetryableStatus"),
     "app.js must handle tail commit network/server errors by retaining awaiting-commit resolution & retry/abandon banner (NM-STATE-R03a)"
   );
+  const tailCommitStart = freshAppJs.indexOf("const attemptClientTailCommit");
+  const tailCommitEnd = freshAppJs.indexOf("})();", tailCommitStart);
+  const tailCommitScript =
+    "(async () => {" + freshAppJs.slice(tailCommitStart, tailCommitEnd) + "})()";
+  const tailButtons: string[] = [];
+  const tailElements: any[] = [];
+  const tailElement = () => ({
+    style: {},
+    textContent: "",
+    appendChild(child: { textContent?: string }) {
+      if (child.textContent) tailButtons.push(child.textContent);
+    },
+    querySelector: () => null
+  });
+  const tailResponses = [
+    { status: 503, body: {} },
+    { status: 503, body: { awaiting_commit: true, can_retry_commit: true } }
+  ];
+  await vm.runInNewContext(tailCommitScript, {
+    window: { chatSessionId: "tail-session" },
+    fetch: async () => {
+      const response = tailResponses.shift()!;
+      return { ok: false, status: response.status, json: async () => response.body };
+    },
+    serverRunId: "tail-run",
+    tailCreds: { clientCommitToken: "tail-token" },
+    fullText: "result",
+    isEn: true,
+    document: {
+      createElement: () => {
+        const el = tailElement();
+        tailElements.push(el);
+        return el;
+      }
+    },
+    respEl: tailElement(),
+    setAwaitingCommitResolutionState: () => {},
+    escapeHtml: (value: string) => value,
+    resolve: () => {}
+  });
+  assert.ok(tailButtons.includes("Retry Commit"));
+  assert.ok(!tailButtons.includes("Abandon Result"));
+  await tailElements.find((el) => el.textContent === "Retry Commit").onclick();
+  assert.ok(tailButtons.includes("Abandon Result"));
+  const indexTsSrc = fs.readFileSync(path.join(process.cwd(), "src/index.ts"), "utf8");
   assert.ok(
-    freshAppJs.includes("allowAbandon = true") &&
-      freshAppJs.includes("if (allowAbandon)") &&
-      freshAppJs.includes("showTailRetryAbandonBanner") &&
-      (freshAppJs.includes("false\n") || freshAppJs.includes("false\r\n")),
-    "app.js must gate abandon button until server confirms AWAITING_COMMIT phase (NM-STATE-R03a-1)"
+    indexTsSrc.includes("worker-src 'self' blob: https://cdn.jsdelivr.net;"),
+    "CSP worker-src must allow https://cdn.jsdelivr.net for Transformers.js & Float16 module worker imports"
   );
   assert.ok(
-    freshAppJs.includes("reRouteOptions.isSwitch ? false : !!f.isNew") &&
+    freshAppJs.includes("effectiveSwitchIsReRun ? false : !!f.isNew") &&
       freshAppJs.includes("window._currentStagedNewFiles = []"),
     "app.js must clear isNew on micro-tuning switch reruns and committed asset lifecycles (NM-STATE-R05a)"
   );

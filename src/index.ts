@@ -15,12 +15,13 @@ import {
   handleResetPassword
 } from "./api/auth";
 import { getSession } from "./auth/middleware";
+import { retryPendingBillingSettlements } from "./api/session";
 
 function getCorsHeaders(env: Env) {
   return {
     "Access-Control-Allow-Origin": env.FRONTEND_URL,
     "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, Cookie",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, Cookie, X-History-Account",
     "Access-Control-Allow-Credentials": "true",
     "Access-Control-Max-Age": "86400",
     Vary: "Origin"
@@ -36,11 +37,11 @@ function applySecurityHeaders(res: Response, isAdmin: boolean = false): Response
     "Content-Security-Policy",
     "default-src 'self'; " +
       "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://challenges.cloudflare.com https://cdn.jsdelivr.net; " +
-      "worker-src 'self' blob:; " +
+      "worker-src 'self' blob: https://cdn.jsdelivr.net; " +
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
       "font-src 'self' https://fonts.gstatic.com; " +
       "img-src 'self' data: blob: https:; " +
-      "connect-src 'self' https://challenges.cloudflare.com https://huggingface.co https://*.huggingface.co https://hf-mirror.com https://cdn.jsdelivr.net https://*.r2.cloudflarestorage.com; " +
+      "connect-src 'self' https://challenges.cloudflare.com https://huggingface.co https://*.huggingface.co https://*.cdn.hf.co https://hf-mirror.com https://cdn.jsdelivr.net https://*.r2.cloudflarestorage.com; " +
       "frame-src https://challenges.cloudflare.com; " +
       `frame-ancestors ${isAdmin ? "'none'" : "'self'"}; ` +
       "object-src 'none'; base-uri 'self';"
@@ -520,7 +521,12 @@ export default {
   async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
     const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
 
-    if (env.R2 && typeof env.R2.list === "function" && typeof env.R2.delete === "function") {
+    if (
+      env.DB &&
+      env.R2 &&
+      typeof env.R2.list === "function" &&
+      typeof env.R2.delete === "function"
+    ) {
       try {
         let cursor: string | undefined = undefined;
         let pages = 0;
@@ -529,8 +535,26 @@ export default {
           const expiredKeys = (listed.objects || [])
             .filter((obj) => obj.uploaded && obj.uploaded.getTime() < cutoffMs)
             .map((obj) => obj.key);
-          if (expiredKeys.length > 0) {
-            await env.R2.delete(expiredKeys);
+          // Each key is bound twice. Keep the query within D1's binding limit.
+          const batchSize = 40;
+          for (let offset = 0; offset < expiredKeys.length; offset += batchSize) {
+            const keys = expiredKeys.slice(offset, offset + batchSize);
+            const placeholders = keys.map(() => "?").join(", ");
+            const { results } = await env.DB.prepare(
+              `SELECT a.r2_key, a.text_r2_key FROM session_assets a
+               WHERE (a.r2_key IN (${placeholders}) OR a.text_r2_key IN (${placeholders}))
+                 AND (a.status = 'COMMITTED' OR (a.status IN ('UPLOADED', 'STAGING') AND EXISTS (
+                   SELECT 1 FROM chat_session_states s
+                   WHERE s.user_id = a.user_id AND s.session_id = a.session_id
+                     AND s.deleted_at IS NULL AND s.occupancy_phase IS NOT NULL
+                     AND (s.lock_expires_at IS NULL OR datetime(s.lock_expires_at) > datetime('now'))
+                 )))`
+            )
+              .bind(...keys, ...keys)
+              .all<{ r2_key: string | null; text_r2_key: string | null }>();
+            const protectedKeys = new Set(results.flatMap((row) => [row.r2_key, row.text_r2_key]));
+            const orphanedKeys = keys.filter((key) => !protectedKeys.has(key));
+            if (orphanedKeys.length > 0) await env.R2.delete(orphanedKeys);
           }
           cursor = listed.truncated ? listed.cursor : undefined;
           pages++;
@@ -543,6 +567,9 @@ export default {
     if (env.DB) {
       const nowEpoch = Math.floor(Date.now() / 1000);
       await Promise.all([
+        retryPendingBillingSettlements(env).catch((err) =>
+          console.error("[Cron] Billing retry failed:", err)
+        ),
         env.DB.prepare(
           "DELETE FROM verification_codes WHERE expires_at < datetime('now', '-1 day')"
         )

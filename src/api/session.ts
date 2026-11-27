@@ -374,18 +374,24 @@ export async function markSessionAwaitingCommit(
   userId: string,
   sessionId: string,
   runId: string,
-  leaseSeconds: number = AWAITING_COMMIT_LEASE_SECONDS
-): Promise<void> {
-  if (!env?.DB || !userId || !sessionId || !runId) return;
-  const lockExpiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
+  clientCommitToken?: string
+): Promise<boolean> {
+  if (!env?.DB || !userId || !sessionId || !runId) return false;
+  const lockExpiresAt = new Date(Date.now() + AWAITING_COMMIT_LEASE_SECONDS * 1000).toISOString();
   try {
-    await env.DB.batch([
+    const nonceHash = clientCommitToken ? await sha256Hex(clientCommitToken) : null;
+    const batch = await env.DB.batch([
       env.DB.prepare(
         `UPDATE dag_run_plans
          SET status = 'AWAITING_COMMIT',
              updated_at = CURRENT_TIMESTAMP
-         WHERE user_id = ? AND session_id = ? AND run_id = ? AND commit_state = 'PENDING'`
-      ).bind(userId, sessionId, runId),
+         WHERE user_id = ? AND session_id = ? AND run_id = ? AND commit_state = 'PENDING'
+           AND (? IS NULL OR (exec_owner = 'BROWSER_TAIL' AND client_commit_nonce_hash = ?))
+           AND EXISTS (
+             SELECT 1 FROM chat_session_states
+             WHERE user_id = ? AND session_id = ? AND active_run_id = ? AND deleted_at IS NULL
+           )`
+      ).bind(userId, sessionId, runId, nonceHash, nonceHash, userId, sessionId, runId),
       env.DB.prepare(
         `UPDATE chat_session_states
          SET occupancy_phase = 'AWAITING_COMMIT',
@@ -393,12 +399,13 @@ export async function markSessionAwaitingCommit(
              lock_expires_at = ?,
              updated_at = CURRENT_TIMESTAMP
          WHERE user_id = ? AND session_id = ?
-           AND deleted_at IS NULL
-           AND (active_run_id = ? OR active_run_id IS NULL)`
+           AND deleted_at IS NULL AND active_run_id = ? AND changes() = 1`
       ).bind(runId, lockExpiresAt, userId, sessionId, runId)
     ]);
+    return batch[0]?.meta.changes === 1 && batch[1]?.meta.changes === 1;
   } catch (err) {
     console.error("[SessionState] markSessionAwaitingCommit failed:", err);
+    return false;
   }
 }
 
@@ -426,7 +433,8 @@ export async function finishRunWithoutCommit(
              occupancy_phase = NULL,
              lock_expires_at = NULL,
              updated_at = CURRENT_TIMESTAMP
-         WHERE user_id = ? AND session_id = ? AND active_run_id = ? AND occupancy_phase = ?`
+         WHERE user_id = ? AND session_id = ? AND active_run_id = ? AND occupancy_phase = ?
+           AND changes() = 1`
       : `UPDATE chat_session_states
          SET active_run_id = NULL,
              active_client_op_id = NULL,
@@ -448,6 +456,7 @@ export async function finishRunWithoutCommit(
            AND EXISTS (
              SELECT 1 FROM chat_session_states
              WHERE user_id = ? AND session_id = ? AND active_run_id = ? AND occupancy_phase = ?
+               AND deleted_at IS NULL
            )`
       : `UPDATE dag_run_plans
          SET commit_state = ?,
@@ -1551,77 +1560,163 @@ export async function claimCloudFailoverOwnership(
 /**
  * Records per-stage idempotent compute billing settlement inside a D1 batch (REV-03).
  */
+interface BillingPhaseParams {
+  userId: string;
+  runId: string;
+  phase: string;
+  actualCost: number;
+  reservedCredits: number;
+  templateNameZh?: string;
+  detailLabel?: string;
+}
+
 export async function settleRunBillingPhase(
   env: Env,
-  params: {
-    userId: string;
-    runId: string;
-    phase: string;
-    actualCost: number;
-    reservedCredits: number;
-    templateNameZh: string;
-    detailLabel?: string;
-  }
+  params: BillingPhaseParams,
+  fromQueue = false
 ): Promise<boolean> {
   if (!env?.DB) return false;
   const { userId, runId, phase, actualCost, reservedCredits } = params;
+  const key = [userId, runId, phase] as const;
+  const pending = fromQueue
+    ? "EXISTS (SELECT 1 FROM pending_billing_settlements WHERE user_id = ? AND run_id = ? AND phase = ?)"
+    : "1";
+  const gateArgs = fromQueue ? key : [];
   try {
-    const existing = await env.DB.prepare(
-      "SELECT 1 FROM run_billing_settlements WHERE user_id = ? AND run_id = ? AND phase = ?"
-    )
-      .bind(userId, runId, phase)
-      .first();
-    if (existing) {
-      return true;
-    }
-
-    const statements: D1PreparedStatement[] = [
+    const statements = [
       env.DB.prepare(
-        `INSERT INTO run_billing_settlements (user_id, run_id, phase, amount)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(user_id, run_id, phase) DO NOTHING`
-      ).bind(userId, runId, phase, actualCost)
+        `INSERT INTO run_billing_settlements (user_id, run_id, phase, amount, reserved_credits)
+         SELECT ?, ?, ?, ?, ? WHERE ${pending}`
+      ).bind(...key, actualCost, reservedCredits, ...gateArgs)
     ];
-
     const refundDelta = reservedCredits - actualCost;
     if (refundDelta > 0) {
       statements.push(
-        env.DB.prepare("UPDATE users SET credits = credits + ? WHERE user_id = ?").bind(
-          refundDelta,
-          userId
-        )
+        env.DB.prepare(
+          `UPDATE users SET credits = credits + ? WHERE user_id = ? AND ${pending}`
+        ).bind(refundDelta, userId, ...gateArgs)
       );
     } else if (refundDelta < 0) {
       statements.push(
-        env.DB.prepare("UPDATE users SET credits = MAX(0, credits - ?) WHERE user_id = ?").bind(
-          Math.abs(refundDelta),
-          userId
-        )
+        env.DB.prepare(
+          `UPDATE users SET credits = MAX(0, credits - ?) WHERE user_id = ? AND ${pending}`
+        ).bind(Math.abs(refundDelta), userId, ...gateArgs)
       );
     }
-
     if (actualCost > 0) {
-      const ledgerId = crypto.randomUUID();
       statements.push(
         env.DB.prepare(
           `INSERT INTO credit_ledger
            (ledger_id, user_id, category, amount, balance, title, detail, created_at)
-           VALUES (?, ?, 'compute_cost', ?, (SELECT credits FROM users WHERE user_id = ?), 'DAG智能编排调用', ?, datetime('now'))`
+           SELECT ?, ?, 'compute_cost', ?, (SELECT credits FROM users WHERE user_id = ?), 'DAG智能编排调用', ?, datetime('now')
+           WHERE ${pending}`
         ).bind(
-          ledgerId,
+          crypto.randomUUID(),
           userId,
           -actualCost,
           userId,
-          params.detailLabel || `执行模板: ${params.templateNameZh}`
+          params.detailLabel || `执行模板: ${params.templateNameZh}`,
+          ...gateArgs
         )
       );
     }
-
     await env.DB.batch(statements);
     return true;
   } catch (err) {
+    // A conflicting plain INSERT rolls back the batch, including balance and ledger writes.
+    try {
+      const existing = await env.DB.prepare(
+        "SELECT amount, reserved_credits FROM run_billing_settlements WHERE user_id = ? AND run_id = ? AND phase = ?"
+      )
+        .bind(...key)
+        .first<{ amount: number; reserved_credits: number | null }>();
+      if (
+        existing &&
+        existing.amount === actualCost &&
+        (existing.reserved_credits == null || existing.reserved_credits === reservedCredits)
+      ) {
+        return true;
+      }
+    } catch (lookupErr) {
+      console.error("[BillingPhase] Failed to confirm prior settlement:", lookupErr);
+    }
     console.error(`[BillingPhase] Failed to settle phase=${phase} run=${runId}:`, err);
     return false;
+  }
+}
+
+export async function settleOrQueueBillingPhase(
+  env: Env,
+  params: BillingPhaseParams
+): Promise<"settled" | "pending" | "unconfirmed"> {
+  if ((await settleRunBillingPhase(env, params)) || (await settleRunBillingPhase(env, params))) {
+    return "settled";
+  }
+  try {
+    await env.DB.prepare(
+      `INSERT INTO pending_billing_settlements
+       (user_id, run_id, phase, actual_cost, reserved_credits, detail_label)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, run_id, phase) DO NOTHING`
+    )
+      .bind(
+        params.userId,
+        params.runId,
+        params.phase,
+        params.actualCost,
+        params.reservedCredits,
+        params.detailLabel || `执行模板: ${params.templateNameZh}`
+      )
+      .run();
+    return "pending";
+  } catch (err) {
+    console.error(
+      `[BillingPhase] Could not persist unsettled phase=${params.phase} run=${params.runId}:`,
+      err
+    );
+    return "unconfirmed";
+  }
+}
+
+export async function retryPendingBillingSettlements(env: Env): Promise<void> {
+  const rows = await env.DB.prepare(
+    `SELECT user_id, run_id, phase, actual_cost, reserved_credits, detail_label
+     FROM pending_billing_settlements ORDER BY created_at LIMIT 50`
+  ).all<{
+    user_id: string;
+    run_id: string;
+    phase: string;
+    actual_cost: number;
+    reserved_credits: number;
+    detail_label: string;
+  }>();
+  for (const row of rows.results) {
+    if (
+      await settleRunBillingPhase(
+        env,
+        {
+          userId: row.user_id,
+          runId: row.run_id,
+          phase: row.phase,
+          actualCost: row.actual_cost,
+          reservedCredits: row.reserved_credits,
+          detailLabel: row.detail_label
+        },
+        true
+      )
+    ) {
+      await env.DB.prepare(
+        "DELETE FROM pending_billing_settlements WHERE user_id = ? AND run_id = ? AND phase = ?"
+      )
+        .bind(row.user_id, row.run_id, row.phase)
+        .run();
+    } else {
+      await env.DB.prepare(
+        "UPDATE pending_billing_settlements SET created_at = CURRENT_TIMESTAMP WHERE user_id = ? AND run_id = ? AND phase = ?"
+      )
+        .bind(row.user_id, row.run_id, row.phase)
+        .run();
+    }
   }
 }
 
@@ -2450,7 +2545,7 @@ export async function tombstoneAndPurgeSession(
       `DELETE FROM session_assets WHERE user_id = ? AND session_id = ? AND ${deletedGate}`
     ).bind(userId, targetSessionId, userId, targetSessionId),
     env.DB.prepare(
-      `DELETE FROM run_billing_settlements WHERE user_id = ? AND ${deletedGate} AND run_id IN (SELECT run_id FROM dag_run_plans WHERE user_id = ? AND session_id = ?)`
+      `DELETE FROM run_billing_settlements WHERE user_id = ? AND ${deletedGate} AND run_id IN (SELECT run_id FROM dag_run_plans WHERE user_id = ? AND session_id = ?) AND NOT EXISTS (SELECT 1 FROM pending_billing_settlements q WHERE q.user_id = run_billing_settlements.user_id AND q.run_id = run_billing_settlements.run_id AND q.phase = run_billing_settlements.phase)`
     ).bind(userId, userId, targetSessionId, userId, targetSessionId),
     env.DB.prepare(
       `DELETE FROM dag_run_plans WHERE user_id = ? AND session_id = ? AND ${deletedGate}`
@@ -2634,9 +2729,11 @@ export async function handleCommitSessionTurn(
             : result.code === "invalid_credentials"
               ? 403
               : 409;
-      if (result.retryable) {
-        await markSessionAwaitingCommit(env, session.userId, cleanId, runId);
-      } else if (
+      const awaitingCommit =
+        result.retryable &&
+        (await markSessionAwaitingCommit(env, session.userId, cleanId, runId, clientCommitToken));
+      if (
+        !result.retryable &&
         result.code !== "already_taken_over" &&
         result.code !== "session_deleted" &&
         result.code !== "invalid_credentials"
@@ -2655,7 +2752,7 @@ export async function handleCommitSessionTurn(
         JSON.stringify({
           error: result.code,
           can_retry_commit: result.retryable,
-          awaiting_commit: result.retryable,
+          awaiting_commit: awaitingCommit,
           message: result.message
         }),
         {
@@ -2670,12 +2767,18 @@ export async function handleCommitSessionTurn(
       headers: { "Content-Type": "application/json" }
     });
   } catch (err: any) {
-    await markSessionAwaitingCommit(env, session.userId, cleanId, runId);
+    const awaitingCommit = await markSessionAwaitingCommit(
+      env,
+      session.userId,
+      cleanId,
+      runId,
+      clientCommitToken
+    );
     return new Response(
       JSON.stringify({
         error: "storage_error",
         can_retry_commit: true,
-        awaiting_commit: true,
+        awaiting_commit: awaitingCommit,
         message: err?.message || "Commit storage failure"
       }),
       {
@@ -2769,9 +2872,13 @@ export async function handleCommitRetrySessionTurn(
     if (!result.ok) {
       const httpStatus =
         result.code === "session_deleted" ? 410 : result.code === "storage_error" ? 503 : 409;
-      if (result.retryable) {
-        await markSessionAwaitingCommit(env, session.userId, cleanId, runId);
-      } else if (result.code !== "session_deleted" && result.code !== "invalid_credentials") {
+      const awaitingCommit =
+        result.retryable && (await markSessionAwaitingCommit(env, session.userId, cleanId, runId));
+      if (
+        !result.retryable &&
+        result.code !== "session_deleted" &&
+        result.code !== "invalid_credentials"
+      ) {
         await finishRunWithoutCommit(env, {
           userId: session.userId,
           sessionId: cleanId,
@@ -2786,7 +2893,7 @@ export async function handleCommitRetrySessionTurn(
         JSON.stringify({
           error: result.code,
           can_retry_commit: result.retryable,
-          awaiting_commit: result.retryable,
+          awaiting_commit: awaitingCommit,
           message: result.message
         }),
         {
@@ -2801,12 +2908,11 @@ export async function handleCommitRetrySessionTurn(
       headers: { "Content-Type": "application/json" }
     });
   } catch (err: any) {
-    await markSessionAwaitingCommit(env, session.userId, cleanId, runId);
     return new Response(
       JSON.stringify({
         error: "storage_error",
         can_retry_commit: true,
-        awaiting_commit: true,
+        awaiting_commit: false,
         message: err?.message || "Commit retry failed"
       }),
       {

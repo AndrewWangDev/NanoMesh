@@ -2,6 +2,14 @@ import { Env } from "../types";
 import { getSession } from "../auth/middleware";
 import { sweepPendingR2Cleanups, tombstoneAndPurgeSession } from "./session";
 
+function rejectMismatchedHistoryAccount(request: Request, userId: string): Response | null {
+  if (request.headers.get("X-History-Account") === userId) return null;
+  return Response.json(
+    { error: "history_account_mismatch", message: "账号已变更，请刷新页面。" },
+    { status: 409 }
+  );
+}
+
 export async function handleGetHistory(
   request: Request,
   env: Env,
@@ -14,6 +22,9 @@ export async function handleGetHistory(
       headers: { "Content-Type": "application/json" }
     });
   }
+
+  const accountMismatch = rejectMismatchedHistoryAccount(request, session.userId);
+  if (accountMismatch) return accountMismatch;
 
   try {
     const sweepTask = sweepPendingR2Cleanups(env, session.userId);
@@ -51,7 +62,7 @@ export async function handleGetHistory(
     });
 
     return new Response(JSON.stringify({ sessions }), {
-      headers: { "Content-Type": "application/json" }
+      headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store" }
     });
   } catch (err: any) {
     console.error("Failed to fetch history:", err);
@@ -74,6 +85,9 @@ export async function handleSaveHistory(request: Request, env: Env): Promise<Res
       headers: { "Content-Type": "application/json" }
     });
   }
+
+  const accountMismatch = rejectMismatchedHistoryAccount(request, session.userId);
+  if (accountMismatch) return accountMismatch;
 
   try {
     let rawBody: any;
@@ -202,6 +216,9 @@ export async function handleUpdateHistoryItem(
     });
   }
 
+  const accountMismatch = rejectMismatchedHistoryAccount(request, session.userId);
+  if (accountMismatch) return accountMismatch;
+
   try {
     let rawBody: any;
     try {
@@ -277,6 +294,9 @@ export async function handleDeleteHistoryItem(
       headers: { "Content-Type": "application/json" }
     });
   }
+
+  const accountMismatch = rejectMismatchedHistoryAccount(request, session.userId);
+  if (accountMismatch) return accountMismatch;
 
   try {
     const deleteRes = await tombstoneAndPurgeSession(env, session.userId, sessionId, ctx);

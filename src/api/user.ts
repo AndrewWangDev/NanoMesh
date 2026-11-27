@@ -346,6 +346,9 @@ export async function handleDeleteAccount(req: Request, env: Env) {
     env.DB.prepare("DELETE FROM dag_run_plans WHERE user_id = ?").bind(session.userId),
     env.DB.prepare("DELETE FROM asset_perceptual_cache WHERE user_id = ?").bind(session.userId),
     env.DB.prepare("DELETE FROM dag_execution_cache WHERE user_id = ?").bind(session.userId),
+    env.DB.prepare("DELETE FROM pending_billing_settlements WHERE user_id = ?").bind(
+      session.userId
+    ),
     env.DB.prepare("DELETE FROM run_billing_settlements WHERE user_id = ?").bind(session.userId),
     env.DB.prepare("DELETE FROM dag_handshakes WHERE user_id = ?").bind(session.userId),
     env.DB.prepare("DELETE FROM user_oauth_bindings WHERE user_id = ?").bind(session.userId),
