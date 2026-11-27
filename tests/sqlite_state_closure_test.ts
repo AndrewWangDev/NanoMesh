@@ -256,6 +256,22 @@ async function runRealSqliteClosureSuite() {
     db.exec(fs.readFileSync(path.join(migrationsDir, mf), "utf8"));
   }
   assert.ok(migrationFiles.includes("0025_state_security_closure.sql"));
+  assert.ok(migrationFiles.includes("0030_tune_model_scoring_and_windows.sql"));
+  for (const id of ["cf-qwen3.8-27b", "cf-llama-3.1-8b-fast", "cf-gemma-4-26b-a4b"]) {
+    const row = db
+      .prepare("SELECT context_window, status FROM models WHERE model_id = ?")
+      .get(id) as any;
+    assert.ok(row && row.status === "active" && row.context_window === 32768);
+  }
+  const heavyRow = db
+    .prepare("SELECT prior_score, user_rating FROM models WHERE model_id = 'heavy-llama-3.1-8b'")
+    .get() as any;
+  assert.ok(heavyRow && heavyRow.prior_score === 0.0 && heavyRow.user_rating === 4.75);
+  for (const id of ["cf-qwq-32b", "cf-llama-3.1-8b", "cf-llama-3.2-3b", "cf-llava-1.5-7b"]) {
+    assert.ok(
+      db.prepare("SELECT 1 FROM models WHERE model_id = ? AND status = 'inactive'").get(id)
+    );
+  }
   console.log(`  ✓ Applied ${migrationFiles.length} real D1 SQLite migrations cleanly: PASSED`);
 
   const r2 = createSqliteR2();

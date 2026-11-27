@@ -110,7 +110,7 @@ Rules:
 
 Return JSON array only: ["id1", "id2", "id3"] or ["${SENTINEL_UNREACHABLE_TEMPLATE_ID}"]`;
 
-      const aiRes = await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fp8", {
+      const aiRes = await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fast", {
         messages: [{ role: "user", content: prompt }],
         max_tokens: 60,
         temperature: 0.0

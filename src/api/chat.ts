@@ -918,6 +918,7 @@ export async function handleChat(
       hasPreDeducted: hasReservedCredit,
       preDeductedCredits: hasReservedCredit ? expectedCloudCost : 0,
       billingPhaseLabel: "initial_stream",
+      allowStandbyFailover: orchestrationOptions.reRouteMode !== "switch_model",
       runId,
       planHash,
       verifyAssetAccess: (asset) =>

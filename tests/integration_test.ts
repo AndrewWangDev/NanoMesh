@@ -2390,9 +2390,9 @@ function createMockAI() {
         return { answers };
       }
       if (model === "@cf/openai/whisper") {
-        if (!(input.audio instanceof Uint8Array)) {
+        if (!Array.isArray(input.audio)) {
           throw new Error(
-            "DEFECT-03 Violation: Workers AI Whisper input.audio must be a compact Uint8Array, not Array<number>!"
+            "Workers AI Whisper input.audio must be a byte array Array<number> (Uint8Array serializes as JSON object in wrangler dev)!"
           );
         }
         return { text: "Mock Whisper transcription from voice audio stream." };
@@ -7854,7 +7854,7 @@ async function runIntegrationTests() {
             model_id: "cloud-fallback-test",
             display_name: "Cloud Fallback",
             provider: "cloudflare",
-            endpoint: "@cf/meta/llama-3.1-8b-instruct-fp8",
+            endpoint: "@cf/meta/llama-3.1-8b-instruct-fast",
             modalities: ["text"],
             tags: [],
             context_window: 4096,
@@ -7889,7 +7889,7 @@ async function runIntegrationTests() {
           model_id: "cloud-tail-test",
           display_name: "Cloud Tail",
           provider: "cloudflare",
-          endpoint: "@cf/meta/llama-3.1-8b-instruct-fp8",
+          endpoint: "@cf/meta/llama-3.1-8b-instruct-fast",
           modalities: ["text"],
           tags: [],
           context_window: 4096,
@@ -8025,7 +8025,7 @@ async function runIntegrationTests() {
           model_id: "cloud-tail-exp",
           display_name: "Cloud Tail Exp",
           provider: "cloudflare",
-          endpoint: "@cf/meta/llama-3.1-8b-instruct-fp8",
+          endpoint: "@cf/meta/llama-3.1-8b-instruct-fast",
           modalities: ["text"],
           tags: [],
           context_window: 4096,
@@ -8728,7 +8728,7 @@ async function runIntegrationTests() {
     (env as any).AI = {
       async run(model: string, input: any) {
         if (
-          model === "@cf/meta/llama-3.1-8b-instruct-fp8" &&
+          model === "@cf/meta/llama-3.1-8b-instruct-fast" &&
           JSON.stringify(input).includes("Joint Git-DAG")
         ) {
           return {
@@ -9120,7 +9120,7 @@ async function runIntegrationTests() {
           model_id: "cf-llama-s23-frozen",
           display_name: "Llama 3.1 8B Frozen Edge",
           provider: "Cloudflare Workers AI",
-          endpoint: "@cf/meta/llama-3.1-8b-instruct-fp8",
+          endpoint: "@cf/meta/llama-3.1-8b-instruct-fast",
           modalities: ["text"],
           in_modalities: ["text"],
           out_modalities: ["text"],
@@ -9255,8 +9255,131 @@ async function runIntegrationTests() {
     "  ✓ Scenario 23 (Plan Identity Freeze, Authoritative Git State, Cross-Session R2 Block & Bounded Concurrency): PASSED"
   );
 
+  // Scenario 24: switch_model & retry must keep standby_models in dag_plan for UI inspector while disabling execution failover
+  const scen24UserId = "usr_scen24_switch_lock";
+  store.users.push({
+    user_id: scen24UserId,
+    username: "SwitchLockTester",
+    email: "switchlock@test.local",
+    password_hash: "hash",
+    credits: 100,
+    token_version: 1
+  });
+  const scen24Token = await signJWT(
+    { userId: scen24UserId, role: "user", tokenVersion: 1 },
+    env.JWT_SECRET,
+    3600
+  );
+  const prevAiRun24 = env.AI.run;
+  let scen24StandbyAttempted = false;
+  (env.AI as any).run = async (endpoint: string, payload: any) => {
+    if (endpoint === "@cf/qwen/qwen3.8-27b") {
+      throw new Error("Simulated Qwen3.8 failure in switch_model");
+    }
+    if (endpoint === "@cf/meta/llama-3.1-8b-instruct-fast") {
+      scen24StandbyAttempted = true;
+      return { response: "Fallback fast response" };
+    }
+    return prevAiRun24.call(env.AI, endpoint, payload);
+  };
+  store.models.push(
+    {
+      model_id: "cf-qwen3.8-s24",
+      display_name: "Qwen3.8-27B S24",
+      provider: "Qwen",
+      endpoint: "@cf/qwen/qwen3.8-27b",
+      modalities: '["text"]',
+      in_modalities: '["text"]',
+      out_modalities: '["text"]',
+      tags: '["#chat","#text_generation","#general"]',
+      context_window: 32768,
+      max_concurrency: 40,
+      active_connections: 0,
+      precision: 0.96,
+      user_rating: 4.95,
+      usage_count: 100,
+      cost_per_1k_tokens: 1,
+      cost_per_invocation: 0,
+      status: "active",
+      is_generalist: 1,
+      prior_score: 0.25,
+      scenario_anchors: "[]",
+      inference_target: "edge",
+      auth_mode: "none",
+      api_format: "workers_ai"
+    },
+    {
+      model_id: "cf-fast-s24",
+      display_name: "Llama-3.1-8B Fast S24",
+      provider: "Meta",
+      endpoint: "@cf/meta/llama-3.1-8b-instruct-fast",
+      modalities: '["text"]',
+      in_modalities: '["text"]',
+      out_modalities: '["text"]',
+      tags: '["#chat","#text_generation","#general"]',
+      context_window: 32768,
+      max_concurrency: 80,
+      active_connections: 0,
+      precision: 0.95,
+      user_rating: 4.96,
+      usage_count: 100,
+      cost_per_1k_tokens: 1,
+      cost_per_invocation: 0,
+      status: "active",
+      is_generalist: 1,
+      prior_score: 0.25,
+      scenario_anchors: "[]",
+      inference_target: "edge",
+      auth_mode: "none",
+      api_format: "workers_ai"
+    }
+  );
+  const scen24Req = new Request("https://nanomesh.local/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: `session=${scen24Token}` },
+    body: JSON.stringify({
+      clientOpId: "op_scen24_switch_lock",
+      isReRun: false,
+      reRouteMode: "switch_model",
+      chosenTemplateId: "tpl-direct-chat",
+      chosenRoleModels: { "role-direct-chat": "cf-qwen3.8-s24" },
+      envelope: {
+        envelope_id: "env_scen24",
+        session_id: "sess_scen24",
+        round_index: 1,
+        instruction_payload: "Test strict model switch lock",
+        assets_manifest: [],
+        constraint_context: { target_language: "zh", output_style: "concise" },
+        metadata: { client_timestamp: Date.now(), char_count_total: 20, estimated_input_tokens: 20 }
+      }
+    })
+  });
+  const scen24Res = await handleChat(scen24Req, env);
+  assert.equal(scen24Res.status, 200);
+  const scen24Sse = await scen24Res.text();
+  (env.AI as any).run = prevAiRun24;
+  const scen24PlanMatch = scen24Sse.match(/event: dag_plan\ndata: ([^\n]+)/);
+  assert.ok(scen24PlanMatch, "dag_plan event must be emitted");
+  const scen24Plan = JSON.parse(scen24PlanMatch![1]);
+  assert.equal(scen24Plan.nodes[0].selected_model.model_id, "cf-qwen3.8-s24");
+  assert.ok(
+    Array.isArray(scen24Plan.nodes[0].standby_models) &&
+      scen24Plan.nodes[0].standby_models.length > 0,
+    "dag_plan must still include standby_models so UI Inspector dropdown retains candidate choices"
+  );
+  assert.equal(
+    scen24StandbyAttempted,
+    false,
+    "switch_model execution must NOT fail over to standby_models"
+  );
+  assert.ok(!scen24Sse.includes("event: node_failover"));
+  assert.ok(scen24Sse.includes("event: dag_error"));
+  console.log(
+    "  ✓ Scenario 24 (switch_model Strict Execution Lock Preserving UI Candidate Options): PASSED"
+  );
+
   console.log("\n==================================================");
-  console.log("   🎉 ALL 23 INTEGRATION SCENARIOS PASSED (100%)! ");
+  console.log("   🎉 ALL 24 INTEGRATION SCENARIOS PASSED (100%)! ");
   console.log("==================================================");
 }
 

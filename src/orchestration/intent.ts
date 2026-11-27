@@ -525,7 +525,7 @@ Rules:
 3. Set needs_wider_recall=true ONLY if the query refers to an asset or branch that does not appear in the recalled list.
 Output JSON only.`;
 
-    const aiResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fp8", {
+    const aiResponse = await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fast", {
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: stateBlock }

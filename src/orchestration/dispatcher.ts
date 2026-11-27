@@ -30,6 +30,7 @@ export interface ExecutionOptions {
   injectedUpstreamText?: string;
   continuationHandshakeId?: string;
   billingPhaseLabel?: string;
+  allowStandbyFailover?: boolean;
   runId?: string;
   planHash?: string;
   stepOutputs?: Record<string, string>;
@@ -625,7 +626,32 @@ function extractChunkText(it: any): string {
   return "";
 }
 
-async function parseAIResponse(aiRes: any, onChunk?: (chunk: string) => void): Promise<string> {
+interface StreamParseOptions {
+  signal?: AbortSignal;
+  idleTimeoutMs?: number;
+  maxTotalMs?: number;
+}
+
+async function readStreamChunkWithTimeout(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  idleTimeoutMs: number,
+  totalDeadlineMs: number,
+  signal?: AbortSignal
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  const remainingTotal = totalDeadlineMs - Date.now();
+  if (remainingTotal <= 0) {
+    await reader.cancel().catch(() => {});
+    throw new Error(`Stream exceeded max total timeout`);
+  }
+  const waitMs = Math.min(idleTimeoutMs, remainingTotal);
+  return await callWithTimeout(() => reader.read(), waitMs, signal);
+}
+
+async function parseAIResponse(
+  aiRes: any,
+  onChunk?: (chunk: string) => void,
+  streamOptions?: StreamParseOptions
+): Promise<string> {
   if (!aiRes) return "";
   if (typeof aiRes === "string") return sanitizeLLMOutput(aiRes);
   if (
@@ -661,19 +687,58 @@ async function parseAIResponse(aiRes: any, onChunk?: (chunk: string) => void): P
     }
   }
 
-  // If aiRes is a ReadableStream (e.g. Workers AI streaming models)
+  // If aiRes is a ReadableStream (e.g. Workers AI or OpenAI-compatible SSE streaming)
   if (typeof aiRes.getReader === "function") {
-    try {
-      const reader = aiRes.getReader();
-      const decoder = new TextDecoder();
-      let streamBuffer = "";
-      let text = "";
-      let latestAnswer = "";
-      let latestReasoning = "";
-      let rawAccumulated = "";
+    const reader = aiRes.getReader();
+    const decoder = new TextDecoder();
+    const idleTimeoutMs = streamOptions?.idleTimeoutMs ?? 30000;
+    const totalDeadlineMs = Date.now() + (streamOptions?.maxTotalMs ?? 150000);
+    let streamBuffer = "";
+    let text = "";
+    let latestAnswer = "";
+    let latestReasoning = "";
+    let visionAnswer = "";
+    let rawAccumulated = "";
 
+    const consumeSseLine = (rawLine: string) => {
+      const trimmed = rawLine.trim();
+      if (!trimmed.startsWith("data: ") || trimmed === "data: [DONE]") return;
+      try {
+        const parsed = JSON.parse(trimmed.slice(6));
+        const items = Array.isArray(parsed) ? parsed : [parsed];
+        for (const it of items) {
+          if (typeof it?.chunk?.answer === "string" && it.chunk.answer) {
+            visionAnswer = it.chunk.answer;
+            continue;
+          }
+          const chunk = extractChunkText(it);
+          if (chunk) {
+            text += chunk;
+            if (onChunk) onChunk(chunk);
+          }
+          if (it.answer !== undefined && it.answer !== null) {
+            latestAnswer += String(it.answer);
+          }
+          if (it.reasoning && typeof it.reasoning.text === "string" && it.reasoning.text) {
+            latestReasoning = it.reasoning.text;
+          }
+          const deltaReasoning =
+            it.choices?.[0]?.delta?.reasoning_content ?? it.choices?.[0]?.delta?.reasoning;
+          if (typeof deltaReasoning === "string" && deltaReasoning) {
+            latestReasoning += deltaReasoning;
+          }
+        }
+      } catch {}
+    };
+
+    try {
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await readStreamChunkWithTimeout(
+          reader,
+          idleTimeoutMs,
+          totalDeadlineMs,
+          streamOptions?.signal
+        );
         if (done) break;
         const decoded = decoder.decode(value, { stream: true });
         streamBuffer += decoded;
@@ -683,69 +748,18 @@ async function parseAIResponse(aiRes: any, onChunk?: (chunk: string) => void): P
         streamBuffer = lines.pop() || ""; // Keep incomplete trailing fragment across chunk boundaries!
 
         for (const line of lines) {
-          const trimmed = line.trim();
-          if (trimmed.startsWith("data: ") && trimmed !== "data: [DONE]") {
-            try {
-              const parsed = JSON.parse(trimmed.slice(6));
-              const items = Array.isArray(parsed) ? parsed : [parsed];
-              for (const it of items) {
-                const chunk = extractChunkText(it);
-                if (chunk) {
-                  text += chunk;
-                  if (onChunk) onChunk(chunk);
-                }
-                if (it.answer !== undefined && it.answer !== null) {
-                  latestAnswer += String(it.answer);
-                }
-                if (it.reasoning && typeof it.reasoning.text === "string" && it.reasoning.text) {
-                  latestReasoning = it.reasoning.text;
-                }
-                if (it.choices?.[0]?.delta?.reasoning_content) {
-                  latestReasoning += String(it.choices[0].delta.reasoning_content);
-                }
-              }
-            } catch (e) {}
-          }
+          consumeSseLine(line);
         }
       }
 
-      // Check remaining tail buffer
-      if (streamBuffer.trim().startsWith("data: ") && streamBuffer.trim() !== "data: [DONE]") {
-        try {
-          const parsed = JSON.parse(streamBuffer.trim().slice(6));
-          const items = Array.isArray(parsed) ? parsed : [parsed];
-          for (const it of items) {
-            const chunk = extractChunkText(it);
-            if (chunk) {
-              text += chunk;
-              if (onChunk) onChunk(chunk);
-            }
-            if (it.answer !== undefined && it.answer !== null) {
-              latestAnswer += String(it.answer);
-            }
-            if (it.reasoning && typeof it.reasoning.text === "string")
-              latestReasoning = it.reasoning.text;
-            if (it.choices?.[0]?.delta?.reasoning_content) {
-              latestReasoning += String(it.choices[0].delta.reasoning_content);
-            }
-          }
-        } catch (e) {}
+      if (streamBuffer.trim()) {
+        consumeSseLine(streamBuffer);
       }
 
-      if (text.trim()) {
-        const full =
-          latestReasoning && !text.includes(latestReasoning)
-            ? `${latestReasoning}\n\n${text}`
-            : text;
-        return sanitizeLLMOutput(full);
-      }
-
-      if (latestAnswer || latestReasoning) {
-        const parts = [latestReasoning, latestAnswer].filter(Boolean);
-        return sanitizeLLMOutput(parts.join("\n\n"));
-      }
-
+      if (visionAnswer) return sanitizeLLMOutput(visionAnswer);
       if (text.trim()) return sanitizeLLMOutput(text);
+      if (latestAnswer.trim()) return sanitizeLLMOutput(latestAnswer);
+      if (latestReasoning.trim()) return sanitizeLLMOutput(latestReasoning);
 
       // Robust fallback: search in rawAccumulated
       const reasoningMatches = rawAccumulated.match(/"text"\s*:\s*"((?:[^"\\]|\\.)*)"/);
@@ -764,7 +778,9 @@ async function parseAIResponse(aiRes: any, onChunk?: (chunk: string) => void): P
         } catch (e) {}
       }
     } catch (streamErr) {
-      console.warn("Error reading stream from Workers AI:", streamErr);
+      await reader.cancel().catch(() => {});
+      console.warn("Error reading stream from AI endpoint:", streamErr);
+      throw streamErr;
     }
   }
 
@@ -831,6 +847,7 @@ export async function executeDAGStream(
   let hasEmittedTokens = false;
   let isLedgerSettled = false;
   let totalCost = 0;
+  let exhaustedPool: { role: string; models: string[] } | undefined;
   const billingPhaseKey =
     options.billingPhaseLabel ||
     (options.continuationHandshakeId
@@ -1817,16 +1834,17 @@ export async function executeDAGStream(
             }
 
             // 4. Candidate Models: ordered pool composed of Primary model followed by Standby models.
-            // Pre-filtered by hardFilterModels and ranked deterministically by scoreAndRankRoleModels.
-            const candidateModels: ModelMetadata[] = [
-              node.selected_model,
-              ...node.standby_models
-            ].filter(
+            // Top2/Top3 failover applies ONLY to automatic orchestration; switch_model / retry stays strictly pinned.
+            const candidateModels: ModelMetadata[] = (
+              options.allowStandbyFailover === false
+                ? [node.selected_model]
+                : [node.selected_model, ...node.standby_models]
+            ).filter(
               (m, i, arr) =>
                 m && m.endpoint && arr.findIndex((x) => x.model_id === m.model_id) === i
             );
 
-            // 5. Execute candidate pool sequentially (Primary -> Standby Failover)
+            // 5. Execute candidate pool sequentially (Primary -> Standby Failover when permitted)
             let isExecutionSuccess = false;
             let didStreamChunks = false;
             actualExecutingModel = node.selected_model;
@@ -1839,6 +1857,7 @@ export async function executeDAGStream(
             for (let attemptIdx = 0; attemptIdx < candidateModels.length; attemptIdx++) {
               const currentCandidate = candidateModels[attemptIdx];
               const endpoint = currentCandidate.endpoint;
+              let candidateDidStreamChunks = false;
 
               // Incremental pre-deduction guard for pricier standby cloud models (prevents 1-credit failover abuse)
               if (attemptIdx > 0 && currentCandidate.inference_target !== "browser") {
@@ -2092,9 +2111,9 @@ export async function executeDAGStream(
                     roleId: node.role.role_id
                   });
 
-                  const parsed = await callWithTimeout(
+                  const fRes = await callWithTimeout(
                     async (callSignal) => {
-                      const fRes = await fetch(targetUrl, {
+                      const res = await fetch(targetUrl, {
                         method: "POST",
                         headers: reqHeaders,
                         body: payloadStr,
@@ -2103,41 +2122,59 @@ export async function executeDAGStream(
                       });
 
                       // Defense-in-depth: Strictly block HTTP redirects to eliminate SSRF bypass
-                      if (fRes.status >= 300 && fRes.status < 400) {
+                      if (res.status >= 300 && res.status < 400) {
                         throw new Error(
-                          `[SECURITY_REJECTED] 算力终端禁止 HTTP 重定向 (Status ${fRes.status})`
+                          `[SECURITY_REJECTED] 算力终端禁止 HTTP 重定向 (Status ${res.status})`
                         );
                       }
 
                       // Fail-fast on authentication or tampering violations (do not failover on security errors)
-                      if (fRes.status === 401 || fRes.status === 403) {
-                        const errText = await fRes.text().catch(() => "");
+                      if (res.status === 401 || res.status === 403) {
+                        const errText = await res.text().catch(() => "");
                         throw new Error(
-                          `[SECURITY_REJECTED] 算力网关鉴权拒绝 (HTTP ${fRes.status}): ${errText}`
+                          `[SECURITY_REJECTED] 算力网关鉴权拒绝 (HTTP ${res.status}): ${errText}`
                         );
                       }
 
-                      if (!fRes.ok) {
-                        const errText = await fRes.text().catch(() => "");
-                        throw new Error(`HTTP ${fRes.status}: ${errText || fRes.statusText}`);
+                      if (!res.ok) {
+                        const errText = await res.text().catch(() => "");
+                        throw new Error(`HTTP ${res.status}: ${errText || res.statusText}`);
                       }
 
-                      const isMediaOut = currentCandidate.out_modalities?.some(
-                        (m) => m === "image" || m === "audio"
-                      );
-                      if (isTailNode && fRes.body && !isMediaOut) {
-                        return await parseAIResponse(fRes.body, (chunkText) => {
-                          if (chunkText) {
-                            didStreamChunks = true;
-                            hasEmittedTokens = true;
-                            sendEvent("text_chunk", {
-                              role_id: node.role.role_id,
-                              chunk: chunkText,
-                              cache_hit: false
-                            });
-                          }
-                        });
-                      } else {
+                      return res;
+                    },
+                    45000,
+                    abortController.signal
+                  );
+
+                  const isMediaOut = currentCandidate.out_modalities?.some(
+                    (m) => m === "image" || m === "audio"
+                  );
+                  let parsed = "";
+                  if (isTailNode && fRes.body && !isMediaOut) {
+                    parsed = await parseAIResponse(
+                      fRes.body,
+                      (chunkText) => {
+                        if (chunkText) {
+                          candidateDidStreamChunks = true;
+                          didStreamChunks = true;
+                          hasEmittedTokens = true;
+                          sendEvent("text_chunk", {
+                            role_id: node.role.role_id,
+                            chunk: chunkText,
+                            cache_hit: false
+                          });
+                        }
+                      },
+                      {
+                        signal: abortController.signal,
+                        idleTimeoutMs: 30000,
+                        maxTotalMs: 150000
+                      }
+                    );
+                  } else {
+                    parsed = await callWithTimeout(
+                      async () => {
                         const jsonRes: any = await fRes.json().catch(() => ({}));
                         if (currentCandidate.out_modalities?.includes("image")) {
                           let b64Str = jsonRes.data?.[0]?.b64_json;
@@ -2266,18 +2303,27 @@ export async function executeDAGStream(
                           }
                         }
                         return await parseAIResponse(jsonRes);
-                      }
-                    },
-                    45000,
-                    abortController.signal
-                  );
+                      },
+                      45000,
+                      abortController.signal
+                    );
+                  }
 
-                  if (parsed && parsed.length > 5) {
+                  if (
+                    parsed &&
+                    (parsed.trim().length > 1 ||
+                      (candidateDidStreamChunks && parsed.trim().length > 0))
+                  ) {
                     nodeOutput = parsed;
                     actualExecutingModel = currentCandidate;
                     isExecutionSuccess = true;
                     break;
                   } else {
+                    if (candidateDidStreamChunks) {
+                      throw new Error(
+                        `[${currentCandidate.display_name}]: 流式输出中途截断且未形成完整内容`
+                      );
+                    }
                     candidateErrors.push(
                       `[${currentCandidate.display_name}]: 输出过短或空 (len=${parsed?.length || 0})`
                     );
@@ -2288,13 +2334,19 @@ export async function executeDAGStream(
                     () =>
                       env.AI.run(endpoint as any, {
                         task: "query",
-                        prompt: guardedPromptContent,
+                        question: guardedPromptContent,
+                        reasoning: false,
+                        stream: true,
                         image: imageB64
                       }),
                     35000,
                     abortController.signal
                   );
-                  const parsed = await parseAIResponse(aiRes);
+                  const parsed = await parseAIResponse(aiRes, undefined, {
+                    signal: abortController.signal,
+                    idleTimeoutMs: 25000,
+                    maxTotalMs: 45000
+                  });
                   if (parsed && parsed.length > 5) {
                     nodeOutput = parsed;
                     actualExecutingModel = currentCandidate;
@@ -2311,7 +2363,7 @@ export async function executeDAGStream(
                     () =>
                       env.AI.run(endpoint as any, {
                         prompt: guardedPromptContent,
-                        image: imageBytes,
+                        image: Array.isArray(imageBytes) ? imageBytes : Array.from(imageBytes),
                         max_tokens: 512
                       }),
                     40000,
@@ -2334,7 +2386,7 @@ export async function executeDAGStream(
                     () =>
                       env.AI.run(endpoint as any, {
                         prompt: guardedPromptContent,
-                        image: imageBytes,
+                        image: Array.isArray(imageBytes) ? imageBytes : Array.from(imageBytes),
                         max_tokens: 512
                       }),
                     40000,
@@ -2356,7 +2408,7 @@ export async function executeDAGStream(
                   const aiRes: any = await callWithTimeout(
                     () =>
                       env.AI.run(endpoint as any, {
-                        audio: audioBytes
+                        audio: Array.isArray(audioBytes) ? audioBytes : Array.from(audioBytes)
                       }),
                     45000,
                     abortController.signal
@@ -2481,42 +2533,64 @@ export async function executeDAGStream(
                   endpoint.startsWith("@cf/")
                 ) {
                   // Text Model Execution with token-by-token streaming on tail node (guarded against context window overflow)
-                  const timeoutMs = endpoint.includes("qwq") ? 45000 : 35000;
+                  const isLargeEdgeModel = /(?:qwen3|gemma-4|qwq|27b|32b|70b)/i.test(endpoint);
+                  const ttfbTimeoutMs = isLargeEdgeModel ? 45000 : 35000;
+                  const workersAiPayload: Record<string, any> = {
+                    messages: builtMessages.openaiMessages,
+                    stream: isTailNode,
+                    max_tokens: 2560,
+                    temperature: 0.2
+                  };
+                  if (endpoint.includes("qwen3") || endpoint.includes("gemma-4")) {
+                    workersAiPayload.chat_template_kwargs = { enable_thinking: false };
+                  }
                   const aiRes = await callWithTimeout(
-                    () =>
-                      env.AI.run(endpoint as any, {
-                        messages: builtMessages.openaiMessages,
-                        stream: isTailNode,
-                        max_tokens: 2560,
-                        temperature: 0.2
-                      }),
-                    timeoutMs,
+                    () => env.AI.run(endpoint as any, workersAiPayload),
+                    ttfbTimeoutMs,
                     abortController.signal
                   );
-                  const parsed = await parseAIResponse(aiRes, (chunkText) => {
-                    if (isTailNode && chunkText) {
-                      didStreamChunks = true;
-                      hasEmittedTokens = true;
-                      sendEvent("text_chunk", {
-                        role_id: node.role.role_id,
-                        chunk: chunkText,
-                        cache_hit: false
-                      });
+                  const parsed = await parseAIResponse(
+                    aiRes,
+                    (chunkText) => {
+                      if (isTailNode && chunkText) {
+                        candidateDidStreamChunks = true;
+                        didStreamChunks = true;
+                        hasEmittedTokens = true;
+                        sendEvent("text_chunk", {
+                          role_id: node.role.role_id,
+                          chunk: chunkText,
+                          cache_hit: false
+                        });
+                      }
+                    },
+                    {
+                      signal: abortController.signal,
+                      idleTimeoutMs: 30000,
+                      maxTotalMs: 120000
                     }
-                  });
-                  if (parsed && parsed.length > 5) {
+                  );
+                  if (
+                    parsed &&
+                    (parsed.trim().length > 1 ||
+                      (candidateDidStreamChunks && parsed.trim().length > 0))
+                  ) {
                     nodeOutput = parsed;
                     actualExecutingModel = currentCandidate;
                     isExecutionSuccess = true;
                     break;
                   } else {
+                    if (candidateDidStreamChunks) {
+                      throw new Error(
+                        `[${currentCandidate.display_name}]: 流式输出中途截断且未形成完整内容`
+                      );
+                    }
                     candidateErrors.push(
                       `[${currentCandidate.display_name}]: 解析输出过短或空 (len=${parsed?.length || 0})`
                     );
                   }
                 }
               } catch (execErr: any) {
-                if (execErr.message?.includes("[SECURITY_REJECTED]")) {
+                if (execErr.message?.includes("[SECURITY_REJECTED]") || candidateDidStreamChunks) {
                   throw execErr;
                 }
                 candidateErrors.push(`[${currentCandidate.display_name}]: ${execErr.message}`);
@@ -2535,6 +2609,10 @@ export async function executeDAGStream(
 
             // 6. Fail-fast: if all top candidate models in role pool failed, terminate without arbitrary fallback
             if (!isExecutionSuccess || !nodeOutput.trim()) {
+              exhaustedPool = {
+                role: node.role.name_zh,
+                models: candidateModels.map((m) => m.display_name)
+              };
               throw new Error(
                 `岗位【${node.role.name_zh}】的仲裁候选模型池（${candidateModels.map((m) => m.display_name).join(", ")}）全部执行失败或超时。原因：${candidateErrors.join("；")}`
               );
@@ -2891,10 +2969,11 @@ export async function executeDAGStream(
         }
         // Unconditionally release pre-deducted reservation if DAG fails to deliver end-to-end (All-or-Nothing delivery)
         await refundReservedCredit();
+        const publicFailure = exhaustedPool
+          ? `岗位【${exhaustedPool.role}】未能取得有效结果。候选模型：${exhaustedPool.models.join("、")}。`
+          : "Task execution encountered an error. Please try again later.";
         const safeErrorMsg =
-          env.ENVIRONMENT === "production"
-            ? "Task execution encountered an error. Please try again later."
-            : err.message || "Execution error";
+          env.ENVIRONMENT === "production" ? publicFailure : err.message || "Execution error";
         if (options.onFinishWithoutCommit) {
           await options.onFinishWithoutCommit({
             outcome: "FAILED",

@@ -3903,9 +3903,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     } else {
       if (rerouteBtn) {
-        rerouteBtn.disabled = true;
-        rerouteBtn.classList.remove('active');
-        if (labelEl) labelEl.textContent = isEn ? 'Reroute' : '重新路由';
+        const retry = canRetryFailedCanvas();
+        rerouteBtn.disabled = !retry;
+        rerouteBtn.classList.toggle('active', retry);
+        if (labelEl) labelEl.textContent = retry
+          ? (isEn ? 'Retry this run' : '按原配置重试')
+          : (isEn ? 'Reroute' : '重新路由');
       }
       if (inputArea) {
         inputArea.classList.remove('pending-canvas-sync');
@@ -4078,8 +4081,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
+  function canRetryFailedCanvas() {
+    return !!(currentActiveAssistantId && window.currentRunningTemplateId &&
+      window._currentRoundFrozenInput?.failedAssistantId === currentActiveAssistantId &&
+      !isWorkflowExecuting && !isAwaitingCommitResolution);
+  }
+
   function applyPendingCanvasChanges() {
-    if (isWorkflowExecuting || isAwaitingCommitResolution || !window.pendingModifiedRoleIds || window.pendingModifiedRoleIds.size === 0) return;
+    if (isWorkflowExecuting || isAwaitingCommitResolution ||
+        (!window.pendingModifiedRoleIds?.size && !canRetryFailedCanvas())) return;
 
     // 2-Phase Commit Step 1: Stash draft copy before in-flight dispatch
     window._stagedCanvasDraft = captureCanvasSnapshotDraft('switch_model');
@@ -5029,6 +5039,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     } catch (err) {
       rollbackTurnToPreFlight();
+      if (err.name !== 'AbortError' && window._currentRoundFrozenInput && assistantId === currentActiveAssistantId && window.currentRunningTemplateId) {
+        window._currentRoundFrozenInput.failedAssistantId = assistantId;
+      }
       setWorkflowExecutionLocked(false);
       if (streamingRafMap.has(assistantId)) {
         cancelAnimationFrame(streamingRafMap.get(assistantId));
@@ -6278,6 +6291,28 @@ document.addEventListener('DOMContentLoaded', async () => {
           };
         }
       }
+      if (data.fallback_model_id && targetNodeId) {
+        window.originalNodeConfigs = window.originalNodeConfigs || {};
+        const prevPrompt = window.originalNodeConfigs[targetNodeId]?.custom_prompt ?? '';
+        window.originalNodeConfigs[targetNodeId] = {
+          model_id: data.fallback_model_id,
+          custom_prompt: prevPrompt
+        };
+        if (!window.pendingModifiedRoleIds || !window.pendingModifiedRoleIds.has(targetNodeId)) {
+          window.activeChosenRoleModels = window.activeChosenRoleModels || {};
+          window.activeChosenRoleModels[targetNodeId] = data.fallback_model_id;
+        }
+        updateNodeDirtyState(targetNodeId);
+      }
+      const failoverStepsContainer = document.getElementById('assistant-steps-' + currentActiveAssistantId);
+      if (failoverStepsContainer && data.fallback_model) {
+        const failoverBadge = document.createElement('div');
+        failoverBadge.className = 'assistant-step-badge warning';
+        const fromLabel = data.failed_model || data.failed_model_id || '';
+        const toLabel = data.fallback_model;
+        failoverBadge.innerHTML = `<span>⚠️</span> <span>${escapeHtml(fromLabel ? `${fromLabel} → ${toLabel}` : toLabel)}</span>`;
+        failoverStepsContainer.appendChild(failoverBadge);
+      }
       if (typeof showToast === 'function') {
         showToast(isEn ? (data.reason_en || 'Failover to standby node') : (data.reason_zh || '故障转移至备选节点'), 'warning');
       }
@@ -6479,6 +6514,9 @@ document.addEventListener('DOMContentLoaded', async () => {
           rollbackStagedCanvasDraft();
         }
       } else {
+        if (window._currentRoundFrozenInput) {
+          window._currentRoundFrozenInput.failedAssistantId = null;
+        }
         commitStagedCanvasDraft(data.nodes || activeDagNodes);
       }
 
@@ -6686,6 +6724,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
     } else if (event === 'dag_error') {
       rollbackTurnToPreFlight();
+      if (window._currentRoundFrozenInput && assistantId === currentActiveAssistantId) {
+        window._currentRoundFrozenInput.failedAssistantId = assistantId;
+      }
       setWorkflowExecutionLocked(false);
       requestAnimationFrame(() => renderDagSvgConnectors());
       if (streamingRafMap.has(assistantId)) {

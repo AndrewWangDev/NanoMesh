@@ -15,7 +15,8 @@ export async function computeDeterministicSignature(
 ): Promise<string> {
   const safeUser = userId || "anonymous";
   const safeSession = sessionId || "default-session";
-  const raw = `${safeUser}::${safeSession}::${roleId}::${modelId}::${inputSourceDigest}::${injectedPrompt}`;
+  const modelSignature = modelId === "cf-moondream-9b" ? modelId + ":query-v2" : modelId;
+  const raw = `${safeUser}::${safeSession}::${roleId}::${modelSignature}::${inputSourceDigest}::${injectedPrompt}`;
   const msgUint8 = new TextEncoder().encode(raw);
   const hashBuffer = await crypto.subtle.digest("SHA-256", msgUint8);
   const hashArray = Array.from(new Uint8Array(hashBuffer));

@@ -2788,7 +2788,7 @@ async function runUnitTests() {
   const mockEscalationEnv: any = {
     AI: {
       run: async (model: string) => {
-        if (model === "@cf/meta/llama-3.1-8b-instruct-fp8") {
+        if (model === "@cf/meta/llama-3.1-8b-instruct-fast") {
           jevCallCount++;
           if (jevCallCount === 1) {
             return {
@@ -2936,7 +2936,7 @@ async function runUnitTests() {
         model_id: "cf-llama",
         display_name: "Llama 8B",
         provider: "CF",
-        endpoint: "@cf/meta/llama-3.1-8b-instruct-fp8",
+        endpoint: "@cf/meta/llama-3.1-8b-instruct-fast",
         modalities: '["text"]',
         in_modalities: '["text"]',
         out_modalities: '["text"]',
@@ -2974,7 +2974,7 @@ async function runUnitTests() {
           });
           return { answers };
         }
-        if (model === "@cf/meta/llama-3.1-8b-instruct-fp8") {
+        if (model === "@cf/meta/llama-3.1-8b-instruct-fast") {
           return {
             response: JSON.stringify({
               intent_op: "CROSS_FUSION",
@@ -4114,9 +4114,219 @@ async function runUnitTests() {
       freshAppJs.includes("window._currentStagedNewFiles = []"),
     "app.js must clear isNew on micro-tuning switch reruns and committed asset lifecycles (NM-STATE-R05a)"
   );
+  assert.ok(
+    freshAppJs.includes("window.originalNodeConfigs[targetNodeId] =") &&
+      freshAppJs.includes("updateNodeDirtyState(targetNodeId)"),
+    "app.js node_failover must sync originalNodeConfigs and dirty state so reverting or re-selecting planned model enables Apply & Rerun"
+  );
+  assert.ok(
+    freshAppJs.includes("window._currentRoundFrozenInput.failedAssistantId = assistantId") &&
+      freshAppJs.includes("window._currentRoundFrozenInput.failedAssistantId = null"),
+    "app.js must track failedAssistantId across both SSE dag_error and pre-stream failures and clear on dag_complete"
+  );
+
+  // Suite 25: Strict switch_model lock, no post-chunk failover, and Qwen3.8/Gemma4 thinking-disable + delta.reasoning handling
+  const makeTestModel = (id: string, name: string, endpoint: string): any => ({
+    model_id: id,
+    display_name: name,
+    provider: "CF",
+    endpoint,
+    modalities: ["text"],
+    in_modalities: ["text"],
+    out_modalities: ["text"],
+    tags: ["#text_generation", "#analysis"],
+    context_window: 32768,
+    max_concurrency: 50,
+    active_connections: 0,
+    precision: 0.95,
+    user_rating: 4.95,
+    usage_count: 10,
+    cost_per_1k_tokens: 1,
+    cost_per_invocation: 0,
+    status: "active",
+    is_generalist: 0,
+    prior_score: 0,
+    scenario_anchors: [],
+    inference_target: "edge",
+    auth_mode: "none",
+    api_format: "workers_ai"
+  });
+  const makeSimpleDag = (primary: any, standby: any[]): any => ({
+    template: {
+      template_id: "tpl-direct-chat",
+      name_zh: "全能直答",
+      name_en: "Direct Inference",
+      desc_zh: "",
+      desc_en: "",
+      head_modalities: ["text"],
+      tail_modalities: ["text"],
+      roles: [],
+      priority: 10,
+      status: "active"
+    },
+    candidate_templates: [],
+    nodes: [
+      {
+        node_id: "role-direct-chat",
+        stage_group: "synthesis_output",
+        depends_on: ["__ORIGIN__"],
+        role: {
+          role_id: "role-direct-chat",
+          name_zh: "综合理解与生成",
+          name_en: "General Synthesis",
+          in_modalities: ["text"],
+          out_modalities: ["text"],
+          in_degree: 0,
+          out_degree: 0,
+          requisition_tags: ["#text_generation"]
+        },
+        selected_model: primary,
+        standby_models: standby,
+        score_details: {
+          model: primary,
+          score: 1,
+          sim: 1,
+          concurrency_penalty: 0,
+          specialist_score: 1
+        },
+        downgraded: false,
+        claimed_assets: []
+      }
+    ],
+    reasoning_trace: {
+      intent_state: null,
+      is_multi_round: false,
+      subsistence_filtered_count: 1,
+      selected_template_id: "tpl-direct-chat",
+      downgrade_events: []
+    }
+  });
+  const makeTestEnv = (runImpl: (endpoint: string, payload: any) => Promise<any>): any => ({
+    ENVIRONMENT: "development",
+    DB: {
+      prepare: () => ({
+        bind: () => ({
+          first: async () => null,
+          all: async () => ({ results: [] }),
+          run: async () => ({ meta: { changes: 1 } })
+        }),
+        all: async () => ({ results: [] })
+      }),
+      batch: async () => []
+    },
+    AI: { run: runImpl }
+  });
+  const sampleEnvelope: any = {
+    envelope_id: "env_s25",
+    session_id: "sess_s25",
+    round_index: 1,
+    instruction_payload: "Summarize cleanly",
+    assets_manifest: [],
+    constraint_context: { target_language: "zh", output_style: "concise" },
+    metadata: { client_timestamp: Date.now(), char_count_total: 17, estimated_input_tokens: 20 }
+  };
+
+  // 25.1 allowStandbyFailover=false must NOT invoke standby models when primary fails
+  let s25StandbyInvoked = false;
+  const strictLockStream = await executeDAGStream(
+    makeTestEnv(async (ep) => {
+      if (ep === "@cf/qwen/qwen3.8-27b") {
+        throw new Error("Simulated Qwen3.8 upstream failure");
+      }
+      s25StandbyInvoked = true;
+      return { response: "Standby should never run" };
+    }),
+    makeSimpleDag(makeTestModel("cf-qwen3.8-27b", "Qwen3.8-27B", "@cf/qwen/qwen3.8-27b"), [
+      makeTestModel(
+        "cf-llama-3.1-8b-fast",
+        "Llama-3.1-8B Fast",
+        "@cf/meta/llama-3.1-8b-instruct-fast"
+      )
+    ]),
+    sampleEnvelope,
+    { userId: "usr_s25", allowStandbyFailover: false }
+  );
+  const strictLockText = await new Response(strictLockStream).text();
+  assert.equal(
+    s25StandbyInvoked,
+    false,
+    "Strict switch_model lock must never invoke standby models"
+  );
+  assert.ok(!strictLockText.includes("event: node_failover"));
+  assert.ok(strictLockText.includes("event: dag_error"));
+
+  // 25.2 Mid-stream error AFTER emitting text_chunk must NOT fail over and stitch standby output
+  let partialFailoverInvoked = false;
+  const partialStream = await executeDAGStream(
+    makeTestEnv(async (ep) => {
+      if (ep === "@cf/qwen/qwen3.8-27b") {
+        const enc = new TextEncoder();
+        let reads = 0;
+        return new ReadableStream({
+          pull(c) {
+            reads++;
+            if (reads === 1) {
+              c.enqueue(
+                enc.encode('data: {"choices":[{"delta":{"content":"前半截输出内容"}}]}\n\n')
+              );
+            } else {
+              c.error(new Error("Mid-stream reset"));
+            }
+          }
+        });
+      }
+      partialFailoverInvoked = true;
+      return { response: "Stitched standby output" };
+    }),
+    makeSimpleDag(makeTestModel("cf-qwen3.8-27b", "Qwen3.8-27B", "@cf/qwen/qwen3.8-27b"), [
+      makeTestModel(
+        "cf-llama-3.1-8b-fast",
+        "Llama-3.1-8B Fast",
+        "@cf/meta/llama-3.1-8b-instruct-fast"
+      )
+    ]),
+    sampleEnvelope,
+    { userId: "usr_s25", allowStandbyFailover: true }
+  );
+  const partialStreamText = await new Response(partialStream).text();
+  assert.equal(
+    partialFailoverInvoked,
+    false,
+    "Must NOT fail over to standby model once partial text_chunk has streamed"
+  );
+  assert.ok(partialStreamText.includes("event: dag_error"));
+
+  // 25.3 Qwen3.8 & Gemma 4 pass enable_thinking=false and delta.reasoning fallback works when emitted
+  let capturedQwenPayload: any = null;
+  const qwenOkStream = await executeDAGStream(
+    makeTestEnv(async (_ep, payload) => {
+      capturedQwenPayload = payload;
+      const enc = new TextEncoder();
+      return new ReadableStream({
+        start(c) {
+          c.enqueue(enc.encode('data: {"choices":[{"delta":{"reasoning":"内部推理"}}]}\n\n'));
+          c.enqueue(enc.encode('data: {"choices":[{"delta":{"content":"最终简洁回答内容"}}]}\n\n'));
+          c.enqueue(enc.encode("data: [DONE]\n\n"));
+          c.close();
+        }
+      });
+    }),
+    makeSimpleDag(makeTestModel("cf-qwen3.8-27b", "Qwen3.8-27B", "@cf/qwen/qwen3.8-27b"), []),
+    sampleEnvelope,
+    { userId: "usr_s25", allowStandbyFailover: false }
+  );
+  const qwenOkText = await new Response(qwenOkStream).text();
+  assert.equal(capturedQwenPayload?.chat_template_kwargs?.enable_thinking, false);
+  assert.ok(
+    qwenOkText.includes("最终简洁回答内容") && !qwenOkText.includes("内部推理"),
+    "Final streamed answer must exclude internal reasoning when content is present"
+  );
 
   console.log(
     "  ✓ Suite 24 (Frontend public/app.js State Machine, Locked Commit & Rollback Continuity): PASSED"
+  );
+  console.log(
+    "  ✓ Suite 25 (Strict switch_model Lock, No Post-Chunk Failover & Qwen3.8/Gemma4 Handling): PASSED"
   );
 
   console.log("\n==================================================");
