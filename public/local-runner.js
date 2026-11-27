@@ -62,36 +62,19 @@ async function getGenerator(modelEndpoint, onProgress, forceDevice = null) {
 
     console.log(`[LocalRunner] GPU Capability Probe: WebGPU=${hasWebGPU}, shader-f16=${hasF16}`);
 
-    // 2. Try WebGPU if available
+    // 2. Try WebGPU with q4 directly (avoid q4f16 LayerNorm precision corruption on small models like SmolLM2-135M)
     if (hasWebGPU) {
-      if (hasF16) {
-        try {
-          console.log('[LocalRunner] Allocating WebGPU pipeline with q4f16 precision...');
-          gen = await pipeline('text-generation', modelEndpoint, {
-            dtype: 'q4f16',
-            device: 'webgpu',
-            progress_callback: onProgress
-          });
-          usedDevice = 'webgpu';
-        } catch (gpuF16Err) {
-          console.warn('[LocalRunner] WebGPU q4f16 allocation failed, trying WebGPU q4:', gpuF16Err);
-          gen = null;
-        }
-      }
-
-      if (!gen) {
-        try {
-          console.log('[LocalRunner] Allocating WebGPU pipeline with q4 precision...');
-          gen = await pipeline('text-generation', modelEndpoint, {
-            dtype: 'q4',
-            device: 'webgpu',
-            progress_callback: onProgress
-          });
-          usedDevice = 'webgpu';
-        } catch (gpuQ4Err) {
-          console.warn('[LocalRunner] WebGPU q4 allocation failed, falling back to Wasm CPU:', gpuQ4Err);
-          gen = null;
-        }
+      try {
+        console.log('[LocalRunner] Allocating WebGPU pipeline with q4 precision...');
+        gen = await pipeline('text-generation', modelEndpoint, {
+          dtype: 'q4',
+          device: 'webgpu',
+          progress_callback: onProgress
+        });
+        usedDevice = 'webgpu';
+      } catch (gpuQ4Err) {
+        console.warn('[LocalRunner] WebGPU q4 allocation failed, falling back to Wasm CPU:', gpuQ4Err);
+        gen = null;
       }
     }
 
@@ -234,14 +217,16 @@ self.onmessage = async (e) => {
         }
       });
 
+      const generationOptions = {
+        max_new_tokens: 384,
+        do_sample: false,
+        repetition_penalty: 1.1
+      };
+
       let output = null;
       try {
         output = await gen(promptText, {
-          max_new_tokens: 384,
-          do_sample: true,
-          temperature: 0.6,
-          top_p: 0.9,
-          repetition_penalty: 1.25,
+          ...generationOptions,
           streamer
         });
       } catch (genErr) {
@@ -277,11 +262,7 @@ self.onmessage = async (e) => {
           });
 
           output = await gen(promptText, {
-            max_new_tokens: 384,
-            do_sample: true,
-            temperature: 0.6,
-            top_p: 0.9,
-            repetition_penalty: 1.25,
+            ...generationOptions,
             streamer: wasmStreamer
           });
         } else {

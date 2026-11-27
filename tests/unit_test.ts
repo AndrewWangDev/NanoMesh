@@ -4322,6 +4322,106 @@ async function runUnitTests() {
     "Final streamed answer must exclude internal reasoning when content is present"
   );
 
+  // 25.4 data: [DONE] must stop stream reading immediately so post-[DONE] connection drops never fail completed output
+  const postDoneResetStream = await executeDAGStream(
+    makeTestEnv(async () => {
+      const enc = new TextEncoder();
+      let pulls = 0;
+      return new ReadableStream({
+        pull(c) {
+          pulls++;
+          if (pulls === 1) {
+            c.enqueue(
+              enc.encode(
+                'data: {"choices":[{"delta":{"content":"完成回答文本"}}]}\n\ndata: [DONE]\n\n'
+              )
+            );
+          } else {
+            c.error(new Error("Network connection lost."));
+          }
+        }
+      });
+    }),
+    makeSimpleDag(
+      makeTestModel(
+        "cf-llama-3.1-8b-fast",
+        "Llama-3.1-8B Fast",
+        "@cf/meta/llama-3.1-8b-instruct-fast"
+      ),
+      []
+    ),
+    sampleEnvelope,
+    { userId: "usr_s25", allowStandbyFailover: false }
+  );
+  const postDoneResetText = await new Response(postDoneResetStream).text();
+  assert.ok(
+    postDoneResetText.includes("event: dag_complete") &&
+      !postDoneResetText.includes("event: dag_error") &&
+      postDoneResetText.includes("完成回答文本"),
+    "Stream must settle cleanly upon receiving data: [DONE] without failing on post-[DONE] socket drops"
+  );
+
+  // 25.5 Mid-stream disconnect BEFORE data: [DONE] in production must NOT succeed and must surface Chinese streamInterrupted reason
+  let preDoneStandbyInvoked = false;
+  const prodEnv = {
+    ...makeTestEnv(async (ep) => {
+      if (ep === "@cf/qwen/qwen3.8-27b") {
+        const enc = new TextEncoder();
+        let pulls = 0;
+        return new ReadableStream({
+          pull(c) {
+            pulls++;
+            if (pulls === 1) {
+              c.enqueue(enc.encode('data: {"choices":[{"delta":{"content":"半截内容"}}]}\n\n'));
+            } else {
+              c.error(new Error("Network connection lost."));
+            }
+          }
+        });
+      }
+      preDoneStandbyInvoked = true;
+      return { response: "Should not run" };
+    }),
+    ENVIRONMENT: "production"
+  };
+  const preDoneResetStream = await executeDAGStream(
+    prodEnv,
+    makeSimpleDag(makeTestModel("cf-qwen3.8-27b", "Qwen3.8-27B", "@cf/qwen/qwen3.8-27b"), [
+      makeTestModel(
+        "cf-llama-3.1-8b-fast",
+        "Llama-3.1-8B Fast",
+        "@cf/meta/llama-3.1-8b-instruct-fast"
+      )
+    ]),
+    sampleEnvelope,
+    { userId: "usr_s25", allowStandbyFailover: true }
+  );
+  const preDoneResetText = await new Response(preDoneResetStream).text();
+  assert.equal(preDoneStandbyInvoked, false, "Pre-[DONE] mid-stream disconnect must not failover");
+  assert.ok(
+    preDoneResetText.includes("event: dag_error") &&
+      preDoneResetText.includes("流式输出中途连接中断") &&
+      !preDoneResetText.includes("event: dag_complete"),
+    "Production mid-stream disconnect before [DONE] must emit Chinese streamInterrupted dag_error without dag_complete"
+  );
+
+  // 25.6 Frontend WebGPU q4 precision guard and billing local timezone conversion
+  const localRunnerSource = fs.readFileSync(
+    path.resolve(process.cwd(), "public/local-runner.js"),
+    "utf8"
+  );
+  assert.ok(
+    localRunnerSource.includes("dtype: 'q4'") &&
+      !localRunnerSource.includes("dtype: 'q4f16'") &&
+      localRunnerSource.includes("do_sample: false"),
+    "local-runner.js must use q4 (not q4f16) for WebGPU and deterministic decoding"
+  );
+  assert.ok(
+    freshAppJs.includes("function formatLocalDateTime(utcStr)") &&
+      freshAppJs.includes("formatLocalDateTime(item.created_at)"),
+    "app.js billing ledger must convert UTC created_at to browser local time via formatLocalDateTime"
+  );
+
   console.log(
     "  ✓ Suite 24 (Frontend public/app.js State Machine, Locked Commit & Rollback Continuity): PASSED"
   );

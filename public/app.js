@@ -514,6 +514,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   
   
   window.ledgerCache = {};
+
+  function formatLocalDateTime(utcStr) {
+    if (!utcStr) return '';
+    const raw = String(utcStr).trim();
+    const hasTz = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw);
+    const d = new Date(hasTz ? raw : raw.replace(' ', 'T') + 'Z');
+    if (isNaN(d.getTime())) return raw.substring(0, 16);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
   
   function renderLedger(data) {
     const tbody = document.getElementById('billing-tbody');
@@ -558,7 +568,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           </span>
         </td>
         <td class="col-time">
-          <span class="billing-time">${escapeHtml((item.created_at || '').substring(0, 16))}</span>
+          <span class="billing-time">${escapeHtml(formatLocalDateTime(item.created_at))}</span>
         </td>
         <td class="col-delta" style="text-align: right;">
           <div class="billing-delta-val ${deltaClass}">${sign}${Number(item.amount) || 0} ⚡</div>
@@ -5595,7 +5605,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       window._activeLocalRunnerPromise = new Promise((resolve, reject) => {
         try {
           if (!window._localWorker) {
-            window._localWorker = new Worker('/local-runner.js?v=20261127-runtime', { type: 'module' });
+            window._localWorker = new Worker('/local-runner.js?v=20261127-q4fix', { type: 'module' });
           }
           const worker = window._localWorker;
 

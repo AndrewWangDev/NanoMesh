@@ -699,14 +699,27 @@ async function parseAIResponse(
     let latestReasoning = "";
     let visionAnswer = "";
     let rawAccumulated = "";
+    let receivedDone = false;
+    let finishReason: string | null = null;
+    const streamStartedAt = Date.now();
 
     const consumeSseLine = (rawLine: string) => {
       const trimmed = rawLine.trim();
-      if (!trimmed.startsWith("data: ") || trimmed === "data: [DONE]") return;
+      if (!trimmed.startsWith("data:")) return;
+      if (trimmed === "data: [DONE]" || trimmed === "data:[DONE]") {
+        receivedDone = true;
+        return;
+      }
+      const payloadStr = trimmed.slice(5).trim();
+      if (!payloadStr) return;
       try {
-        const parsed = JSON.parse(trimmed.slice(6));
+        const parsed = JSON.parse(payloadStr);
         const items = Array.isArray(parsed) ? parsed : [parsed];
         for (const it of items) {
+          const itemFinishReason = it?.choices?.[0]?.finish_reason;
+          if (typeof itemFinishReason === "string" && itemFinishReason) {
+            finishReason = itemFinishReason;
+          }
           if (typeof it?.chunk?.answer === "string" && it.chunk.answer) {
             visionAnswer = it.chunk.answer;
             continue;
@@ -750,6 +763,19 @@ async function parseAIResponse(
         for (const line of lines) {
           consumeSseLine(line);
         }
+        if (
+          !receivedDone &&
+          (streamBuffer.trim() === "data: [DONE]" || streamBuffer.trim() === "data:[DONE]")
+        ) {
+          receivedDone = true;
+          streamBuffer = "";
+        }
+        if (receivedDone) {
+          // Stop reading immediately on OpenAI [DONE] sentinel so post-DONE socket resets never discard completed output.
+          decoder.decode();
+          await reader.cancel().catch(() => {});
+          break;
+        }
       }
 
       if (streamBuffer.trim()) {
@@ -779,7 +805,10 @@ async function parseAIResponse(
       }
     } catch (streamErr) {
       await reader.cancel().catch(() => {});
-      console.warn("Error reading stream from AI endpoint:", streamErr);
+      console.warn(
+        `Error reading stream from AI endpoint (elapsedMs=${Date.now() - streamStartedAt}, receivedDone=${receivedDone}, finishReason=${finishReason || "none"}, textLen=${text.length}):`,
+        streamErr
+      );
       throw streamErr;
     }
   }
@@ -847,7 +876,7 @@ export async function executeDAGStream(
   let hasEmittedTokens = false;
   let isLedgerSettled = false;
   let totalCost = 0;
-  let exhaustedPool: { role: string; models: string[] } | undefined;
+  let exhaustedPool: { role: string; models: string[]; streamInterrupted?: boolean } | undefined;
   const billingPhaseKey =
     options.billingPhaseLabel ||
     (options.continuationHandshakeId
@@ -2590,7 +2619,15 @@ export async function executeDAGStream(
                   }
                 }
               } catch (execErr: any) {
-                if (execErr.message?.includes("[SECURITY_REJECTED]") || candidateDidStreamChunks) {
+                if (execErr.message?.includes("[SECURITY_REJECTED]")) {
+                  throw execErr;
+                }
+                if (candidateDidStreamChunks) {
+                  exhaustedPool = {
+                    role: node.role.name_zh,
+                    models: [currentCandidate.display_name],
+                    streamInterrupted: true
+                  };
                   throw execErr;
                 }
                 candidateErrors.push(`[${currentCandidate.display_name}]: ${execErr.message}`);
@@ -2970,7 +3007,9 @@ export async function executeDAGStream(
         // Unconditionally release pre-deducted reservation if DAG fails to deliver end-to-end (All-or-Nothing delivery)
         await refundReservedCredit();
         const publicFailure = exhaustedPool
-          ? `岗位【${exhaustedPool.role}】未能取得有效结果。候选模型：${exhaustedPool.models.join("、")}。`
+          ? exhaustedPool.streamInterrupted
+            ? `岗位【${exhaustedPool.role}】模型（${exhaustedPool.models.join("、")}）在流式输出中途连接中断，未生成完整结果。`
+            : `岗位【${exhaustedPool.role}】未能取得有效结果。候选模型：${exhaustedPool.models.join("、")}。`
           : "Task execution encountered an error. Please try again later.";
         const safeErrorMsg =
           env.ENVIRONMENT === "production" ? publicFailure : err.message || "Execution error";
